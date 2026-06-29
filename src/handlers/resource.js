@@ -1,8 +1,8 @@
 import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders } from '../ldp/headers.js';
-import { generateContainerJsonLd, serializeJsonLd } from '../ldp/container.js';
-import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName } from '../utils/url.js';
+import { generateContainerJsonLd, generateLwsContainer, serializeJsonLd } from '../ldp/container.js';
+import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl } from '../utils/url.js';
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
 import {
@@ -341,6 +341,16 @@ export async function handleGet(request, reply) {
     const wantsTurtle = negotiated === RDF_TYPES.TURTLE
       || negotiated === RDF_TYPES.N3
       || negotiated === 'application/n-triples';
+
+    // LWS container representation — only when enabled AND explicitly negotiated.
+    if (request.lwsEnabled && negotiated === RDF_TYPES.LWS_JSON) {
+      const lws = generateLwsContainer(resourceUrl, entries || []);
+      const parent = parentContainerUrl(resourceUrl);
+      if (parent) reply.header('Link', `<${parent}>; rel="up"`);
+      reply.header('Content-Type', RDF_TYPES.LWS_JSON);
+      reply.header('Vary', 'Accept, Authorization, Origin');
+      return reply.send(JSON.stringify(lws, null, 2));
+    }
 
     if (wantsTurtle) {
       // Convert container JSON-LD to Turtle

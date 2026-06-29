@@ -143,6 +143,19 @@ export function getParentContainer(urlPath) {
 }
 
 /**
+ * Get the parent container URL from a full resource URL.
+ * Returns null when called on the storage root (no parent above the origin).
+ * @param {string} url - full URL including scheme (e.g. http://localhost:3000/foo/)
+ * @returns {string|null}
+ */
+export function parentContainerUrl(url) {
+  const u = url.endsWith('/') ? url.slice(0, -1) : url;
+  const i = u.lastIndexOf('/');
+  if (i <= u.indexOf('://') + 2) return null; // at/above origin root
+  return u.slice(0, i + 1);
+}
+
+/**
  * Get resource name from URL path
  * @param {string} urlPath
  * @returns {string}
