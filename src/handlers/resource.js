@@ -334,9 +334,11 @@ export async function handleGet(request, reply) {
     }
 
     // Pick the negotiated RDF type using q-aware Accept parsing (#325).
+    // LWS media type negotiation is always active when lwsEnabled, even
+    // without full conneg — selectContentType handles it independently.
     const acceptHeader = request.headers.accept || '';
-    const negotiated = connegEnabled
-      ? selectContentType(acceptHeader, true)
+    const negotiated = (connegEnabled || request.lwsEnabled)
+      ? selectContentType(acceptHeader, connegEnabled)
       : null;
     const wantsTurtle = negotiated === RDF_TYPES.TURTLE
       || negotiated === RDF_TYPES.N3
@@ -345,10 +347,23 @@ export async function handleGet(request, reply) {
     // LWS container representation — only when enabled AND explicitly negotiated.
     if (request.lwsEnabled && negotiated === RDF_TYPES.LWS_JSON) {
       const lws = generateLwsContainer(resourceUrl, entries || []);
+      const headers = getAllHeaders({
+        isContainer: true,
+        etag: stats.etag,
+        contentType: RDF_TYPES.LWS_JSON,
+        origin,
+        resourceUrl,
+        connegEnabled,
+        mashlibEnabled: request.mashlibEnabled
+      });
+      headers['Cache-Control'] = RDF_CACHE_CONTROL;
       const parent = parentContainerUrl(resourceUrl);
-      if (parent) reply.header('Link', `<${parent}>; rel="up"`);
-      reply.header('Content-Type', RDF_TYPES.LWS_JSON);
-      reply.header('Vary', 'Accept, Authorization, Origin');
+      if (parent) {
+        headers['Link'] = headers['Link']
+          ? `${headers['Link']}, <${parent}>; rel="up"`
+          : `<${parent}>; rel="up"`;
+      }
+      Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
       return reply.send(JSON.stringify(lws, null, 2));
     }
 
