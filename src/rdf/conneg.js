@@ -205,8 +205,8 @@ export async function fromJsonLd(jsonLd, targetType, baseUri, connegEnabled = fa
  * - `Authorization` — response body depends on the authenticated user (WAC)
  * - `Origin` — CORS headers echo the request's Origin
  */
-export function getVaryHeader(connegEnabled, mashlibEnabled = false) {
-  return (connegEnabled || mashlibEnabled)
+export function getVaryHeader(connegEnabled, mashlibEnabled = false, lwsEnabled = false) {
+  return (connegEnabled || mashlibEnabled || lwsEnabled)
     ? 'Accept, Authorization, Origin'
     : 'Authorization, Origin';
 }

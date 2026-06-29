@@ -84,4 +84,22 @@ describe('LWS container conformance (e2e)', () => {
     const ct = (res.headers.get('content-type') || '').split(';')[0].trim();
     assert.equal(ct, 'application/ld+json', 'default GET without lws+json Accept must remain LDP');
   });
+
+  it('Vary header includes Accept for lws+json response when --lws on (cache correctness)', async () => {
+    const res = await request('/alice/public/notes/', {
+      headers: { Accept: 'application/lws+json' }
+    });
+    assertStatus(res, 200);
+    const vary = res.headers.get('vary') || '';
+    assert.ok(vary.toLowerCase().includes('accept'), `Vary must include Accept for lws+json response, got: ${vary}`);
+  });
+
+  it('Vary header includes Accept for ld+json response when --lws on (cache correctness)', async () => {
+    const res = await request('/alice/public/notes/', {
+      headers: { Accept: 'application/ld+json' }
+    });
+    assertStatus(res, 200);
+    const vary = res.headers.get('vary') || '';
+    assert.ok(vary.toLowerCase().includes('accept'), `Vary must include Accept for ld+json response when lws enabled, got: ${vary}`);
+  });
 });

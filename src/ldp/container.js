@@ -90,6 +90,7 @@ const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 export function generateLwsContainer(containerUrl, entries) {
   const baseUrl = containerUrl.endsWith('/') ? containerUrl : containerUrl + '/';
   // LWS excludes all dotfiles (including sidecars like .acl, .meta) from listing
+  // Deliberately excludes all dotfiles (unlike isHiddenEntry which allows .acl/.meta/.well-known) — LWS hides sidecars
   const items = entries.filter(e => !e.name.startsWith('.')).map(e => {
     const id = baseUrl + e.name + (e.isDirectory ? '/' : '');
     const item = { id, type: e.isDirectory ? 'Container' : 'DataResource' };

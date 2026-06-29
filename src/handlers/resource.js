@@ -291,7 +291,7 @@ export async function handleGet(request, reply) {
       const check = checkIfNoneMatchForGet(ifNoneMatch, effectiveEtag);
       if (!check.ok && check.notModified) {
         reply.header('ETag', effectiveEtag);
-        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(304).send();
       }
     }
@@ -354,7 +354,8 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        mashlibEnabled: request.mashlibEnabled
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled
       });
       headers['Cache-Control'] = RDF_CACHE_CONTROL;
       const parent = parentContainerUrl(resourceUrl);
@@ -403,7 +404,8 @@ export async function handleGet(request, reply) {
       origin,
       resourceUrl,
       connegEnabled,
-      mashlibEnabled: request.mashlibEnabled
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled
     });
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -849,6 +851,7 @@ export async function handleHead(request, reply) {
     } else {
       contentType = 'application/ld+json';
     }
+    // TODO(lws-head-parity): mirror the GET lws+json negotiation here (L2)
 
     if (indexExists) {
       // Mirror GET: containers with index.html use the index file's ETag
