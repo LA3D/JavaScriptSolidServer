@@ -34,6 +34,7 @@ export const defaults = {
   // Features
   multiuser: true,
   conneg: false,
+  lws: false,
   notifications: false,
 
   // Identity Provider
@@ -157,6 +158,7 @@ const envMap = {
   JSS_SSL_CERT: 'sslCert',
   JSS_MULTIUSER: 'multiuser',
   JSS_CONNEG: 'conneg',
+  JSS_LWS: 'lws',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
@@ -234,6 +236,7 @@ export function parseSize(str) {
 const BOOLEAN_KEYS = new Set([
   'ssl',
   'conneg',
+  'lws',
   'subdomains',
   'mashlib',
   'mashlibCdn',
@@ -457,6 +460,7 @@ export function printConfig(config) {
     console.log(`  Single-user:   ${details}`);
   }
   console.log(`  Conneg:        ${config.conneg}`);
+  console.log(`  LWS:           ${config.lws}`);
   console.log(`  Notifications: ${config.notifications}`);
   console.log(`  IdP:           ${config.idp ? (config.idpIssuer || 'enabled') : 'disabled'}`);
   console.log(`  Subdomains:    ${config.subdomains ? (config.baseDomain || 'enabled') : 'disabled'}`);
