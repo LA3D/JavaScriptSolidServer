@@ -3,8 +3,10 @@
  */
 
 import { getAcceptHeaders, getVaryHeader } from '../rdf/conneg.js';
+import { storageDescriptionUrl } from '../lws/storage-description.js';
 
 const LDP = 'http://www.w3.org/ns/ldp#';
+const LWS_STORAGE_DESC_REL = 'https://www.w3.org/ns/lws#storageDescription';
 
 /**
  * Get Link headers for a resource
@@ -108,10 +110,17 @@ export function getCorsHeaders(origin) {
  * @returns {object}
  */
 export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null }) {
-  return {
+  const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
   };
+  if (lwsEnabled && resourceUrl) {
+    const sd = `<${storageDescriptionUrl(resourceUrl)}>; rel="${LWS_STORAGE_DESC_REL}"`;
+    const ls = `<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`;
+    const extra = `${sd}, ${ls}`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
+  }
+  return headers;
 }
 
 /**

@@ -16,7 +16,8 @@ export const RDF_TYPES = {
   N3: 'text/n3',
   NTRIPLES: 'application/n-triples',
   RDF_XML: 'application/rdf+xml',  // Not supported, but recognized
-  LWS_JSON: 'application/lws+json'
+  LWS_JSON: 'application/lws+json',
+  LINKSET: 'application/linkset+json'
 };
 
 // Content types we can serve (when conneg enabled)
@@ -36,6 +37,12 @@ export function selectContentType(acceptHeader, connegEnabled = false) {
   // (it is JSON-LD with the lws/v1 context — no Turtle conneg required).
   if (acceptHeader && acceptHeader.toLowerCase().includes(RDF_TYPES.LWS_JSON)) {
     return RDF_TYPES.LWS_JSON;
+  }
+
+  // RFC 9264 linkset is always negotiable when explicitly requested,
+  // independent of the Turtle conneg flag.
+  if (acceptHeader && acceptHeader.toLowerCase().includes(RDF_TYPES.LINKSET)) {
+    return RDF_TYPES.LINKSET;
   }
 
   // If conneg disabled, always return JSON-LD

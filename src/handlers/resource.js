@@ -2,6 +2,8 @@ import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders } from '../ldp/headers.js';
 import { generateContainerJsonLd, generateLwsContainer, serializeJsonLd } from '../ldp/container.js';
+import { generateLinkset } from '../lws/linkset.js';
+import { storageDescriptionUrl } from '../lws/storage-description.js';
 import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl } from '../utils/url.js';
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
@@ -238,7 +240,8 @@ export async function handleGet(request, reply) {
                 contentType: 'text/turtle',
                 origin,
                 resourceUrl,
-                connegEnabled
+                connegEnabled,
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -252,7 +255,8 @@ export async function handleGet(request, reply) {
                 contentType: 'application/ld+json',
                 origin,
                 resourceUrl,
-                connegEnabled
+                connegEnabled,
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -272,7 +276,8 @@ export async function handleGet(request, reply) {
         contentType: 'text/html',
         origin,
         resourceUrl,
-        connegEnabled
+        connegEnabled,
+        lwsEnabled: request.lwsEnabled
       });
 
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -323,7 +328,8 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        mashlibEnabled: request.mashlibEnabled
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled
       });
       headers['X-Frame-Options'] = 'DENY';
       headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -368,6 +374,28 @@ export async function handleGet(request, reply) {
       return reply.send(JSON.stringify(lws, null, 2));
     }
 
+    // LWS per-resource linkset — only when enabled AND explicitly negotiated.
+    if (request.lwsEnabled && negotiated === RDF_TYPES.LINKSET) {
+      const ls = generateLinkset(resourceUrl, {
+        parentUrl: parentContainerUrl(resourceUrl),
+        isContainer: true,
+        describedByUrl: storageDescriptionUrl(resourceUrl),
+      });
+      const headers = getAllHeaders({
+        isContainer: true,
+        etag: stats.etag,
+        contentType: RDF_TYPES.LINKSET,
+        origin,
+        resourceUrl,
+        connegEnabled,
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled,
+      });
+      headers['Cache-Control'] = RDF_CACHE_CONTROL;
+      Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+      return reply.send(JSON.stringify(ls, null, 2));
+    }
+
     if (wantsTurtle) {
       // Convert container JSON-LD to Turtle
       try {
@@ -385,7 +413,8 @@ export async function handleGet(request, reply) {
           origin,
           resourceUrl,
           connegEnabled,
-          mashlibEnabled: request.mashlibEnabled
+          mashlibEnabled: request.mashlibEnabled,
+          lwsEnabled: request.lwsEnabled
         });
         headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -487,7 +516,8 @@ export async function handleGet(request, reply) {
       origin,
       resourceUrl,
       connegEnabled,
-      mashlibEnabled: request.mashlibEnabled
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled
     });
     headers['X-Frame-Options'] = 'DENY';
     headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -513,7 +543,8 @@ export async function handleGet(request, reply) {
         contentType: storedContentType,
         origin,
         resourceUrl,
-        connegEnabled
+        connegEnabled,
+        lwsEnabled: request.lwsEnabled
       });
       headers['Content-Range'] = `bytes ${start}-${end}/${stats.size}`;
       headers['Content-Length'] = chunkSize;
@@ -533,6 +564,28 @@ export async function handleGet(request, reply) {
       return reply.code(206).send(streamResult.stream);
     }
     // If range is null (unsupported format or multi-range), fall through to serve full content
+  }
+
+  // LWS per-resource linkset for files — only when enabled AND explicitly negotiated.
+  if (request.lwsEnabled && selectContentType(request.headers.accept || '', connegEnabled) === RDF_TYPES.LINKSET) {
+    const ls = generateLinkset(resourceUrl, {
+      parentUrl: parentContainerUrl(resourceUrl),
+      isContainer: false,
+      describedByUrl: storageDescriptionUrl(resourceUrl),
+    });
+    const headers = getAllHeaders({
+      isContainer: false,
+      etag: stats.etag,
+      contentType: RDF_TYPES.LINKSET,
+      origin,
+      resourceUrl,
+      connegEnabled,
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled,
+    });
+    headers['Cache-Control'] = RDF_CACHE_CONTROL;
+    Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+    return reply.send(JSON.stringify(ls, null, 2));
   }
 
   const content = await storage.read(storagePath);
@@ -572,7 +625,8 @@ export async function handleGet(request, reply) {
             origin,
             resourceUrl,
             connegEnabled,
-            mashlibEnabled: request.mashlibEnabled
+            mashlibEnabled: request.mashlibEnabled,
+            lwsEnabled: request.lwsEnabled
           });
           headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -603,7 +657,8 @@ export async function handleGet(request, reply) {
           origin,
           resourceUrl,
           connegEnabled,
-          mashlibEnabled: request.mashlibEnabled
+          mashlibEnabled: request.mashlibEnabled,
+          lwsEnabled: request.lwsEnabled
         });
         headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -632,7 +687,8 @@ export async function handleGet(request, reply) {
     origin,
     resourceUrl,
     connegEnabled,
-    mashlibEnabled: request.mashlibEnabled
+    mashlibEnabled: request.mashlibEnabled,
+    lwsEnabled: request.lwsEnabled
   });
   if (isRdfContentType(actualContentType)) {
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
@@ -851,7 +907,14 @@ export async function handleHead(request, reply) {
     } else {
       contentType = 'application/ld+json';
     }
-    // TODO(lws-head-parity): mirror the GET lws+json negotiation here (L2)
+    // Mirror GET's LWS negotiation for containers: when lwsEnabled,
+    // lws+json and linkset override whatever conneg chose above.
+    // GET checks (connegEnabled || lwsEnabled); HEAD must do the same.
+    if (request.lwsEnabled) {
+      const lwsNeg = selectContentType(acceptHeader, connegEnabled);
+      if (lwsNeg === RDF_TYPES.LWS_JSON) contentType = RDF_TYPES.LWS_JSON;
+      else if (lwsNeg === RDF_TYPES.LINKSET) contentType = RDF_TYPES.LINKSET;
+    }
 
     if (indexExists) {
       // Mirror GET: containers with index.html use the index file's ETag
@@ -901,6 +964,14 @@ export async function handleHead(request, reply) {
       contentType = negotiation.contentType;
       negotiationConverted = negotiation.converted;
     }
+    // LWS linkset HEAD parity for files: when enabled and explicitly
+    // negotiated, set Content-Type to linkset+json (no body on HEAD).
+    // Generated representation differs in size from stored file, so
+    // mark converted=true to suppress the on-disk Content-Length.
+    if (request.lwsEnabled && selectContentType(request.headers.accept || '', connegEnabled) === RDF_TYPES.LINKSET) {
+      contentType = RDF_TYPES.LINKSET;
+      negotiationConverted = true;
+    }
   }
 
   const headers = getAllHeaders({
@@ -910,7 +981,8 @@ export async function handleHead(request, reply) {
     origin,
     resourceUrl,
     connegEnabled,
-    mashlibEnabled: request.mashlibEnabled
+    mashlibEnabled: request.mashlibEnabled,
+    lwsEnabled: request.lwsEnabled
   });
 
   // Mirror GET's Cache-Control for RDF responses (#552 header parity).

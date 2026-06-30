@@ -34,6 +34,7 @@ import { terminalPlugin } from './terminal/index.js';
 import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
+import { generateStorageDescription } from './lws/storage-description.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -868,6 +869,30 @@ export function createServer(options = {}) {
       // LDP layer returns 404 because there's no on-disk file.
       instance.head('/.well-known/did/nostr/:pubkeyAndExt', wellKnownDidNostr);
     });
+  }
+
+  // LWS Storage Description — served at a fixed path under --lws.
+  // Auth: /.well-known/* is already globally bypassed by the preHandler above
+  // (~line 713) so no additional auth wiring is needed here.
+  if (lwsEnabled) {
+    const lwsStoragePath = '/.well-known/lws-storage';
+    fastify.get(lwsStoragePath, async (request, reply) => {
+      const proto = request.protocol;
+      const host = request.hostname;
+      const root = `${proto}://${host}/`;
+      const services = [{ type: 'StorageDescription', serviceEndpoint: `${proto}://${host}${lwsStoragePath}` }];
+      if (notificationsEnabled) {
+        services.push({ type: 'NotificationService', serviceEndpoint: `${proto}://${host}/notification/api` });
+      }
+      reply.header('Cache-Control', 'public, max-age=3600');
+      reply.type('application/lws+json');
+      return generateStorageDescription(root, services);
+    });
+    // Block writes — this is a read-only well-known resource.
+    // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.
+    for (const m of ['put', 'post', 'patch', 'delete']) {
+      fastify[m](lwsStoragePath, methodNotAllowed);
+    }
   }
 
   // LDP routes - using wildcard routing
