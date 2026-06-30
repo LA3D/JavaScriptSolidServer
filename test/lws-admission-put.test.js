@@ -136,3 +136,96 @@ describe('SHACL admission negative control (lws:OFF)', () => {
     assert.ok(res.status === 201 || res.status === 204, `Expected 201/204 but got ${res.status}`);
   });
 });
+
+// ── advisory-body path suite ─────────────────────────────────────────────────
+// Verifies the ADMIT decision when only Warning/Info constraints fire:
+// handler must return 201/200 with advisories in the JSON body and MUST NOT
+// set a Warning header (RFC 9111 obsoletes it).
+
+// Shape has two property constraints:
+//   _:p1  ex:title  Violation  minCount 1   ← resource WILL satisfy this
+//   _:p2  ex:desc   Info       minCount 1   ← resource will NOT (triggers advisory)
+// Both blank nodes carry an explicit @id so JSS's jsonLdToQuads enqueues them.
+const ADVISORY_SHAPE_LD = JSON.stringify({
+  '@context': { 'sh': 'http://www.w3.org/ns/shacl#', 'ex': 'http://ex/' },
+  '@id': 'http://ex/AdvisoryNoteShape',
+  '@type': 'sh:NodeShape',
+  'sh:targetClass': { '@id': 'http://ex/Note' },
+  'sh:property': [
+    {
+      '@id': '_:p1',
+      'sh:path': { '@id': 'http://ex/title' },
+      'sh:minCount': 1,
+      'sh:severity': { '@id': 'http://www.w3.org/ns/shacl#Violation' },
+      'sh:message': 'title required',
+    },
+    {
+      '@id': '_:p2',
+      'sh:path': { '@id': 'http://ex/desc' },
+      'sh:minCount': 1,
+      'sh:severity': { '@id': 'http://www.w3.org/ns/shacl#Info' },
+      'sh:message': 'consider a description',
+    },
+  ],
+});
+
+describe('SHACL admission advisory-body path (lws:ON)', () => {
+  before(async () => {
+    await startTestServer({ lws: true });
+    await createTestPod('alice');
+    const base = getBaseUrl();
+    // advisory-notes container + shape + container .meta
+    await request('/alice/public/advisory-notes/', { method: 'PUT', auth: 'alice' });
+    await request('/alice/public/shapes/AdvisoryNote', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: ADVISORY_SHAPE_LD,
+      auth: 'alice',
+    });
+    await request('/alice/public/advisory-notes/.meta', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@id': `${base}/alice/public/advisory-notes/`,
+        [DESCRIBEDBY]: { '@id': `${base}/alice/public/shapes/AdvisoryNote` },
+      }),
+      auth: 'alice',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('PUT conforming-on-Violation but missing Info property → 201 + advisories body + no Warning header', async () => {
+    const base = getBaseUrl();
+    const res = await request('/alice/public/advisory-notes/a1', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      // ex:Note WITH ex:title (satisfies Violation) but NO ex:desc (trips Info constraint)
+      body: JSON.stringify({
+        '@context': { 'ex': 'http://ex/' },
+        '@id': `${base}/alice/public/advisory-notes/a1`,
+        '@type': 'ex:Note',
+        'ex:title': 'My Note',
+      }),
+      auth: 'alice',
+    });
+    assert.ok(res.status === 201 || res.status === 200, `Expected 201 (new) or 200 (existing), got ${res.status}`);
+    const body = await res.json();
+    assert.ok(
+      Array.isArray(body.advisories) && body.advisories.length > 0,
+      `Expected non-empty advisories array in body, got ${JSON.stringify(body)}`,
+    );
+    const adv = body.advisories[0];
+    assert.ok(
+      adv.severity === 'Info' || adv.severity === 'Warning',
+      `Expected advisory severity Info or Warning, got ${adv.severity}`,
+    );
+    assert.ok(
+      typeof adv.message === 'string' && adv.message.includes('description'),
+      `Expected advisory message to include "description", got ${adv.message}`,
+    );
+    assert.equal(res.headers.get('warning'), null, 'Warning header must be absent (RFC 9111 obsoletes it)');
+    const link = res.headers.get('link') || '';
+    assert.match(link, /rel="describedby"/, `Link header missing rel="describedby": ${link}`);
+  });
+});
