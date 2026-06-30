@@ -907,7 +907,14 @@ export async function handleHead(request, reply) {
     } else {
       contentType = 'application/ld+json';
     }
-    // TODO(lws-head-parity): mirror the GET lws+json negotiation here (L2)
+    // Mirror GET's LWS negotiation for containers: when lwsEnabled,
+    // lws+json and linkset override whatever conneg chose above.
+    // GET checks (connegEnabled || lwsEnabled); HEAD must do the same.
+    if (request.lwsEnabled) {
+      const lwsNeg = selectContentType(acceptHeader, connegEnabled);
+      if (lwsNeg === RDF_TYPES.LWS_JSON) contentType = RDF_TYPES.LWS_JSON;
+      else if (lwsNeg === RDF_TYPES.LINKSET) contentType = RDF_TYPES.LINKSET;
+    }
 
     if (indexExists) {
       // Mirror GET: containers with index.html use the index file's ETag
@@ -956,6 +963,14 @@ export async function handleHead(request, reply) {
       });
       contentType = negotiation.contentType;
       negotiationConverted = negotiation.converted;
+    }
+    // LWS linkset HEAD parity for files: when enabled and explicitly
+    // negotiated, set Content-Type to linkset+json (no body on HEAD).
+    // Generated representation differs in size from stored file, so
+    // mark converted=true to suppress the on-disk Content-Length.
+    if (request.lwsEnabled && selectContentType(request.headers.accept || '', connegEnabled) === RDF_TYPES.LINKSET) {
+      contentType = RDF_TYPES.LINKSET;
+      negotiationConverted = true;
     }
   }
 
