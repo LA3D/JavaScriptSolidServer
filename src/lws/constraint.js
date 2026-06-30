@@ -7,7 +7,8 @@ async function describedbyFrom(storage, metaPath, baseIri) {
   if (!(await storage.exists(metaPath))) return null;
   let buf;
   try { buf = await storage.read(metaPath); } catch { return null; }
-  const ds = await toDataset(buf, 'application/ld+json', baseIri);
+  let ds;
+  try { ds = await toDataset(buf, 'application/ld+json', baseIri); } catch { return null; }
   for (const q of ds) if (q.predicate.value === DESCRIBEDBY) return q.object.value;
   return null;
 }

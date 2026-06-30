@@ -32,3 +32,10 @@ test('resolveShapeUrl: no .meta anywhere → null (opt-in miss)', async () => {
     containerMetaPath: '/alice/.meta', baseIri: 'http://h/alice/x' });
   assert.equal(got, null);
 });
+
+test('resolveShapeUrl: malformed JSON-LD in .meta → null (parse-corrupt treated as unconstrained)', async () => {
+  const s = fakeStorage({ '/alice/x.meta': Buffer.from('{ this is not valid json-ld') });
+  const got = await resolveShapeUrl({ storage: s, targetMetaPath: '/alice/x.meta',
+    containerMetaPath: '/alice/.meta', baseIri: 'http://h/alice/x' });
+  assert.equal(got, null);
+});
