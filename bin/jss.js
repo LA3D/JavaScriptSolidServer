@@ -92,6 +92,7 @@ program
   .option('--no-multi-user', 'Disable multi-user mode')
   .option('--conneg', 'Enable content negotiation (Turtle support)')
   .option('--no-conneg', 'Disable content negotiation')
+  .option('--lws', 'Enable the W3C Linked Web Storage surface (application/lws+json containers)')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -216,6 +217,7 @@ program
         bodyLimit: config.bodyLimit,
         logger: config.logger,
         conneg: config.conneg,
+        lws: config.lws,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,
@@ -278,6 +280,7 @@ program
         console.log(`\n  Data: ${path.resolve(config.root)}`);
         if (config.ssl) console.log('  SSL:  enabled');
         if (config.conneg) console.log('  Conneg: enabled');
+        if (config.lws) console.log('  LWS: enabled');
         if (config.notifications) console.log('  WebSocket: enabled');
         if (config.idp) console.log(`  IdP: ${idpIssuer}`);
         if (config.subdomains) console.log(`  Subdomains: ${config.baseDomain} (XSS protection enabled)`);

@@ -67,6 +67,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 export function createServer(options = {}) {
   // Content negotiation is OFF by default - we're a JSON-LD native server
   const connegEnabled = options.conneg ?? false;
+  // Linked Web Storage surface is OFF by default
+  const lwsEnabled = options.lws ?? false;
   // WebSocket notifications are OFF by default
   const notificationsEnabled = options.notifications ?? false;
   // Identity Provider is OFF by default
@@ -308,6 +310,7 @@ export function createServer(options = {}) {
   // Raw request body for the application/json parser to stash (#565).
   fastify.decorateRequest('rawBody', null);
   fastify.decorateRequest('connegEnabled', null);
+  fastify.decorateRequest('lwsEnabled', null);
   fastify.decorateRequest('notificationsEnabled', null);
   fastify.decorateRequest('idpEnabled', null);
   fastify.decorateRequest('subdomainsEnabled', null);
@@ -325,6 +328,7 @@ export function createServer(options = {}) {
   fastify.decorateRequest('singleUserName', null);
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
+    request.lwsEnabled = lwsEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
     request.idpEnabled = idpEnabled;
     request.subdomainsEnabled = subdomainsEnabled;

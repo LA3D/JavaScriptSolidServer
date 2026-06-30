@@ -2,6 +2,8 @@
  * Generate container representation as JSON-LD
  */
 
+import mime from 'mime-types';
+
 const LDP = 'http://www.w3.org/ns/ldp#';
 
 // Dotfiles allowed to appear in ldp:contains. Anything else starting with '.'
@@ -73,4 +75,30 @@ export function generateContainerJsonLd(containerUrl, entries) {
  */
 export function serializeJsonLd(jsonLd) {
   return JSON.stringify(jsonLd, null, 2);
+}
+
+const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
+
+/**
+ * Generate the W3C LWS container representation (application/lws+json).
+ * Additive sibling of generateContainerJsonLd — items[] instead of ldp:contains.
+ * Pagination deferred: emits the full membership as a single page.
+ * @param {string} containerUrl
+ * @param {Array<{name:string,isDirectory:boolean,size?:number,modified?:string}>} entries
+ * @returns {object}
+ */
+export function generateLwsContainer(containerUrl, entries) {
+  const baseUrl = containerUrl.endsWith('/') ? containerUrl : containerUrl + '/';
+  // LWS excludes all dotfiles (including sidecars like .acl, .meta) from listing
+  // Deliberately excludes all dotfiles (unlike isHiddenEntry which allows .acl/.meta/.well-known) — LWS hides sidecars
+  const items = entries.filter(e => !e.name.startsWith('.')).map(e => {
+    const id = baseUrl + e.name + (e.isDirectory ? '/' : '');
+    const item = { id, type: e.isDirectory ? 'Container' : 'DataResource' };
+    if (!e.isDirectory) item.mediaType = mime.lookup(e.name) || 'application/octet-stream';
+    if (e.size != null) item.size = e.size;
+    if (e.modified) item.modified = e.modified;
+    return item;
+  });
+  // TODO(lws-pagination): emit ContainerPage with first/next/prev/last when membership is large.
+  return { '@context': LWS_CONTEXT, id: baseUrl, type: 'Container', totalItems: items.length, items };
 }

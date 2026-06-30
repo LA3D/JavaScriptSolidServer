@@ -49,7 +49,7 @@ export function getAclUrl(resourceUrl, isContainer) {
  * @param {object} options
  * @returns {object}
  */
-export function getResponseHeaders({ isContainer = false, etag = null, contentType = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, updatesVia = null }) {
+export function getResponseHeaders({ isContainer = false, etag = null, contentType = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null }) {
   // Calculate ACL URL if resource URL provided
   const aclUrl = resourceUrl ? getAclUrl(resourceUrl, isContainer) : null;
 
@@ -58,7 +58,7 @@ export function getResponseHeaders({ isContainer = false, etag = null, contentTy
     'Accept-Patch': 'text/n3, application/sparql-update',
     'Accept-Ranges': isContainer ? 'none' : 'bytes',
     'Allow': 'GET, HEAD, PUT, DELETE, PATCH, OPTIONS' + (isContainer ? ', POST' : ''),
-    'Vary': getVaryHeader(connegEnabled, mashlibEnabled)
+    'Vary': getVaryHeader(connegEnabled, mashlibEnabled, lwsEnabled)
   };
 
   // Only set WAC-Allow if explicitly provided (otherwise the auth hook sets it)
@@ -107,9 +107,9 @@ export function getCorsHeaders(origin) {
  * @param {object} options
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, updatesVia = null }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null }) {
   return {
-    ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, updatesVia }),
+    ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
   };
 }

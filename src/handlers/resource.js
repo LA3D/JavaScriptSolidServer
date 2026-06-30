@@ -1,8 +1,8 @@
 import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders } from '../ldp/headers.js';
-import { generateContainerJsonLd, serializeJsonLd } from '../ldp/container.js';
-import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName } from '../utils/url.js';
+import { generateContainerJsonLd, generateLwsContainer, serializeJsonLd } from '../ldp/container.js';
+import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl } from '../utils/url.js';
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
 import {
@@ -291,7 +291,7 @@ export async function handleGet(request, reply) {
       const check = checkIfNoneMatchForGet(ifNoneMatch, effectiveEtag);
       if (!check.ok && check.notModified) {
         reply.header('ETag', effectiveEtag);
-        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(304).send();
       }
     }
@@ -334,13 +334,39 @@ export async function handleGet(request, reply) {
     }
 
     // Pick the negotiated RDF type using q-aware Accept parsing (#325).
+    // LWS media type negotiation is always active when lwsEnabled, even
+    // without full conneg — selectContentType handles it independently.
     const acceptHeader = request.headers.accept || '';
-    const negotiated = connegEnabled
-      ? selectContentType(acceptHeader, true)
+    const negotiated = (connegEnabled || request.lwsEnabled)
+      ? selectContentType(acceptHeader, connegEnabled)
       : null;
     const wantsTurtle = negotiated === RDF_TYPES.TURTLE
       || negotiated === RDF_TYPES.N3
       || negotiated === 'application/n-triples';
+
+    // LWS container representation — only when enabled AND explicitly negotiated.
+    if (request.lwsEnabled && negotiated === RDF_TYPES.LWS_JSON) {
+      const lws = generateLwsContainer(resourceUrl, entries || []);
+      const headers = getAllHeaders({
+        isContainer: true,
+        etag: stats.etag,
+        contentType: RDF_TYPES.LWS_JSON,
+        origin,
+        resourceUrl,
+        connegEnabled,
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled
+      });
+      headers['Cache-Control'] = RDF_CACHE_CONTROL;
+      const parent = parentContainerUrl(resourceUrl);
+      if (parent) {
+        headers['Link'] = headers['Link']
+          ? `${headers['Link']}, <${parent}>; rel="up"`
+          : `<${parent}>; rel="up"`;
+      }
+      Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+      return reply.send(JSON.stringify(lws, null, 2));
+    }
 
     if (wantsTurtle) {
       // Convert container JSON-LD to Turtle
@@ -378,7 +404,8 @@ export async function handleGet(request, reply) {
       origin,
       resourceUrl,
       connegEnabled,
-      mashlibEnabled: request.mashlibEnabled
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled
     });
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -824,6 +851,7 @@ export async function handleHead(request, reply) {
     } else {
       contentType = 'application/ld+json';
     }
+    // TODO(lws-head-parity): mirror the GET lws+json negotiation here (L2)
 
     if (indexExists) {
       // Mirror GET: containers with index.html use the index file's ETag

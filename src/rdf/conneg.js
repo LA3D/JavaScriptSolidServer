@@ -15,7 +15,8 @@ export const RDF_TYPES = {
   TURTLE: 'text/turtle',
   N3: 'text/n3',
   NTRIPLES: 'application/n-triples',
-  RDF_XML: 'application/rdf+xml'  // Not supported, but recognized
+  RDF_XML: 'application/rdf+xml',  // Not supported, but recognized
+  LWS_JSON: 'application/lws+json'
 };
 
 // Content types we can serve (when conneg enabled)
@@ -31,6 +32,12 @@ const SUPPORTED_INPUT = [RDF_TYPES.JSON_LD, RDF_TYPES.TURTLE, RDF_TYPES.N3];
  * @returns {string} Selected content type
  */
 export function selectContentType(acceptHeader, connegEnabled = false) {
+  // LWS container media type is always negotiable when explicitly requested
+  // (it is JSON-LD with the lws/v1 context — no Turtle conneg required).
+  if (acceptHeader && acceptHeader.toLowerCase().includes(RDF_TYPES.LWS_JSON)) {
+    return RDF_TYPES.LWS_JSON;
+  }
+
   // If conneg disabled, always return JSON-LD
   if (!connegEnabled) {
     return RDF_TYPES.JSON_LD;
@@ -198,8 +205,8 @@ export async function fromJsonLd(jsonLd, targetType, baseUri, connegEnabled = fa
  * - `Authorization` — response body depends on the authenticated user (WAC)
  * - `Origin` — CORS headers echo the request's Origin
  */
-export function getVaryHeader(connegEnabled, mashlibEnabled = false) {
-  return (connegEnabled || mashlibEnabled)
+export function getVaryHeader(connegEnabled, mashlibEnabled = false, lwsEnabled = false) {
+  return (connegEnabled || mashlibEnabled || lwsEnabled)
     ? 'Accept, Authorization, Origin'
     : 'Authorization, Origin';
 }
