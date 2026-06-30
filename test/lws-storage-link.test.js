@@ -25,3 +25,29 @@ test('storageDescription rel ABSENT when lwsEnabled is false', () => {
   });
   assert.equal((h['Link'] || '').includes('storageDescription'), false);
 });
+
+test('linkset rel present when lwsEnabled + resourceUrl', () => {
+  const h = getAllHeaders({
+    isContainer: false, etag: '"x"', contentType: 'text/turtle',
+    origin: 'http://localhost:3000', resourceUrl: R, lwsEnabled: true,
+  });
+  assert.match(h['Link'], /rel="linkset"/);
+  assert.match(h['Link'], /type="application\/linkset\+json"/);
+});
+
+test('storageDescription and linkset both present when lwsEnabled', () => {
+  const h = getAllHeaders({
+    isContainer: false, etag: '"x"', contentType: 'text/turtle',
+    origin: 'http://localhost:3000', resourceUrl: R, lwsEnabled: true,
+  });
+  assert.match(h['Link'], new RegExp(`rel="${REL}"`));
+  assert.match(h['Link'], /rel="linkset"/);
+});
+
+test('linkset rel ABSENT when lwsEnabled is false', () => {
+  const h = getAllHeaders({
+    isContainer: false, etag: '"x"', contentType: 'text/turtle',
+    origin: 'http://localhost:3000', resourceUrl: R, lwsEnabled: false,
+  });
+  assert.equal((h['Link'] || '').includes('linkset'), false);
+});

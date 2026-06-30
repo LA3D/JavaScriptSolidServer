@@ -116,7 +116,9 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
   };
   if (lwsEnabled && resourceUrl) {
     const sd = `<${storageDescriptionUrl(resourceUrl)}>; rel="${LWS_STORAGE_DESC_REL}"`;
-    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${sd}` : sd;
+    const ls = `<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`;
+    const extra = `${sd}, ${ls}`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
   }
   return headers;
 }

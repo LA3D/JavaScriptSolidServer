@@ -2,6 +2,8 @@ import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders } from '../ldp/headers.js';
 import { generateContainerJsonLd, generateLwsContainer, serializeJsonLd } from '../ldp/container.js';
+import { generateLinkset } from '../lws/linkset.js';
+import { storageDescriptionUrl } from '../lws/storage-description.js';
 import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl } from '../utils/url.js';
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
@@ -372,6 +374,28 @@ export async function handleGet(request, reply) {
       return reply.send(JSON.stringify(lws, null, 2));
     }
 
+    // LWS per-resource linkset — only when enabled AND explicitly negotiated.
+    if (request.lwsEnabled && negotiated === RDF_TYPES.LINKSET) {
+      const ls = generateLinkset(resourceUrl, {
+        parentUrl: parentContainerUrl(resourceUrl),
+        isContainer: true,
+        describedByUrl: storageDescriptionUrl(resourceUrl),
+      });
+      const headers = getAllHeaders({
+        isContainer: true,
+        etag: stats.etag,
+        contentType: RDF_TYPES.LINKSET,
+        origin,
+        resourceUrl,
+        connegEnabled,
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled,
+      });
+      headers['Cache-Control'] = RDF_CACHE_CONTROL;
+      Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+      return reply.send(JSON.stringify(ls, null, 2));
+    }
+
     if (wantsTurtle) {
       // Convert container JSON-LD to Turtle
       try {
@@ -540,6 +564,28 @@ export async function handleGet(request, reply) {
       return reply.code(206).send(streamResult.stream);
     }
     // If range is null (unsupported format or multi-range), fall through to serve full content
+  }
+
+  // LWS per-resource linkset for files — only when enabled AND explicitly negotiated.
+  if (request.lwsEnabled && selectContentType(request.headers.accept || '', connegEnabled) === RDF_TYPES.LINKSET) {
+    const ls = generateLinkset(resourceUrl, {
+      parentUrl: parentContainerUrl(resourceUrl),
+      isContainer: false,
+      describedByUrl: storageDescriptionUrl(resourceUrl),
+    });
+    const headers = getAllHeaders({
+      isContainer: false,
+      etag: stats.etag,
+      contentType: RDF_TYPES.LINKSET,
+      origin,
+      resourceUrl,
+      connegEnabled,
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled,
+    });
+    headers['Cache-Control'] = RDF_CACHE_CONTROL;
+    Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+    return reply.send(JSON.stringify(ls, null, 2));
   }
 
   const content = await storage.read(storagePath);
