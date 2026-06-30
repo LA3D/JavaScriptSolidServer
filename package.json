@@ -39,6 +39,8 @@
     "mime-types": "^2.1.35",
     "n3": "^1.26.0",
     "oidc-provider": "^9.6.0",
+    "rdf-ext": "^2.5.1",
+    "shacl-engine": "github:rdf-ext/shacl-engine#ce39d07eb9c3da0940ee0f72ba56cbca2271f500",
     "secure-json-parse": "^2.7.0",
     "sql.js": "^1.13.0",
     "tar-stream": "^3.2.0"

@@ -19,6 +19,7 @@ import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
+import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -1152,6 +1153,34 @@ export async function handlePut(request, reply) {
     }
   }
 
+  // L3 SHACL admission — --lws-gated, opt-in via powder-s:describedby in .meta.
+  // `content` is the post-conneg body: JSON-LD when conneg converted Turtle, else as-sent.
+  if (request.lwsEnabled) {
+    const targetMetaPath = storagePath + '.meta';
+    const containerMetaPath = storagePath.slice(0, storagePath.lastIndexOf('/') + 1) + '.meta';
+    const result = await admit({
+      storage,
+      content,
+      // Post-conversion type: Turtle/N3 was converted to JSON-LD above when conneg is on.
+      contentType: (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
+        ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
+      resourceUrl,
+      targetMetaPath,
+      containerMetaPath,
+      shapeUrlToPath: urlToStoragePath,  // path-mode: pathname === storagePath
+    });
+    if (result.decision === 'reject') {
+      reply.header('content-type', 'application/problem+json');
+      if (result.shapeUrl) reply.header('Link', `<${result.shapeUrl}>; rel="describedby"`);
+      return reply.code(400).send(constraintProblem({
+        shapeUrl: result.shapeUrl, violations: result.violations, instance: resourceUrl,
+      }));
+    }
+    // Stash for success-path header + advisory body (set after getAllHeaders).
+    if (result.shapeUrl) request.__lwsShapeUrl = result.shapeUrl;
+    if (result.advisories.length) request.__lwsAdvisories = result.advisories;
+  }
+
   const success = await storage.write(storagePath, content);
   if (!success) {
     return reply.code(500).send({ error: 'Write failed' });
@@ -1166,6 +1195,12 @@ export async function handlePut(request, reply) {
   const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, connegEnabled, mashlibEnabled: request.mashlibEnabled });
   headers['Location'] = resourceUrl;
 
+  // Append describedby Link when admission resolved a shape (--lws, success path).
+  if (request.__lwsShapeUrl) {
+    const shapeLink = `<${request.__lwsShapeUrl}>; rel="describedby"`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${shapeLink}` : shapeLink;
+  }
+
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
 
   // Emit change notification for WebSocket subscribers
@@ -1173,6 +1208,10 @@ export async function handlePut(request, reply) {
     emitChange(resourceUrl);
   }
 
+  // RFC 9111 obsoletes Warning header → advisories ride the success body.
+  if (request.__lwsAdvisories) {
+    return reply.code(existed ? 200 : 201).send({ advisories: request.__lwsAdvisories });
+  }
   return reply.code(existed ? 204 : 201).send();
 }
 

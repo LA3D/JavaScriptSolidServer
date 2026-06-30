@@ -8,6 +8,7 @@ import { provisionOwnerKey, assertProvisionKeysCompatible } from '../keys/provis
 import { createToken } from '../auth/token.js';
 import { canAcceptInput, toJsonLd, RDF_TYPES } from '../rdf/conneg.js';
 import { emitChange } from '../notifications/events.js';
+import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -127,6 +128,32 @@ export async function handlePost(request, reply) {
       }
     }
 
+    // L3 SHACL admission — --lws-gated, opt-in via powder-s:describedby in container .meta.
+    // New member has no own .meta yet; resolveShapeUrl falls through to the container rule.
+    if (request.lwsEnabled) {
+      const containerMetaPath = storagePath + '.meta';
+      const result = await admit({
+        storage, content,
+        // Post-conversion type: Turtle/N3 was converted to JSON-LD above when conneg is on.
+        contentType: (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
+          ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
+        resourceUrl,
+        targetMetaPath: newStoragePath + '.meta',
+        containerMetaPath,
+        shapeUrlToPath: urlToStoragePath,
+      });
+      if (result.decision === 'reject') {
+        reply.header('content-type', 'application/problem+json');
+        if (result.shapeUrl) reply.header('Link', `<${result.shapeUrl}>; rel="describedby"`);
+        return reply.code(400).send(constraintProblem({
+          shapeUrl: result.shapeUrl, violations: result.violations, instance: resourceUrl,
+        }));
+      }
+      // Stash for success-path header + advisory body (set after getAllHeaders).
+      if (result.shapeUrl) request.__lwsShapeUrl = result.shapeUrl;
+      if (result.advisories.length) request.__lwsAdvisories = result.advisories;
+    }
+
     success = await storage.write(newStoragePath, content);
 
     // Update quota usage after successful write
@@ -149,6 +176,12 @@ export async function handlePost(request, reply) {
   });
   headers['Location'] = resourceUrl;
 
+  // Append describedby Link when admission resolved a shape (--lws, success path).
+  if (request.__lwsShapeUrl) {
+    const shapeLink = `<${request.__lwsShapeUrl}>; rel="describedby"`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${shapeLink}` : shapeLink;
+  }
+
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
 
   // Emit change notification for WebSocket subscribers
@@ -156,6 +189,10 @@ export async function handlePost(request, reply) {
     emitChange(resourceUrl);
   }
 
+  // RFC 9111 obsoletes Warning header → advisories ride the success body.
+  if (request.__lwsAdvisories) {
+    return reply.code(201).send({ advisories: request.__lwsAdvisories });
+  }
   return reply.code(201).send();
 }
 
