@@ -1,6 +1,16 @@
 const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 
 /**
+ * Derive the storage description URL from any resource URL in that storage.
+ * Single-storage assumption (L2): always {origin}/.well-known/lws-storage.
+ * @param {string} resourceUrl
+ * @returns {string}
+ */
+export function storageDescriptionUrl(resourceUrl) {
+  return `${new URL(resourceUrl).origin}/.well-known/lws-storage`;
+}
+
+/**
  * Generate the W3C LWS Storage Description resource (application/lws+json).
  * Spec: Discovery.html — @context/id/type/service all REQUIRED; each service
  * MUST carry type + serviceEndpoint. Single-storage; multi-pod deferred.

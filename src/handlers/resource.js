@@ -238,7 +238,8 @@ export async function handleGet(request, reply) {
                 contentType: 'text/turtle',
                 origin,
                 resourceUrl,
-                connegEnabled
+                connegEnabled,
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -252,7 +253,8 @@ export async function handleGet(request, reply) {
                 contentType: 'application/ld+json',
                 origin,
                 resourceUrl,
-                connegEnabled
+                connegEnabled,
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -272,7 +274,8 @@ export async function handleGet(request, reply) {
         contentType: 'text/html',
         origin,
         resourceUrl,
-        connegEnabled
+        connegEnabled,
+        lwsEnabled: request.lwsEnabled
       });
 
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -323,7 +326,8 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        mashlibEnabled: request.mashlibEnabled
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled
       });
       headers['X-Frame-Options'] = 'DENY';
       headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -385,7 +389,8 @@ export async function handleGet(request, reply) {
           origin,
           resourceUrl,
           connegEnabled,
-          mashlibEnabled: request.mashlibEnabled
+          mashlibEnabled: request.mashlibEnabled,
+          lwsEnabled: request.lwsEnabled
         });
         headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -487,7 +492,8 @@ export async function handleGet(request, reply) {
       origin,
       resourceUrl,
       connegEnabled,
-      mashlibEnabled: request.mashlibEnabled
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled
     });
     headers['X-Frame-Options'] = 'DENY';
     headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -513,7 +519,8 @@ export async function handleGet(request, reply) {
         contentType: storedContentType,
         origin,
         resourceUrl,
-        connegEnabled
+        connegEnabled,
+        lwsEnabled: request.lwsEnabled
       });
       headers['Content-Range'] = `bytes ${start}-${end}/${stats.size}`;
       headers['Content-Length'] = chunkSize;
@@ -572,7 +579,8 @@ export async function handleGet(request, reply) {
             origin,
             resourceUrl,
             connegEnabled,
-            mashlibEnabled: request.mashlibEnabled
+            mashlibEnabled: request.mashlibEnabled,
+            lwsEnabled: request.lwsEnabled
           });
           headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -603,7 +611,8 @@ export async function handleGet(request, reply) {
           origin,
           resourceUrl,
           connegEnabled,
-          mashlibEnabled: request.mashlibEnabled
+          mashlibEnabled: request.mashlibEnabled,
+          lwsEnabled: request.lwsEnabled
         });
         headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -632,7 +641,8 @@ export async function handleGet(request, reply) {
     origin,
     resourceUrl,
     connegEnabled,
-    mashlibEnabled: request.mashlibEnabled
+    mashlibEnabled: request.mashlibEnabled,
+    lwsEnabled: request.lwsEnabled
   });
   if (isRdfContentType(actualContentType)) {
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
@@ -910,7 +920,8 @@ export async function handleHead(request, reply) {
     origin,
     resourceUrl,
     connegEnabled,
-    mashlibEnabled: request.mashlibEnabled
+    mashlibEnabled: request.mashlibEnabled,
+    lwsEnabled: request.lwsEnabled
   });
 
   // Mirror GET's Cache-Control for RDF responses (#552 header parity).
