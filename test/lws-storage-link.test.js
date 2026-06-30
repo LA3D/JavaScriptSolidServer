@@ -10,6 +10,13 @@ test('storageDescriptionUrl derives {origin}/.well-known/lws-storage', () => {
   assert.equal(storageDescriptionUrl(R), 'http://localhost:3000/.well-known/lws-storage');
 });
 
+test('storageDescriptionUrl throws a clear error on a relative URL', () => {
+  assert.throws(
+    () => storageDescriptionUrl('/alice/note.ttl'),
+    { message: /requires an absolute URL/ }
+  );
+});
+
 test('storageDescription rel present when lwsEnabled + resourceUrl', () => {
   const h = getAllHeaders({
     isContainer: false, etag: '"x"', contentType: 'text/turtle',

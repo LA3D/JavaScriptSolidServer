@@ -75,6 +75,25 @@ describe('LWS Storage Description Route (--lws ON)', () => {
     const res = await request(LWS_PATH, { method: 'DELETE' });
     assertStatus(res, 405);
   });
+
+  it('body scheme matches X-Forwarded-Proto (proxy scheme parity)', async () => {
+    // Fastify trustProxy:true honors X-Forwarded-Proto — request.protocol becomes 'https'
+    // so the route's proto = request.protocol produces https:// in id and serviceEndpoints.
+    const res = await request(LWS_PATH, {
+      headers: {
+        Accept: 'application/lws+json',
+        'X-Forwarded-Proto': 'https',
+      }
+    });
+    assertStatus(res, 200);
+    const body = await res.json();
+    assert.ok(body.id.startsWith('https://'),
+      `id should start with https:// when X-Forwarded-Proto: https, got: ${body.id}`);
+    const sd = body.service.find(s => s.type === 'StorageDescription');
+    assert.ok(sd, 'StorageDescription service must exist');
+    assert.ok(sd.serviceEndpoint.startsWith('https://'),
+      `StorageDescription serviceEndpoint should start with https://, got: ${sd.serviceEndpoint}`);
+  });
 });
 
 describe('LWS Storage Description Route (--lws OFF)', () => {

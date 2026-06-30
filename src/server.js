@@ -877,7 +877,7 @@ export function createServer(options = {}) {
   if (lwsEnabled) {
     const lwsStoragePath = '/.well-known/lws-storage';
     fastify.get(lwsStoragePath, async (request, reply) => {
-      const proto = options.ssl ? 'https' : 'http';
+      const proto = request.protocol;
       const host = request.hostname;
       const root = `${proto}://${host}/`;
       const services = [{ type: 'StorageDescription', serviceEndpoint: `${proto}://${host}${lwsStoragePath}` }];

@@ -19,3 +19,7 @@ test('linkset+json is a known RDF type and is negotiable', () => {
   assert.equal(RDF_TYPES.LINKSET, 'application/linkset+json');
   assert.equal(selectContentType('application/linkset+json', false), 'application/linkset+json');
 });
+
+test('linkset+json fires before connegEnabled guard — true flag also returns linkset+json', () => {
+  assert.equal(selectContentType('application/linkset+json', true), 'application/linkset+json');
+});

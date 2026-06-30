@@ -7,6 +7,7 @@ const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
  * @returns {string}
  */
 export function storageDescriptionUrl(resourceUrl) {
+  if (!resourceUrl || !resourceUrl.includes('://')) throw new Error(`storageDescriptionUrl requires an absolute URL, got: ${resourceUrl}`);
   return `${new URL(resourceUrl).origin}/.well-known/lws-storage`;
 }
 
