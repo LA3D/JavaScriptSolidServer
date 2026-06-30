@@ -8,23 +8,7 @@ import { provisionOwnerKey, assertProvisionKeysCompatible } from '../keys/provis
 import { createToken } from '../auth/token.js';
 import { canAcceptInput, toJsonLd, RDF_TYPES } from '../rdf/conneg.js';
 import { emitChange } from '../notifications/events.js';
-import { admit } from '../lws/admission.js';
-
-// RFC 9457 problem+json for a SHACL constraint violation, extended with results.
-function constraintProblem({ shapeUrl, violations, instance }) {
-  return {
-    type: 'https://www.w3.org/ns/lws#ShapeViolation',
-    title: 'Resource does not conform to its declared shape',
-    status: 400,
-    detail: `${violations.length} violation(s) against ${shapeUrl}`,
-    instance,
-    describedby: shapeUrl,
-    violations,
-  };
-}
-
-// Map a shape/resource URL to its storage path (path-mode: pathname === storagePath).
-const urlToStoragePath = (u) => new URL(u).pathname;
+import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
 
 /**
  * Get the storage path and resource URL for a request

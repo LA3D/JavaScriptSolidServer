@@ -19,24 +19,7 @@ import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
-import { admit } from '../lws/admission.js';
-
-// RFC 9457 problem+json for a SHACL constraint violation, extended with results.
-function constraintProblem({ shapeUrl, violations, instance }) {
-  return {
-    type: 'https://www.w3.org/ns/lws#ShapeViolation',
-    title: 'Resource does not conform to its declared shape',
-    status: 400,
-    detail: `${violations.length} violation(s) against ${shapeUrl}`,
-    instance,
-    describedby: shapeUrl,
-    violations,
-  };
-}
-
-// Map a shape/resource URL to its storage path.
-// Path-mode assumption: pathname === storagePath (no subdomain rewriting).
-const urlToStoragePath = (u) => new URL(u).pathname;
+import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled

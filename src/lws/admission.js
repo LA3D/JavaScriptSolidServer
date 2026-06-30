@@ -13,6 +13,22 @@ import { validate } from './shacl.js';
 
 const PASS = { decision: 'pass', shapeUrl: null, violations: [], advisories: [] };
 
+// RFC 9457 problem+json for a SHACL constraint violation, extended with results.
+export function constraintProblem({ shapeUrl, violations, instance }) {
+  return {
+    type: 'https://www.w3.org/ns/lws#ShapeViolation',
+    title: 'Resource does not conform to its declared shape',
+    status: 400,
+    detail: `${violations.length} violation(s) against ${shapeUrl}`,
+    instance,
+    describedby: shapeUrl,
+    violations,
+  };
+}
+
+// Map a shape/resource URL to its storage path (path-mode: pathname === storagePath).
+export const urlToStoragePath = (u) => new URL(u).pathname;
+
 export async function admit({ storage, content, contentType, resourceUrl,
                               targetMetaPath, containerMetaPath, shapeUrlToPath }) {
   if (!isRdfBody(contentType)) return PASS;                 // bytes are trusted; skip validation
