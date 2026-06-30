@@ -8,6 +8,7 @@ const B = 'http://localhost:3000/alice/';
 test('isRdfBody: turtle and json-ld are RDF, octet-stream is not', () => {
   assert.equal(isRdfBody('text/turtle'), true);
   assert.equal(isRdfBody('application/ld+json'), true);
+  assert.equal(isRdfBody('text/n3'), true);
   assert.equal(isRdfBody('application/octet-stream'), false);
   assert.equal(isRdfBody(''), false);
 });

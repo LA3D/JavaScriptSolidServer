@@ -56,4 +56,35 @@ test('admit: non-RDF body → pass without validation', async () => {
   const o = opts(Buffer.from('\x89PNG')); o.contentType = 'image/png';
   const r = await admit(o);
   assert.equal(r.decision, 'pass');
+  assert.equal(r.shapeUrl, null);
+  assert.equal(r.violations.length, 0);
+  assert.equal(r.advisories.length, 0);
+});
+
+test('admit: declared shape resource missing → pass (opt-in miss), no throw', async () => {
+  // .meta declares a shape URL whose backing resource does not exist.
+  // storage.read throws ENOENT for the missing shape path — must resolve to pass, not 500.
+  const DESCRIBEDBY = 'http://www.w3.org/2007/05/powder-s#describedby';
+  const missingMeta = Buffer.from(JSON.stringify({
+    '@id': 'http://h/alice/x',
+    [DESCRIBEDBY]: { '@id': 'http://h/shapes/MISSING' },
+  }));
+  const st = {
+    files: { '/alice/x.meta': missingMeta },
+    async exists(p) { return p in this.files; },
+    async read(p) { if (!(p in this.files)) throw new Error('ENOENT'); return this.files[p]; },
+  };
+  const o = {
+    storage: st,
+    content: TTL('; ex:title "t"'),
+    contentType: 'text/turtle',
+    resourceUrl: 'http://h/alice/x',
+    targetMetaPath: '/alice/x.meta',
+    containerMetaPath: '/alice/.meta',
+    shapeUrlToPath: (u) => '/' + u.split('/h/')[1],
+  };
+  const r = await admit(o);
+  assert.equal(r.decision, 'pass');
+  assert.equal(r.shapeUrl, null);
+  assert.equal(r.violations.length, 0);
 });
