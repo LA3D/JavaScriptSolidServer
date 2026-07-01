@@ -5,6 +5,8 @@ import { getDataRoot, urlToPath, isContainer } from '../utils/url.js';
 
 // Note: Data directory is ensured in server.js after DATA_ROOT is set
 
+const AUX_SUFFIX = /\.(acl|meta|lwstypes)$/;
+
 /**
  * Check if resource exists
  * @param {string} urlPath
@@ -230,4 +232,26 @@ export async function generateUniqueFilename(containerPath, slug, isDir = false)
   }
 
   return path.basename(candidate);
+}
+
+/**
+ * Recursively enumerate subject resources under a container.
+ * Skips auxiliary sidecars (.acl/.meta/.lwstypes) and dot-entries.
+ * @param {string} rootUrlPath
+ * @returns {Promise<Array<{urlPath: string, isDirectory: boolean}>>}
+ */
+export async function walkResources(rootUrlPath = '/') {
+  const out = [];
+  async function recur(urlPath) {
+    const entries = await listContainer(urlPath);
+    if (!entries) return;
+    for (const e of entries) {
+      if (e.name.startsWith('.') || AUX_SUFFIX.test(e.name)) continue;
+      const childUrl = urlPath + e.name + (e.isDirectory ? '/' : '');
+      out.push({ urlPath: childUrl, isDirectory: e.isDirectory });
+      if (e.isDirectory) await recur(childUrl);
+    }
+  }
+  await recur(rootUrlPath.endsWith('/') ? rootUrlPath : rootUrlPath + '/');
+  return out;
 }
