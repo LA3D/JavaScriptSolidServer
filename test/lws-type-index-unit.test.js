@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError, intrinsicType, resourceTypes, buildTypeIndex } from '../src/lws/type-index.js';
+import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError, intrinsicType, resourceTypes, buildTypeIndex, containerItemTypes } from '../src/lws/type-index.js';
 
 const A = 'https://schema.org/Person';
 const B = 'http://xmlns.com/foaf/0.1/Person';
@@ -64,5 +64,18 @@ describe('type resolution + index', () => {
     assert.equal(idx.totalItems, 2);
     assert.deepEqual(idx.items.map((i) => i.id).sort(),
       ['https://schema.org/Person', 'https://www.w3.org/ns/lws#DataResource']);
+  });
+  it('containerItemTypes: intrinsic Container compacted', () => {
+    assert.deepEqual(containerItemTypes(['https://www.w3.org/ns/lws#Container']), ['Container']);
+  });
+  it('containerItemTypes: intrinsic DataResource + user type, order preserved', () => {
+    assert.deepEqual(
+      containerItemTypes(['https://www.w3.org/ns/lws#DataResource', 'https://schema.org/Person']),
+      ['DataResource', 'https://schema.org/Person']);
+  });
+  it('containerItemTypes: unknown-only types are left unchanged', () => {
+    assert.deepEqual(
+      containerItemTypes(['https://schema.org/Person', 'http://ex/Note']),
+      ['https://schema.org/Person', 'http://ex/Note']);
   });
 });
