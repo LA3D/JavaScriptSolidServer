@@ -122,3 +122,53 @@ describe('storage description advertises the services', () => {
     assert.ok(types.includes('TypeSearchService'));
   });
 });
+
+describe('server-managed type store does not outlive the resource', () => {
+  let base, token;
+  before(async () => { await stopTestServer(); await startTestServer({ lws: true }); base = getBaseUrl(); token = (await createTestPod('alice')).token; });
+  after(async () => { await stopTestServer(); });
+
+  const linkset = async (url) => {
+    const r = await fetch(url, { headers: { Accept: 'application/linkset+json', Authorization: `Bearer ${token}` } });
+    const body = await r.json();
+    return body.linkset[0].type.map((t) => t.href);
+  };
+
+  it('DELETE clears the type store: a resource recreated at the same path with no Link declares no phantom types', async () => {
+    const url = `${base}/alice/x`;
+    const put1 = await fetch(url, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Link: `<${PERSON}>; rel="type"` },
+      body: '{}' });
+    assert.equal(put1.status, 201);
+    assert.ok((await linkset(url)).includes(PERSON));
+
+    const del = await fetch(url, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(del.status, 204);
+
+    const put2 = await fetch(url, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: '{}' });
+    assert.equal(put2.status, 201);
+
+    const types = await linkset(url);
+    assert.ok(!types.includes(PERSON), `phantom schema:Person leaked from the deleted resource, got ${types}`);
+    assert.ok(types.includes('https://www.w3.org/ns/lws#DataResource'));
+  });
+
+  it('a rewrite with no Link header clears the previously-declared type', async () => {
+    const url = `${base}/alice/y`;
+    const put1 = await fetch(url, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Link: `<${PERSON}>; rel="type"` },
+      body: '{}' });
+    assert.equal(put1.status, 201);
+    assert.ok((await linkset(url)).includes(PERSON));
+
+    const put2 = await fetch(url, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: '{"changed":true}' });
+    assert.equal(put2.status, 204);
+
+    const types = await linkset(url);
+    assert.ok(!types.includes(PERSON), `stale schema:Person survived a rewrite with no Link header, got ${types}`);
+  });
+});
