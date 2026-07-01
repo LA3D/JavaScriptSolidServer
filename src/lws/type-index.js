@@ -27,49 +27,79 @@ function group(values) {
   return out;
 }
 
-// GET query (URLSearchParams) OR POST body ({ type: (string|string[])[] }) → CNF string[][].
-export function parseTypeFilter({ query, body } = {}) {
-  const cnf = [];
-  let total = 0;
-  if (query) {
-    for (const param of query.getAll('type')) {
-      const values = param.split(',');
-      if (values.length > MAX_VALUES_PER_GROUP) throw new FilterError('too many type values in one group');
-      const g = group(values);
-      if (g.length) {
-        if (cnf.length >= MAX_GROUPS) throw new FilterError('too many type groups');
-        total += g.length;
-        if (total > MAX_TOTAL_TERMS) throw new FilterError('too many type terms');
-        cnf.push(g);
-      }
-    }
-    return cnf;
-  }
-  if (body && body.type !== undefined) {
-    if (!Array.isArray(body.type)) throw new FilterError('body.type must be an array');
-    for (const el of body.type) {
-      let values;
-      if (typeof el === 'string') values = [el];
-      else if (Array.isArray(el)) values = el;
-      else throw new FilterError('each body.type element must be a string or array of strings');
-
-      if (values.length > MAX_VALUES_PER_GROUP) throw new FilterError('too many type values in one group');
-      const g = group(values);
-      if (g.length) {
-        if (cnf.length >= MAX_GROUPS) throw new FilterError('too many type groups');
-        total += g.length;
-        if (total > MAX_TOTAL_TERMS) throw new FilterError('too many type terms');
-        cnf.push(g);
-      }
-    }
-    return cnf;
-  }
-  return cnf;                                      // no filter → match all
+// GET query (URLSearchParams) OR POST body → the type CNF only (back-compat).
+export function parseTypeFilter(args) {
+  return parseFilter(args).type;
 }
 
 // CNF: every group must have at least one member present in the resource's types.
 export function matchesTypeFilter(types, cnf) {
   return cnf.every((g) => g.some((t) => types.includes(t)));
+}
+
+export const INDEXED_RELATIONS = new Set(['describedby']);
+const RESERVED_QUERY_KEYS = new Set(['page']);   // pagination refs, not relation filters
+
+// Push comma/array raw groups into `cnf`, enforcing the shared budget.
+function pushGroups(cnf, rawGroups, budget) {
+  for (const values of rawGroups) {
+    if (values.length > MAX_VALUES_PER_GROUP) throw new FilterError('too many values in one group');
+    const g = group(values);                       // trims, dedupes, validates absolute URIs
+    if (!g.length) continue;                        // empty group ignored
+    if (budget.groups >= MAX_GROUPS) throw new FilterError('too many groups');
+    budget.groups++;
+    budget.terms += g.length;
+    if (budget.terms > MAX_TOTAL_TERMS) throw new FilterError('too many terms');
+    cnf.push(g);
+  }
+}
+
+function groupsFromQuery(query, key) {
+  return query.getAll(key).map((param) => param.split(','));
+}
+function groupsFromBody(val, label) {
+  if (!Array.isArray(val)) throw new FilterError(`body.${label} must be an array`);
+  return val.map((el) => {
+    if (typeof el === 'string') return [el];
+    if (Array.isArray(el)) return el;
+    throw new FilterError(`each body.${label} element must be a string or array of strings`);
+  });
+}
+
+// Generalized filter: `type` + any indexed relation key, one shared CNF budget.
+// Unknown/unindexed non-reserved keys set hasUnindexed (→ empty result, not an error).
+export function parseFilter({ query, body } = {}) {
+  const budget = { groups: 0, terms: 0 };
+  const type = [];
+  const relations = {};
+  let hasUnindexed = false;
+
+  const keys = query
+    ? new Set([...query.keys()])
+    : new Set(Object.keys(body || {}).filter((k) => k !== '@context'));
+
+  for (const key of keys) {
+    if (query && RESERVED_QUERY_KEYS.has(key)) continue;
+    const raw = query ? groupsFromQuery(query, key) : groupsFromBody(body[key], key);
+    if (key === 'type') {
+      pushGroups(type, raw, budget);
+    } else if (INDEXED_RELATIONS.has(key)) {
+      pushGroups(relations[key] || (relations[key] = []), raw, budget);
+    } else {
+      hasUnindexed = true;                          // no-oracle: constraint matches nothing
+    }
+  }
+  return { type, relations, hasUnindexed };
+}
+
+// True iff hasUnindexed is false AND the type CNF AND every relation CNF hold.
+export function matchesFilter(resource, filter) {
+  if (filter.hasUnindexed) return false;
+  if (!matchesTypeFilter(resource.types, filter.type)) return false;
+  for (const [rel, cnf] of Object.entries(filter.relations)) {
+    if (!matchesTypeFilter((resource.relations && resource.relations[rel]) || [], cnf)) return false;
+  }
+  return true;
 }
 
 const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';

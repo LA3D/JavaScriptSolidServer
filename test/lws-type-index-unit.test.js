@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError, intrinsicType, resourceTypes, buildTypeIndex, containerItemTypes, MAX_GROUPS, MAX_VALUES_PER_GROUP, MAX_TOTAL_TERMS } from '../src/lws/type-index.js';
+import { parseFilter, matchesFilter, INDEXED_RELATIONS } from '../src/lws/type-index.js';
 
 const A = 'https://schema.org/Person';
 const B = 'http://xmlns.com/foaf/0.1/Person';
@@ -130,5 +131,65 @@ describe('CNF complexity caps', () => {
       q.append('type', rawValues.join(','));
     }
     assert.throws(() => parseTypeFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
+  });
+});
+
+const SHAPE = 'https://shapes.example/PersonShape';
+const SHAPE2 = 'https://shapes.example/Other';
+
+describe('parseFilter (type + indexed relations)', () => {
+  it('parses type and describedby into separate CNFs (GET)', () => {
+    const q = new URLSearchParams(`type=${A}&describedby=${SHAPE}`);
+    const f = parseFilter({ query: q });
+    assert.deepEqual(f.type, [[A]]);
+    assert.deepEqual(f.relations.describedby, [[SHAPE]]);
+    assert.equal(f.hasUnindexed, false);
+  });
+  it('GET and POST are equivalent for type AND describedby', () => {
+    const q = new URLSearchParams(`type=${A}&describedby=${SHAPE}`);
+    const post = parseFilter({ body: { type: [A], describedby: [SHAPE] } });
+    assert.deepEqual(post, parseFilter({ query: q }));
+  });
+  it('an unindexed relation key sets hasUnindexed (no error)', () => {
+    const f = parseFilter({ query: new URLSearchParams(`type=${A}&madeup=${SHAPE}`) });
+    assert.equal(f.hasUnindexed, true);
+  });
+  it('pagination key `page` is ignored, not treated as a relation', () => {
+    const f = parseFilter({ query: new URLSearchParams(`type=${A}&page=2`) });
+    assert.equal(f.hasUnindexed, false);
+    assert.deepEqual(f.relations, {});
+  });
+  it('body @context is ignored', () => {
+    const f = parseFilter({ body: { '@context': 'x', type: [A] } });
+    assert.equal(f.hasUnindexed, false);
+  });
+  it('non-absolute-URI relation target → 400 FilterError', () => {
+    assert.throws(() => parseFilter({ query: new URLSearchParams('describedby=notauri') }),
+      (e) => e instanceof FilterError && e.status === 400);
+  });
+  it('caps are shared across keys (type groups + relation groups)', () => {
+    const q = new URLSearchParams();
+    for (let i = 0; i < MAX_GROUPS; i++) q.append('type', `https://ex.org/T${i}`);
+    q.append('describedby', SHAPE);                 // one group over the global cap
+    assert.throws(() => parseFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
+  });
+  it('describedby is the sole indexed relation in v1', () => {
+    assert.deepEqual([...INDEXED_RELATIONS], ['describedby']);
+  });
+});
+
+describe('matchesFilter', () => {
+  const r = { types: [C, A], relations: { describedby: [SHAPE] } };
+  it('type AND describedby both satisfied → true', () => {
+    assert.equal(matchesFilter(r, { type: [[A]], relations: { describedby: [[SHAPE]] }, hasUnindexed: false }), true);
+  });
+  it('describedby mismatch → false', () => {
+    assert.equal(matchesFilter(r, { type: [[A]], relations: { describedby: [[SHAPE2]] }, hasUnindexed: false }), false);
+  });
+  it('hasUnindexed forces false regardless of type match', () => {
+    assert.equal(matchesFilter(r, { type: [[A]], relations: {}, hasUnindexed: true }), false);
+  });
+  it('empty filter matches everything', () => {
+    assert.equal(matchesFilter(r, { type: [], relations: {}, hasUnindexed: false }), true);
   });
 });
