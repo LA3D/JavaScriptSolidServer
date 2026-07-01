@@ -884,6 +884,8 @@ export function createServer(options = {}) {
       const host = request.hostname;
       const root = `${proto}://${host}/`;
       const services = [{ type: 'StorageDescription', serviceEndpoint: `${proto}://${host}${lwsStoragePath}` }];
+      services.push({ type: 'TypeIndexService', serviceEndpoint: `${proto}://${host}/types/index` });
+      services.push({ type: 'TypeSearchService', serviceEndpoint: `${proto}://${host}/types/search` });
       if (notificationsEnabled) {
         services.push({ type: 'NotificationService', serviceEndpoint: `${proto}://${host}/notification/api` });
       }

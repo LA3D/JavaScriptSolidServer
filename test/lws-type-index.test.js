@@ -111,3 +111,14 @@ describe('GET/POST /types/search', () => {
     assert.equal(r.status, 400);
   });
 });
+
+describe('storage description advertises the services', () => {
+  before(async () => { await stopTestServer(); await startTestServer({ lws: true }); });
+  after(async () => { await stopTestServer(); });
+  it('lists TypeIndexService + TypeSearchService', async () => {
+    const sd = await (await fetch(`${getBaseUrl()}/.well-known/lws-storage`)).json();
+    const types = sd.service.map((s) => s.type);
+    assert.ok(types.includes('TypeIndexService'));
+    assert.ok(types.includes('TypeSearchService'));
+  });
+});
