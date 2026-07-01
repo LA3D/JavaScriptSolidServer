@@ -468,12 +468,20 @@ export function createServer(options = {}) {
     global: false, // Don't apply globally, only to specific routes
     max: 100, // Default max requests per window
     timeWindow: '1 minute',
-    // Custom error response
-    errorResponseBuilder: (request, context) => ({
-      error: 'Too Many Requests',
-      message: `Rate limit exceeded. Try again in ${Math.ceil(context.after / 1000)} seconds.`,
-      retryAfter: Math.ceil(context.after / 1000)
-    })
+    // Custom error response. Must be an actual Error with `.statusCode` —
+    // @fastify/rate-limit does `throw errorResponseBuilder(...)`, and Fastify
+    // only routes a thrown value through its error-handling (which sets the
+    // reply status from `.statusCode`) when it's an Error instance; a plain
+    // object here silently serializes as a 200 body (confirmed empirically:
+    // headers/counting worked, status never left 200). `context.after` is a
+    // formatted string (e.g. "1 minute"), not milliseconds — `context.ttl` is
+    // the numeric ms-remaining to compute the retry-after seconds from.
+    errorResponseBuilder: (request, context) => {
+      const retryAfter = Math.ceil(context.ttl / 1000);
+      const err = new Error(`Rate limit exceeded. Try again in ${retryAfter} seconds.`);
+      err.statusCode = context.statusCode;
+      return err;
+    }
   });
 
   // Global CORS preflight
@@ -808,6 +816,13 @@ export function createServer(options = {}) {
     }
   };
 
+  // Read rate limit for the LWS type-discovery aggregate endpoints (unauth-reachable,
+  // each does a full-tree walk). Keyed by webId when authenticated, else client IP.
+  const typeQueryRateLimit = { config: { rateLimit: {
+    max: 60, timeWindow: '1 minute',
+    keyGenerator: (request) => request.webId || request.ip,
+  } } };
+
   // /.well-known/did/nostr/<pubkey>(.json|.jsonld)? — did:nostr HTTP
   // resolution for accounts on this pod (#407). Registered before the
   // LDP wildcard so it actually matches; without this the
@@ -906,21 +921,34 @@ export function createServer(options = {}) {
     }
 
     if (typeIndexEnabled) {
-      // LWS TypeIndexService — GET /types/index. This is a virtual aggregate
-      // over every resource in the pod tree, not a single WAC-protected
-      // resource, so (like /mcp, /db, /.terminal) it's exempted from the
-      // blanket preHandler above (see `request.url === '/types/index'`) and
-      // resolves identity + per-resource access itself inside the handler —
-      // that internal checkAccess()-and-drop loop IS the authorization here.
-      fastify.get('/types/index', handleTypeIndex);
-      for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
+      // fastify.after() defers these two registrations until every plugin
+      // queued before this point in the boot sequence — including
+      // `fastify.register(rateLimit, ...)` above (~:467) — has actually run.
+      // createServer() is synchronous, so a plain `fastify.get(path, {
+      // config: { rateLimit } }, handler)` call made here executes before
+      // the rate-limit plugin's `onRoute` hook exists yet (the plugin body
+      // only runs during the async boot phase), which silently no-ops the
+      // route-level rate limit (confirmed empirically: no x-ratelimit-*
+      // headers, no 429 ever, even at 65 rapid requests). `after()` is the
+      // documented fix — see the sibling `writeRateLimit` routes (~:935)
+      // for the same latent gap, out of scope for this task.
+      fastify.after(() => {
+        // LWS TypeIndexService — GET /types/index. This is a virtual aggregate
+        // over every resource in the pod tree, not a single WAC-protected
+        // resource, so (like /mcp, /db, /.terminal) it's exempted from the
+        // blanket preHandler above (see `request.url === '/types/index'`) and
+        // resolves identity + per-resource access itself inside the handler —
+        // that internal checkAccess()-and-drop loop IS the authorization here.
+        fastify.get('/types/index', typeQueryRateLimit, handleTypeIndex);
 
-      // LWS TypeSearchService — GET/POST /types/search. Same virtual-aggregate
-      // exemption as /types/index above (see `request.url === '/types/search'`);
-      // authorizedResources() inside handleTypeSearch does the per-resource
-      // WAC check that a route-level ACL would normally provide.
-      fastify.get('/types/search', handleTypeSearch);
-      fastify.post('/types/search', handleTypeSearch);
+        // LWS TypeSearchService — GET/POST /types/search. Same virtual-aggregate
+        // exemption as /types/index above (see `request.url === '/types/search'`);
+        // authorizedResources() inside handleTypeSearch does the per-resource
+        // WAC check that a route-level ACL would normally provide.
+        fastify.get('/types/search', typeQueryRateLimit, handleTypeSearch);
+        fastify.post('/types/search', typeQueryRateLimit, handleTypeSearch);
+      });
+      for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
       for (const m of ['put', 'patch', 'delete']) fastify[m]('/types/search', methodNotAllowed);
     }
   }
