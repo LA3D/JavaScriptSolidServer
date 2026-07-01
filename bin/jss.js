@@ -93,6 +93,8 @@ program
   .option('--conneg', 'Enable content negotiation (Turtle support)')
   .option('--no-conneg', 'Disable content negotiation')
   .option('--lws', 'Enable the W3C Linked Web Storage surface (application/lws+json containers)')
+  .option('--lws-type-index', 'Enable the LWS Type Index/Search services (default on when --lws)')
+  .option('--no-lws-type-index', 'Disable the LWS Type Index/Search services')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -115,6 +117,7 @@ program
   .option('--cors-proxy-timeout-ms <ms>', 'CORS proxy upstream request timeout (default 30s)', parseInt)
   .option('--cors-proxy-max-redirects <n>', 'CORS proxy max redirect hops, each re-validated (default 5)', parseInt)
   .option('--body-limit <size>', 'Maximum request body size, e.g. 100MB or 1GB (default 20MB). Raise to accept larger `git push`; lower for tighter memory-DoS protection.')
+  .option('--write-rate-limit-max <n>', 'Max authenticated writes/type-queries per minute per agent (default 600)', parseInt)
   .option('--nostr', 'Enable Nostr relay')
   .option('--no-nostr', 'Disable Nostr relay')
   .option('--nostr-path <path>', 'Nostr relay WebSocket path (default: /relay)')
@@ -215,9 +218,14 @@ program
         // omitting it here silently pinned every CLI-started server to
         // the 10MB default and made the #474 knob dead wiring (#561).
         bodyLimit: config.bodyLimit,
+        // Wire the parsed --write-rate-limit-max / JSS_WRITE_RATE_LIMIT_MAX
+        // value through — was createServer()-only before this, so a
+        // CLI-launched pod (the Dockerfile path) couldn't tune it.
+        writeRateLimitMax: config.writeRateLimitMax,
         logger: config.logger,
         conneg: config.conneg,
         lws: config.lws,
+        lwsTypeIndex: config.lwsTypeIndex,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,

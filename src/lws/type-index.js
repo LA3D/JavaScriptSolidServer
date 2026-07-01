@@ -1,5 +1,9 @@
 export const LWS_NS = 'https://www.w3.org/ns/lws#';
 
+export const MAX_GROUPS = 32;
+export const MAX_VALUES_PER_GROUP = 64;
+export const MAX_TOTAL_TERMS = 256;
+
 export class FilterError extends Error {
   constructor(msg) { super(msg); this.name = 'FilterError'; this.status = 400; }
 }
@@ -26,19 +30,37 @@ function group(values) {
 // GET query (URLSearchParams) OR POST body ({ type: (string|string[])[] }) → CNF string[][].
 export function parseTypeFilter({ query, body } = {}) {
   const cnf = [];
+  let total = 0;
   if (query) {
     for (const param of query.getAll('type')) {
-      const g = group(param.split(','));
-      if (g.length) cnf.push(g);                   // empty group → ignored
+      const values = param.split(',');
+      if (values.length > MAX_VALUES_PER_GROUP) throw new FilterError('too many type values in one group');
+      const g = group(values);
+      if (g.length) {
+        if (cnf.length >= MAX_GROUPS) throw new FilterError('too many type groups');
+        total += g.length;
+        if (total > MAX_TOTAL_TERMS) throw new FilterError('too many type terms');
+        cnf.push(g);
+      }
     }
     return cnf;
   }
   if (body && body.type !== undefined) {
     if (!Array.isArray(body.type)) throw new FilterError('body.type must be an array');
     for (const el of body.type) {
-      if (typeof el === 'string') { const g = group([el]); if (g.length) cnf.push(g); }
-      else if (Array.isArray(el)) { const g = group(el); if (g.length) cnf.push(g); }
+      let values;
+      if (typeof el === 'string') values = [el];
+      else if (Array.isArray(el)) values = el;
       else throw new FilterError('each body.type element must be a string or array of strings');
+
+      if (values.length > MAX_VALUES_PER_GROUP) throw new FilterError('too many type values in one group');
+      const g = group(values);
+      if (g.length) {
+        if (cnf.length >= MAX_GROUPS) throw new FilterError('too many type groups');
+        total += g.length;
+        if (total > MAX_TOTAL_TERMS) throw new FilterError('too many type terms');
+        cnf.push(g);
+      }
     }
     return cnf;
   }

@@ -175,7 +175,8 @@ describe('POST /.pods — provisionKeys + --public (footgun guard)', () => {
       logger: false,
       forceCloseConnections: true,
       root: DATA_DIR,
-      public: true
+      public: true,
+      podCreateRateLimitMax: 1000  // this block creates >1 pod; the shipped max:1/day now actually fires
     });
     await server.listen({ port: 0, host: '127.0.0.1' });
     baseUrl = `http://127.0.0.1:${server.server.address().port}`;

@@ -24,7 +24,11 @@ export async function startTestServer(options = {}) {
   // Clean up any existing test data
   await fs.emptyDir(TEST_DATA_DIR);
 
-  server = createServer({ logger: false, forceCloseConnections: true, ...options });
+  // Raise the POST /.pods per-IP-per-day cap (shipped default: 1) so suites
+  // that create several pods against one loopback IP aren't blocked by the
+  // now-armed rate limit. Tests that specifically assert the limit pass their
+  // own override. Production keeps the default of 1.
+  server = createServer({ logger: false, forceCloseConnections: true, podCreateRateLimitMax: 1000, ...options });
   // Use port 0 to let OS assign available port
   await server.listen({ port: 0, host: '127.0.0.1' });
 

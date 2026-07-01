@@ -11,6 +11,7 @@ import { handlePost, handleCreatePod, createPodStructure } from './handlers/cont
 import * as storage from './storage/filesystem.js';
 import { getCorsHeaders } from './ldp/headers.js';
 import { authorize, handleUnauthorized } from './auth/middleware.js';
+import { getWebIdFromRequestAsync } from './auth/token.js';
 import { notificationsPlugin } from './notifications/index.js';
 import { startFileWatcher } from './notifications/events.js';
 import { idpPlugin } from './idp/index.js';
@@ -66,11 +67,42 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * @param {string} options.payMempoolUrl - Mempool API base URL (default testnet4)
  * @param {string} options.payAddress - Pod's MRC20 address for receiving token transfers
  */
+// Which requests carry a trust-aware (two-tier) rate limit and therefore need
+// their webId resolved before the rate-limit keyGenerator runs: the resource
+// writes (PUT/POST/PATCH/DELETE) and the /types/* discovery aggregates. The
+// pre-auth IP guards (/.pods, /idp/*, /oauth/*, /.well-known/*) are pure
+// abuse-guards keyed by IP and must NOT become trust-aware — skip them.
+const TRUST_AWARE_WRITE_METHODS = new Set(['PUT', 'POST', 'PATCH', 'DELETE']);
+function needsTrustAwareRateLimit(request) {
+  const path = request.url.split('?')[0];
+  if (path === '/.pods') return false;
+  if (path === '/idp' || path.startsWith('/idp/') || path.startsWith('/oauth/')) return false;
+  if (path.startsWith('/.well-known/')) return false;
+  if (path === '/types/index' || path === '/types/search') return true;
+  return TRUST_AWARE_WRITE_METHODS.has(request.method);
+}
+
+// Two-tier limit expressed as @fastify/rate-limit function-form max +
+// keyGenerator. `request.webId` is stashed by the global resolver hook (which
+// runs before this route-level onRequest), so both stay synchronous.
+function trustAwareRateLimit(authedMax, anonMax, extra = {}) {
+  return {
+    max: (request) => (request.webId ? authedMax : anonMax),
+    timeWindow: '1 minute',
+    keyGenerator: (request) => (request.webId ? `wid:${request.webId}` : `ip:${request.ip}`),
+    ...extra,
+  };
+}
+
 export function createServer(options = {}) {
   // Content negotiation is OFF by default - we're a JSON-LD native server
   const connegEnabled = options.conneg ?? false;
   // Linked Web Storage surface is OFF by default
   const lwsEnabled = options.lws ?? false;
+  // Type Index/Search services are ON by default whenever --lws is on;
+  // --no-lws-type-index is a per-deployment safety valve to disable just
+  // the type-aggregation surface without disabling the rest of --lws.
+  const typeIndexEnabled = lwsEnabled && (options.lwsTypeIndex ?? true);
   // WebSocket notifications are OFF by default
   const notificationsEnabled = options.notifications ?? false;
   // Identity Provider is OFF by default
@@ -140,6 +172,25 @@ export function createServer(options = {}) {
   const singleUserPassword = options.singleUserPassword ?? null;
   // Default storage quota per pod (50MB default, 0 = unlimited)
   const defaultQuota = options.defaultQuota ?? 50 * 1024 * 1024;
+  // Pod-creation rate limit (POST /.pods) — max per IP per day. Defaults to
+  // 1, the shipped anti-squatting / resource-exhaustion cap. Overridable so
+  // tests that legitimately create many pods against one loopback IP aren't
+  // blocked by the (now correctly armed) limit; the default is unchanged, so
+  // production behavior is identical.
+  const podCreateRateLimitMax = options.podCreateRateLimitMax ?? 1;
+  // Authenticated write / type-query cap (per webId per minute). Generous by
+  // design — a runaway-loop backstop, not a throttle on legitimate bulk agent
+  // work (real write abuse is bounded by WAC + storage quota). Anonymous
+  // callers keep the strict 60/min per-IP crawler/flood cap (see the two-tier
+  // writeRateLimit/typeQueryRateLimit below). Tunable; tests pass a low value
+  // to reach the backstop. Mirrors podCreateRateLimitMax's options pass-through.
+  const writeRateLimitMax = options.writeRateLimitMax ?? 600;
+  // Strict per-IP cap for anonymous callers on the same resource endpoints.
+  const anonRateLimitMax = 60;
+  // Optional single override for every idp brute-force cap (see idpPlugin).
+  // Undefined in production → each idp route keeps its shipped max. Tests that
+  // hammer an idp endpoint from one loopback IP pass a high value.
+  const idpRateLimitMax = options.idpRateLimitMax;
   // WebID-TLS client certificate authentication is OFF by default
   const webidTlsEnabled = options.webidTls ?? false;
   // Live reload - injects script to auto-refresh browser on file changes
@@ -376,6 +427,37 @@ export function createServer(options = {}) {
     }, `${request.method} ${request.url} ${reply.statusCode} ${Math.round(reply.elapsedTime)}ms`);
   });
 
+  // Register rate limiting plugin FIRST, before any plugin (idp/ap) or route
+  // that carries a `config.rateLimit` override. @fastify/rate-limit wires
+  // per-route limits via an `onRoute` hook added inside the plugin body, and
+  // that hook only fires for routes registered AFTER this plugin has booted.
+  // Plugins boot in registration order, so registering rate-limit before the
+  // idp/ap plugins is what actually arms their brute-force limits. (The
+  // synchronous write/`.pods`/type routes registered directly on this instance
+  // still need `fastify.after(...)` — they register before ready() runs any
+  // plugin body at all; see those registrations below.)
+  // Protects against brute force attacks and resource exhaustion.
+  fastify.register(rateLimit, {
+    global: false, // Don't apply globally, only to specific routes
+    max: 100, // Default max requests per window
+    timeWindow: '1 minute',
+    // Custom error response. @fastify/rate-limit does `throw errorResponseBuilder(...)`
+    // and Fastify only routes a THROWN value through its error handler (which sets
+    // the reply status from `.statusCode`) when it is an Error instance — a plain
+    // object silently serializes as a 200 body, so a tripped counter never yields a
+    // real 429. Return an Error with `.statusCode` (429) so every armed limit responds
+    // correctly. `context.after` is a formatted string ("1 minute"); `context.ttl` is
+    // the numeric ms-remaining used to compute Retry-After seconds.
+    errorResponseBuilder: (request, context) => {
+      const retryAfter = Math.ceil(context.ttl / 1000);
+      const err = new Error(`Rate limit exceeded. Try again in ${retryAfter} seconds.`);
+      err.statusCode = context.statusCode;
+      err.error = 'Too Many Requests';
+      err.retryAfter = retryAfter;
+      return err;
+    }
+  });
+
   // Register WebSocket notifications plugin if enabled (or live reload needs it)
   if (notificationsEnabled || liveReloadEnabled) {
     fastify.register(notificationsPlugin);
@@ -404,6 +486,7 @@ export function createServer(options = {}) {
     } catch { /* keep 'unknown' */ }
     fastify.register(idpPlugin, {
       issuer: idpIssuer, inviteOnly, singleUser, singleUserName, jssVersion,
+      idpRateLimitMax,
     });
   }
 
@@ -458,19 +541,9 @@ export function createServer(options = {}) {
     fastify.register(mcpPlugin);
   }
 
-  // Register rate limiting plugin
-  // Protects against brute force attacks and resource exhaustion
-  fastify.register(rateLimit, {
-    global: false, // Don't apply globally, only to specific routes
-    max: 100, // Default max requests per window
-    timeWindow: '1 minute',
-    // Custom error response
-    errorResponseBuilder: (request, context) => ({
-      error: 'Too Many Requests',
-      message: `Rate limit exceeded. Try again in ${Math.ceil(context.after / 1000)} seconds.`,
-      retryAfter: Math.ceil(context.after / 1000)
-    })
-  });
+  // (rate-limit plugin registration moved up — see the block before the
+  // notifications plugin registration; it must boot before the idp/ap plugins
+  // and the write/`.pods`/type routes so their `config.rateLimit` overrides wire.)
 
   // Global CORS preflight
   fastify.addHook('onRequest', async (request, reply) => {
@@ -556,6 +629,29 @@ export function createServer(options = {}) {
     if (hasForbiddenDotfile) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Dotfile access is not allowed' });
     }
+  });
+
+  // Trust-aware rate-limit identity resolver (Task 4c).
+  //
+  // The resource-endpoint limits (writes + /types/*) are two-tier: anonymous →
+  // strict per-IP cap, authenticated → generous per-webId cap. But the
+  // @fastify/rate-limit keyGenerator/max run in a ROUTE-LEVEL `onRequest`, and
+  // `request.webId` isn't set until the auth `preHandler` (writes) or the
+  // in-handler resolution (/types/*), both of which run LATER. So we resolve
+  // identity ONCE here, in a GLOBAL onRequest hook (global onRequest fires
+  // before route-level onRequest in Fastify's lifecycle), and stash
+  // `request.webId`. The sync keyGenerator/max below just read that stash.
+  //
+  // No double-verify: getWebIdFromRequestAsync memoizes on the request, so the
+  // later authorize() (writes) and the /types/* handlers reuse this result
+  // rather than re-verifying the token. Anonymous requests short-circuit inside
+  // getWebIdFromRequestAsync (no Authorization header, no client cert) at
+  // negligible cost. Scoped to the trust-aware routes only — the pre-auth IP
+  // guards (/.pods, /idp/*, /oauth/*, /.well-known/*) are left untouched.
+  fastify.addHook('onRequest', async (request) => {
+    if (!needsTrustAwareRateLimit(request)) return;
+    const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+    request.webId = webId;
   });
 
   // Git HTTP backend handler - uses git http-backend CGI
@@ -719,8 +815,8 @@ export function createServer(options = {}) {
         (activitypubEnabled && apPaths.some(p => request.url === p || request.url.startsWith(p + '?'))) ||
         isProfileAP ||
         request.url.startsWith('/storage/') ||
-        (lwsEnabled && (request.url === '/types/index' || request.url.startsWith('/types/index?'))) ||
-        (lwsEnabled && (request.url === '/types/search' || request.url.startsWith('/types/search?'))) ||
+        (typeIndexEnabled && (request.url === '/types/index' || request.url.startsWith('/types/index?'))) ||
+        (typeIndexEnabled && (request.url === '/types/search' || request.url.startsWith('/types/search?'))) ||
         (payEnabled && isPayRequest(request.url)) ||
         (mongoEnabled && (request.url === '/db' || request.url.startsWith('/db/'))) ||
         (mcpEnabled && (request.url === '/mcp' || request.url.startsWith('/mcp?'))) ||
@@ -768,15 +864,21 @@ export function createServer(options = {}) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Pod creation disabled in single-user mode' });
     });
   } else {
-    fastify.post('/.pods', {
-      config: {
-        rateLimit: {
-          max: 1,
-          timeWindow: '1 day',
-          keyGenerator: (request) => request.ip
+    // Deferred with fastify.after() so the rate-limit plugin's onRoute hook
+    // (registered above but only booted during ready()) has run before this
+    // route registers — otherwise the max:1/day cap silently no-ops. Same
+    // fix as the /types/* and write wildcard routes.
+    fastify.after(() => {
+      fastify.post('/.pods', {
+        config: {
+          rateLimit: {
+            max: podCreateRateLimitMax,
+            timeWindow: '1 day',
+            keyGenerator: (request) => request.ip
+          }
         }
-      }
-    }, handleCreatePod);
+      }, handleCreatePod);
+    });
   }
 
   // Mashlib CDN mode: redirect chunk requests to CDN
@@ -792,17 +894,42 @@ export function createServer(options = {}) {
     });
   }
 
-  // Rate limit configuration for write operations
-  // Protects against resource exhaustion and abuse
+  // Rate limit configuration for write operations (Task 4c: trust-aware).
+  // Anonymous → strict 60/min per IP (crawler/flood defense; anon writes 401
+  // via WAC anyway). Authenticated → generous writeRateLimitMax/min per webId
+  // (runaway-loop backstop; real abuse bounded by WAC + quota). `request.webId`
+  // is set by the global resolver hook above, before this route-level limiter.
   const writeRateLimit = {
     config: {
-      rateLimit: {
-        max: 60,
-        timeWindow: '1 minute',
-        keyGenerator: (request) => request.webId || request.ip
-      }
-    }
+      rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax),
+    },
   };
+
+  // Read rate limit for the LWS type-discovery aggregate endpoints (unauth-reachable,
+  // each does a full-tree walk). Keyed by webId when authenticated, else client IP.
+  // Per-route errorResponseBuilder (overrides the global one above for these
+  // routes only — @fastify/rate-limit merges `config.rateLimit` over the
+  // plugin-level params and uses the merged params at the throw site). Must
+  // be an actual Error with `.statusCode` — @fastify/rate-limit does `throw
+  // errorResponseBuilder(...)`, and Fastify only routes a thrown value
+  // through its error-handling (which sets the reply status from
+  // `.statusCode`) when it's an Error instance; a plain object here silently
+  // serializes as a 200 body (confirmed empirically: headers/counting
+  // worked, status never left 200). `context.after` is a formatted string
+  // (e.g. "1 minute"), not milliseconds — `context.ttl` is the numeric
+  // ms-remaining to compute the retry-after seconds from.
+  // Trust-aware like writeRateLimit: anonymous → 60/min per IP, authenticated →
+  // writeRateLimitMax/min per webId. Same tiers as writes — a full-tree walk is
+  // the cost being bounded, and an authenticated agent doing legitimate bulk
+  // discovery shouldn't be throttled at the anon crawler cap.
+  const typeQueryRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax, {
+    errorResponseBuilder: (request, context) => {
+      const retryAfter = Math.ceil(context.ttl / 1000);
+      const err = new Error(`Rate limit exceeded. Try again in ${retryAfter} seconds.`);
+      err.statusCode = context.statusCode;
+      return err;
+    }
+  }) } };
 
   // /.well-known/did/nostr/<pubkey>(.json|.jsonld)? — did:nostr HTTP
   // resolution for accounts on this pod (#407). Registered before the
@@ -884,8 +1011,10 @@ export function createServer(options = {}) {
       const host = request.hostname;
       const root = `${proto}://${host}/`;
       const services = [{ type: 'StorageDescription', serviceEndpoint: `${proto}://${host}${lwsStoragePath}` }];
-      services.push({ type: 'TypeIndexService', serviceEndpoint: `${proto}://${host}/types/index` });
-      services.push({ type: 'TypeSearchService', serviceEndpoint: `${proto}://${host}/types/search` });
+      if (typeIndexEnabled) {
+        services.push({ type: 'TypeIndexService', serviceEndpoint: `${proto}://${host}/types/index` });
+        services.push({ type: 'TypeSearchService', serviceEndpoint: `${proto}://${host}/types/search` });
+      }
       if (notificationsEnabled) {
         services.push({ type: 'NotificationService', serviceEndpoint: `${proto}://${host}/notification/api` });
       }
@@ -899,22 +1028,37 @@ export function createServer(options = {}) {
       fastify[m](lwsStoragePath, methodNotAllowed);
     }
 
-    // LWS TypeIndexService — GET /types/index. This is a virtual aggregate
-    // over every resource in the pod tree, not a single WAC-protected
-    // resource, so (like /mcp, /db, /.terminal) it's exempted from the
-    // blanket preHandler above (see `request.url === '/types/index'`) and
-    // resolves identity + per-resource access itself inside the handler —
-    // that internal checkAccess()-and-drop loop IS the authorization here.
-    fastify.get('/types/index', handleTypeIndex);
-    for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
+    if (typeIndexEnabled) {
+      // fastify.after() defers these two registrations until every plugin
+      // queued before this point in the boot sequence — including
+      // `fastify.register(rateLimit, ...)` above (~:467) — has actually run.
+      // createServer() is synchronous, so a plain `fastify.get(path, {
+      // config: { rateLimit } }, handler)` call made here executes before
+      // the rate-limit plugin's `onRoute` hook exists yet (the plugin body
+      // only runs during the async boot phase), which silently no-ops the
+      // route-level rate limit (confirmed empirically: no x-ratelimit-*
+      // headers, no 429 ever, even at 65 rapid requests). `after()` is the
+      // documented fix — see the sibling `writeRateLimit` routes (~:935)
+      // for the same latent gap, out of scope for this task.
+      fastify.after(() => {
+        // LWS TypeIndexService — GET /types/index. This is a virtual aggregate
+        // over every resource in the pod tree, not a single WAC-protected
+        // resource, so (like /mcp, /db, /.terminal) it's exempted from the
+        // blanket preHandler above (see `request.url === '/types/index'`) and
+        // resolves identity + per-resource access itself inside the handler —
+        // that internal checkAccess()-and-drop loop IS the authorization here.
+        fastify.get('/types/index', typeQueryRateLimit, handleTypeIndex);
 
-    // LWS TypeSearchService — GET/POST /types/search. Same virtual-aggregate
-    // exemption as /types/index above (see `request.url === '/types/search'`);
-    // authorizedResources() inside handleTypeSearch does the per-resource
-    // WAC check that a route-level ACL would normally provide.
-    fastify.get('/types/search', handleTypeSearch);
-    fastify.post('/types/search', handleTypeSearch);
-    for (const m of ['put', 'patch', 'delete']) fastify[m]('/types/search', methodNotAllowed);
+        // LWS TypeSearchService — GET/POST /types/search. Same virtual-aggregate
+        // exemption as /types/index above (see `request.url === '/types/search'`);
+        // authorizedResources() inside handleTypeSearch does the per-resource
+        // WAC check that a route-level ACL would normally provide.
+        fastify.get('/types/search', typeQueryRateLimit, handleTypeSearch);
+        fastify.post('/types/search', typeQueryRateLimit, handleTypeSearch);
+      });
+      for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
+      for (const m of ['put', 'patch', 'delete']) fastify[m]('/types/search', methodNotAllowed);
+    }
   }
 
   // LDP routes - using wildcard routing
@@ -923,17 +1067,24 @@ export function createServer(options = {}) {
   fastify.head('/*', handleHead);
   fastify.options('/*', handleOptions);
 
-  // Write operations - rate limited
-  fastify.put('/*', writeRateLimit, handlePut);
-  fastify.delete('/*', writeRateLimit, handleDelete);
-  fastify.post('/*', writeRateLimit, handlePost);
-  fastify.patch('/*', writeRateLimit, handlePatch);
-
-  // Root route
+  // Root route (reads)
   fastify.get('/', handleGet);
   fastify.head('/', handleHead);
   fastify.options('/', handleOptions);
-  fastify.post('/', writeRateLimit, handlePost);
+
+  // Write operations - rate limited. Deferred with fastify.after() so the
+  // rate-limit plugin's onRoute hook has booted before these register;
+  // createServer() is synchronous, so a bare fastify.put(..., writeRateLimit)
+  // here would run before any plugin body and the max:60/min cap would
+  // silently no-op (no x-ratelimit-* headers, no 429 ever). Same fix as the
+  // /types/* and /.pods routes.
+  fastify.after(() => {
+    fastify.put('/*', writeRateLimit, handlePut);
+    fastify.delete('/*', writeRateLimit, handleDelete);
+    fastify.post('/*', writeRateLimit, handlePost);
+    fastify.patch('/*', writeRateLimit, handlePatch);
+    fastify.post('/', writeRateLimit, handlePost);
+  });
 
   // Server-root landing page: seed /index.html and a public-read /.acl
   // on first start (skip-if-exists, so operator-provided files are

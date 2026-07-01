@@ -36,7 +36,7 @@ describe('Identity Provider', () => {
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
 
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: DATA_DIR,
       idp: true,
@@ -430,7 +430,7 @@ describe('Identity Provider - Subdomain mode register validation', () => {
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
 
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: SUBDOMAIN_DATA_DIR,
       idp: true,
@@ -488,7 +488,7 @@ describe('Identity Provider - Single-user mode landing', () => {
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
 
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: SINGLE_USER_DATA_DIR,
       idp: true,
@@ -541,7 +541,7 @@ describe('Identity Provider - Root pod type index ACLs', () => {
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
 
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: ROOT_POD_DATA_DIR,
       idp: true,
@@ -591,7 +591,7 @@ describe('Single-user default — root pod (#348)', () => {
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
 
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: DEFAULT_DATA_DIR,
       idp: true,
@@ -665,7 +665,7 @@ describe('Identity Provider - Accounts', () => {
     const port = await getAvailablePort();
     accountsUrl = `http://${TEST_HOST}:${port}`;
 
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: ACCOUNTS_DATA_DIR,
       idp: true,
@@ -747,7 +747,7 @@ describe('Identity Provider - Credentials Endpoint', () => {
     const port = await getAvailablePort();
     credsUrl = `http://${TEST_HOST}:${port}`;
 
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       idp: true,
       idpIssuer: credsUrl,
@@ -948,7 +948,7 @@ describe('Identity Provider — single-user password seeding (#323)', () => {
     await fs.ensureDir(dir);
     const port = await getAvailablePort();
     const baseUrl = `http://${TEST_HOST}:${port}`;
-    const server = createServer({
+    const server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: dir,
       idp: true,
@@ -983,7 +983,7 @@ describe('Identity Provider — single-user password seeding (#323)', () => {
     await fs.ensureDir(dir);
     const port = await getAvailablePort();
     const baseUrl = `http://${TEST_HOST}:${port}`;
-    const server = createServer({
+    const server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: dir,
       idp: true,
@@ -1014,7 +1014,7 @@ describe('Identity Provider — single-user password seeding (#323)', () => {
     const port = await getAvailablePort();
     const baseUrl = `http://${TEST_HOST}:${port}`;
     const startOnce = async () => {
-      const s = createServer({
+      const s = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
         logger: false,
         root: dir,
         idp: true,
@@ -1060,7 +1060,7 @@ describe('Identity Provider — single-user password seeding (#323)', () => {
 
     const port = await getAvailablePort();
     const baseUrl = `http://${TEST_HOST}:${port}`;
-    const server = createServer({
+    const server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: dir,
       idp: true,
@@ -1090,7 +1090,7 @@ describe('Identity Provider — single-user password seeding (#323)', () => {
     await fs.remove(dir);
     await fs.ensureDir(dir);
     const port = await getAvailablePort();
-    const server = createServer({
+    const server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: dir,
       idp: false,

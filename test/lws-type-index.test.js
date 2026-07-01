@@ -178,3 +178,30 @@ describe('server-managed type store does not outlive the resource', () => {
     assert.ok(!types.includes(PERSON), `stale schema:Person survived a rewrite with no Link header, got ${types}`);
   });
 });
+
+describe('type endpoints are rate limited', () => {
+  before(async () => { await stopTestServer(); await startTestServer({ lws: true }); });
+  after(async () => { await stopTestServer(); });
+  it('returns 429 after exceeding the per-window limit', async () => {
+    let got429 = false;
+    for (let i = 0; i < 62; i++) {                      // max is 60/min
+      const r = await fetch(`${getBaseUrl()}/types/index`);
+      if (r.status === 429) { got429 = true; break; }
+    }
+    assert.ok(got429, 'expected a 429 within 62 requests');
+  });
+});
+
+describe('lwsTypeIndex config gate', () => {
+  before(async () => { await stopTestServer(); await startTestServer({ lws: true, lwsTypeIndex: false }); });
+  after(async () => { await stopTestServer(); });
+  it('when disabled, services are not advertised and endpoints are not the type handler', async () => {
+    const sd = await (await fetch(`${getBaseUrl()}/.well-known/lws-storage`)).json();
+    const types = sd.service.map((s) => s.type);
+    assert.ok(!types.includes('TypeIndexService'));
+    assert.ok(!types.includes('TypeSearchService'));
+    // /types/index is no longer the aggregate handler → not a 200 TypeIndex
+    const r = await fetch(`${getBaseUrl()}/types/index`);
+    assert.notEqual(r.status, 200);
+  });
+});

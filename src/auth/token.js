@@ -199,6 +199,27 @@ export function getWebIdFromRequest(request) {
  * @returns {Promise<{webId: string|null, error: string|null}>}
  */
 export async function getWebIdFromRequestAsync(request) {
+  // Memoize per-request. Identity is resolved at most ONCE even though several
+  // consumers ask for it on the same request: the trust-aware rate-limit
+  // resolver (onRequest), the auth preHandler via authorize() (writes), and the
+  // /types/* handlers (preHandler-bypassed) all call this. Without the cache an
+  // authenticated write would verify its token twice on the hot path (once for
+  // the limiter key, once for auth). The cache key is the request object, whose
+  // Authorization header is immutable across its lifecycle.
+  if (request && request._lwsWebIdAuth !== undefined) {
+    return request._lwsWebIdAuth;
+  }
+  const result = await resolveWebIdFromRequest(request);
+  if (request) {
+    // Non-enumerable so it never leaks into logging/serialization of request.
+    Object.defineProperty(request, '_lwsWebIdAuth', {
+      value: result, writable: true, enumerable: false, configurable: true,
+    });
+  }
+  return result;
+}
+
+async function resolveWebIdFromRequest(request) {
   const authHeader = request.headers.authorization;
 
   // Try Authorization header methods first

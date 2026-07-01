@@ -35,6 +35,7 @@ export const defaults = {
   multiuser: true,
   conneg: false,
   lws: false,
+  lwsTypeIndex: true,
   notifications: false,
 
   // Identity Provider
@@ -112,6 +113,14 @@ export const defaults = {
   // Storage quota (bytes) - 50MB default
   defaultQuota: 50 * 1024 * 1024,
 
+  // Authenticated write / type-query rate cap (requests per minute per
+  // webId). createServer() already defaults this to 600 on its own
+  // (server.js `options.writeRateLimitMax ?? 600`) — this default just
+  // keeps `--print-config` / config-file round-tripping honest. Threaded
+  // through so a CLI-launched pod (the Dockerfile path) can tune it
+  // without a code edit; see --write-rate-limit-max / JSS_WRITE_RATE_LIMIT_MAX.
+  writeRateLimitMax: 600,
+
   // Public mode - skip WAC, allow unauthenticated access
   public: false,
 
@@ -159,6 +168,7 @@ const envMap = {
   JSS_MULTIUSER: 'multiuser',
   JSS_CONNEG: 'conneg',
   JSS_LWS: 'lws',
+  JSS_LWS_TYPE_INDEX: 'lwsTypeIndex',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
@@ -197,6 +207,7 @@ const envMap = {
   JSS_PROVISION_KEYS: 'provisionKeys',
   JSS_WEBID_TLS: 'webidTls',
   JSS_DEFAULT_QUOTA: 'defaultQuota',
+  JSS_WRITE_RATE_LIMIT_MAX: 'writeRateLimitMax',
   JSS_PUBLIC: 'public',
   JSS_READ_ONLY: 'readOnly',
   JSS_LIVE_RELOAD: 'liveReload',
@@ -237,6 +248,7 @@ const BOOLEAN_KEYS = new Set([
   'ssl',
   'conneg',
   'lws',
+  'lwsTypeIndex',
   'subdomains',
   'mashlib',
   'mashlibCdn',
@@ -289,8 +301,10 @@ function parseEnvValue(value, key) {
     return parseInt(value, 10);
   }
 
-  // Size values (quota, body limit)
-  if (key === 'defaultQuota' || key === 'bodyLimit') {
+  // Size/count values (quota, body limit, write rate limit) — parseSize
+  // also handles bare integers (no unit), so it's a safe fit for a
+  // plain requests-per-minute count like writeRateLimitMax too.
+  if (key === 'defaultQuota' || key === 'bodyLimit' || key === 'writeRateLimitMax') {
     return parseSize(value);
   }
 
