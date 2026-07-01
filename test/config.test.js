@@ -7,7 +7,7 @@
  * become a real boolean and break downstream code (bcrypt, etc.).
  */
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert';
 import { loadConfig } from '../src/config.js';
 
@@ -156,6 +156,40 @@ describe('config — --single-user implies --idp (#331)', () => {
     await loadConfig({ idp: false }, null);
     assert.ok(!warnings.some(isIdpFootgunWarning),
       '--no-idp without --single-user should not trigger the #331 warning');
+  });
+});
+
+// writeRateLimitMax CLI/env wiring (Task 4c follow-up): the authenticated
+// write/type-query rate cap was createServer()-only — a CLI-launched pod
+// (the Dockerfile path) couldn't tune it. Mirrors the JSS_BODY_LIMIT /
+// JSS_DEFAULT_QUOTA numeric-coercion coverage above: an env-var string must
+// come out of loadConfig() as a number, not a string, so it reaches
+// createServer() ready to use in the rate-limit comparison.
+describe('config — writeRateLimitMax CLI/env wiring', () => {
+  const KEY = 'JSS_WRITE_RATE_LIMIT_MAX';
+  const original = process.env[KEY];
+  afterEach(() => {
+    if (original === undefined) delete process.env[KEY];
+    else process.env[KEY] = original;
+  });
+
+  it('defaults to 600 (number) when unset', async () => {
+    delete process.env[KEY];
+    const cfg = await loadConfig({}, null);
+    assert.strictEqual(cfg.writeRateLimitMax, 600);
+  });
+
+  it('JSS_WRITE_RATE_LIMIT_MAX="3" coerces to the number 3', async () => {
+    process.env[KEY] = '3';
+    const cfg = await loadConfig({}, null);
+    assert.strictEqual(cfg.writeRateLimitMax, 3);
+    assert.strictEqual(typeof cfg.writeRateLimitMax, 'number');
+  });
+
+  it('a commander-parsed CLI value (already a number) passes through unchanged', async () => {
+    delete process.env[KEY];
+    const cfg = await loadConfig({ writeRateLimitMax: 42 }, null);
+    assert.strictEqual(cfg.writeRateLimitMax, 42);
   });
 });
 
