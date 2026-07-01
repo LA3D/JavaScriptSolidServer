@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError, intrinsicType, resourceTypes, buildTypeIndex, containerItemTypes } from '../src/lws/type-index.js';
+import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError, intrinsicType, resourceTypes, buildTypeIndex, containerItemTypes, MAX_GROUPS, MAX_VALUES_PER_GROUP, MAX_TOTAL_TERMS } from '../src/lws/type-index.js';
 
 const A = 'https://schema.org/Person';
 const B = 'http://xmlns.com/foaf/0.1/Person';
@@ -77,5 +77,32 @@ describe('type resolution + index', () => {
     assert.deepEqual(
       containerItemTypes(['https://schema.org/Person', 'http://ex/Note']),
       ['https://schema.org/Person', 'http://ex/Note']);
+  });
+});
+
+describe('CNF complexity caps', () => {
+  const uri = (n) => `https://ex.org/T${n}`;
+  it('rejects too many groups with 400', () => {
+    const q = new URLSearchParams();
+    for (let i = 0; i <= MAX_GROUPS; i++) q.append('type', uri(i));
+    assert.throws(() => parseTypeFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
+  });
+  it('rejects too many values in one group with 400', () => {
+    const g = Array.from({ length: MAX_VALUES_PER_GROUP + 1 }, (_, i) => uri(i)).join(',');
+    const q = new URLSearchParams(); q.append('type', g);
+    assert.throws(() => parseTypeFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
+  });
+  it('rejects too many total terms with 400', () => {
+    // groups within MAX_GROUPS but total terms over MAX_TOTAL_TERMS
+    const per = Math.ceil((MAX_TOTAL_TERMS + 1) / MAX_GROUPS);
+    const q = new URLSearchParams();
+    for (let g = 0; g < MAX_GROUPS; g++)
+      q.append('type', Array.from({ length: per }, (_, i) => uri(g * 100 + i)).join(','));
+    assert.throws(() => parseTypeFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
+  });
+  it('accepts a filter just under the bounds', () => {
+    const q = new URLSearchParams();
+    for (let i = 0; i < MAX_GROUPS; i++) q.append('type', uri(i));
+    assert.equal(parseTypeFilter({ query: q }).length, MAX_GROUPS);
   });
 });
