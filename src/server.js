@@ -468,20 +468,12 @@ export function createServer(options = {}) {
     global: false, // Don't apply globally, only to specific routes
     max: 100, // Default max requests per window
     timeWindow: '1 minute',
-    // Custom error response. Must be an actual Error with `.statusCode` —
-    // @fastify/rate-limit does `throw errorResponseBuilder(...)`, and Fastify
-    // only routes a thrown value through its error-handling (which sets the
-    // reply status from `.statusCode`) when it's an Error instance; a plain
-    // object here silently serializes as a 200 body (confirmed empirically:
-    // headers/counting worked, status never left 200). `context.after` is a
-    // formatted string (e.g. "1 minute"), not milliseconds — `context.ttl` is
-    // the numeric ms-remaining to compute the retry-after seconds from.
-    errorResponseBuilder: (request, context) => {
-      const retryAfter = Math.ceil(context.ttl / 1000);
-      const err = new Error(`Rate limit exceeded. Try again in ${retryAfter} seconds.`);
-      err.statusCode = context.statusCode;
-      return err;
-    }
+    // Custom error response
+    errorResponseBuilder: (request, context) => ({
+      error: 'Too Many Requests',
+      message: `Rate limit exceeded. Try again in ${Math.ceil(context.after / 1000)} seconds.`,
+      retryAfter: Math.ceil(context.after / 1000)
+    })
   });
 
   // Global CORS preflight
@@ -818,9 +810,26 @@ export function createServer(options = {}) {
 
   // Read rate limit for the LWS type-discovery aggregate endpoints (unauth-reachable,
   // each does a full-tree walk). Keyed by webId when authenticated, else client IP.
+  // Per-route errorResponseBuilder (overrides the global one above for these
+  // routes only — @fastify/rate-limit merges `config.rateLimit` over the
+  // plugin-level params and uses the merged params at the throw site). Must
+  // be an actual Error with `.statusCode` — @fastify/rate-limit does `throw
+  // errorResponseBuilder(...)`, and Fastify only routes a thrown value
+  // through its error-handling (which sets the reply status from
+  // `.statusCode`) when it's an Error instance; a plain object here silently
+  // serializes as a 200 body (confirmed empirically: headers/counting
+  // worked, status never left 200). `context.after` is a formatted string
+  // (e.g. "1 minute"), not milliseconds — `context.ttl` is the numeric
+  // ms-remaining to compute the retry-after seconds from.
   const typeQueryRateLimit = { config: { rateLimit: {
     max: 60, timeWindow: '1 minute',
     keyGenerator: (request) => request.webId || request.ip,
+    errorResponseBuilder: (request, context) => {
+      const retryAfter = Math.ceil(context.ttl / 1000);
+      const err = new Error(`Rate limit exceeded. Try again in ${retryAfter} seconds.`);
+      err.statusCode = context.statusCode;
+      return err;
+    }
   } } };
 
   // /.well-known/did/nostr/<pubkey>(.json|.jsonld)? — did:nostr HTTP
