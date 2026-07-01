@@ -16,6 +16,8 @@ import { readLedger, getBalance, debit } from '../webledger.js';
  * @param {boolean} options.isContainer - Whether resource is a container
  * @param {string|null} options.agentWebId - WebID of the agent (null for unauthenticated)
  * @param {string} options.requiredMode - Required access mode (from AccessMode)
+ * @param {Map|null} [options.aclCache] - Optional per-query cache (keyed by ACL storage path)
+ *   memoizing parsed `.acl` reads within a single call set. Never a cross-request cache.
  * @returns {Promise<{allowed: boolean, wacAllow: string}>}
  */
 export async function checkAccess({
@@ -23,10 +25,11 @@ export async function checkAccess({
   resourcePath,
   isContainer,
   agentWebId,
-  requiredMode
+  requiredMode,
+  aclCache = null
 }) {
   // Find applicable ACL
-  const aclResult = await findApplicableAcl(resourceUrl, resourcePath, isContainer);
+  const aclResult = await findApplicableAcl(resourceUrl, resourcePath, isContainer, aclCache);
 
   if (!aclResult) {
     // No ACL found - deny by default (restrictive mode)
@@ -55,20 +58,32 @@ export async function checkAccess({
 /**
  * Find the applicable ACL for a resource
  * Walks up the path hierarchy looking for .acl files
+ * @param {Map|null} [aclCache] - Optional per-query memoization of parsed `.acl` files,
+ *   keyed by ACL storage path. Read-only optimization: never changes which ACL applies
+ *   or what it authorizes, since it is scoped to a single call set over stable on-disk state.
  */
-async function findApplicableAcl(resourceUrl, resourcePath, isContainer) {
+async function findApplicableAcl(resourceUrl, resourcePath, isContainer, aclCache = null) {
+  // Memoize parsed ACLs within one query. Key = acl storage path.
+  // Value = { authorizations } | null (null = checked, absent).
+  const loadAcl = async (aclStoragePath, aclUrl) => {
+    if (aclCache && aclCache.has(aclStoragePath)) return aclCache.get(aclStoragePath);
+    let parsed = null;
+    if (await storage.exists(aclStoragePath)) {
+      const content = await storage.read(aclStoragePath);
+      if (content) parsed = { authorizations: await parseAcl(content.toString(), aclUrl) };
+    }
+    if (aclCache) aclCache.set(aclStoragePath, parsed);
+    return parsed;
+  };
+
   // First check for resource-specific ACL
   const resourceAclPath = isContainer
     ? (resourcePath.endsWith('/') ? resourcePath : resourcePath + '/') + '.acl'
     : resourcePath + '.acl';
 
-  if (await storage.exists(resourceAclPath)) {
-    const content = await storage.read(resourceAclPath);
-    if (content) {
-      const aclUrl = getAclUrl(resourceUrl, isContainer);
-      const authorizations = await parseAcl(content.toString(), aclUrl);
-      return { authorizations, isDefault: false, targetUrl: resourceUrl };
-    }
+  {
+    const parsed = await loadAcl(resourceAclPath, getAclUrl(resourceUrl, isContainer));
+    if (parsed) return { authorizations: parsed.authorizations, isDefault: false, targetUrl: resourceUrl };
   }
 
   // Walk up the hierarchy looking for default ACLs
@@ -81,32 +96,25 @@ async function findApplicableAcl(resourceUrl, resourcePath, isContainer) {
     const parentStoragePath = getParentPath(currentStoragePath);
     const parentAclPath = parentStoragePath + '.acl';
 
-    if (await storage.exists(parentAclPath)) {
-      const content = await storage.read(parentAclPath);
-      if (content) {
-        // Get parent URL path and construct full URL
-        const parentUrlPath = getParentPath(currentUrlPath);
-        const origin = resourceUrl.substring(0, resourceUrl.indexOf('/', 8));
-        const parentUrl = origin + parentUrlPath;
-        const parentAclUrl = getAclUrl(parentUrl, true); // Container ACL URL
-        const authorizations = await parseAcl(content.toString(), parentAclUrl);
-        return { authorizations, isDefault: true, targetUrl: parentUrl };
-      }
-    }
+    // Get parent URL path and construct full URL
+    const parentUrlPath = getParentPath(currentUrlPath);
+    const origin = resourceUrl.substring(0, resourceUrl.indexOf('/', 8));
+    const parentUrl = origin + parentUrlPath;
+    const parentAclUrl = getAclUrl(parentUrl, true); // Container ACL URL
+
+    const parsed = await loadAcl(parentAclPath, parentAclUrl);
+    if (parsed) return { authorizations: parsed.authorizations, isDefault: true, targetUrl: parentUrl };
 
     currentStoragePath = parentStoragePath;
     currentUrlPath = getParentPath(currentUrlPath);
   }
 
   // Check root ACL
-  if (await storage.exists('/.acl')) {
-    const content = await storage.read('/.acl');
-    if (content) {
-      const rootUrl = resourceUrl.substring(0, resourceUrl.indexOf('/', 8) + 1);
-      const rootAclUrl = getAclUrl(rootUrl, true); // Root container ACL URL
-      const authorizations = await parseAcl(content.toString(), rootAclUrl);
-      return { authorizations, isDefault: true, targetUrl: rootUrl };
-    }
+  {
+    const rootUrl = resourceUrl.substring(0, resourceUrl.indexOf('/', 8) + 1);
+    const rootAclUrl = getAclUrl(rootUrl, true); // Root container ACL URL
+    const parsed = await loadAcl('/.acl', rootAclUrl);
+    if (parsed) return { authorizations: parsed.authorizations, isDefault: true, targetUrl: rootUrl };
   }
 
   return null;
