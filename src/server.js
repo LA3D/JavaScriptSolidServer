@@ -11,6 +11,7 @@ import { handlePost, handleCreatePod, createPodStructure } from './handlers/cont
 import * as storage from './storage/filesystem.js';
 import { getCorsHeaders } from './ldp/headers.js';
 import { authorize, handleUnauthorized } from './auth/middleware.js';
+import { getWebIdFromRequestAsync } from './auth/token.js';
 import { notificationsPlugin } from './notifications/index.js';
 import { startFileWatcher } from './notifications/events.js';
 import { idpPlugin } from './idp/index.js';
@@ -66,6 +67,33 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * @param {string} options.payMempoolUrl - Mempool API base URL (default testnet4)
  * @param {string} options.payAddress - Pod's MRC20 address for receiving token transfers
  */
+// Which requests carry a trust-aware (two-tier) rate limit and therefore need
+// their webId resolved before the rate-limit keyGenerator runs: the resource
+// writes (PUT/POST/PATCH/DELETE) and the /types/* discovery aggregates. The
+// pre-auth IP guards (/.pods, /idp/*, /oauth/*, /.well-known/*) are pure
+// abuse-guards keyed by IP and must NOT become trust-aware — skip them.
+const TRUST_AWARE_WRITE_METHODS = new Set(['PUT', 'POST', 'PATCH', 'DELETE']);
+function needsTrustAwareRateLimit(request) {
+  const path = request.url.split('?')[0];
+  if (path === '/.pods') return false;
+  if (path === '/idp' || path.startsWith('/idp/') || path.startsWith('/oauth/')) return false;
+  if (path.startsWith('/.well-known/')) return false;
+  if (path === '/types/index' || path === '/types/search') return true;
+  return TRUST_AWARE_WRITE_METHODS.has(request.method);
+}
+
+// Two-tier limit expressed as @fastify/rate-limit function-form max +
+// keyGenerator. `request.webId` is stashed by the global resolver hook (which
+// runs before this route-level onRequest), so both stay synchronous.
+function trustAwareRateLimit(authedMax, anonMax, extra = {}) {
+  return {
+    max: (request) => (request.webId ? authedMax : anonMax),
+    timeWindow: '1 minute',
+    keyGenerator: (request) => (request.webId ? `wid:${request.webId}` : `ip:${request.ip}`),
+    ...extra,
+  };
+}
+
 export function createServer(options = {}) {
   // Content negotiation is OFF by default - we're a JSON-LD native server
   const connegEnabled = options.conneg ?? false;
@@ -150,6 +178,15 @@ export function createServer(options = {}) {
   // blocked by the (now correctly armed) limit; the default is unchanged, so
   // production behavior is identical.
   const podCreateRateLimitMax = options.podCreateRateLimitMax ?? 1;
+  // Authenticated write / type-query cap (per webId per minute). Generous by
+  // design — a runaway-loop backstop, not a throttle on legitimate bulk agent
+  // work (real write abuse is bounded by WAC + storage quota). Anonymous
+  // callers keep the strict 60/min per-IP crawler/flood cap (see the two-tier
+  // writeRateLimit/typeQueryRateLimit below). Tunable; tests pass a low value
+  // to reach the backstop. Mirrors podCreateRateLimitMax's options pass-through.
+  const writeRateLimitMax = options.writeRateLimitMax ?? 600;
+  // Strict per-IP cap for anonymous callers on the same resource endpoints.
+  const anonRateLimitMax = 60;
   // Optional single override for every idp brute-force cap (see idpPlugin).
   // Undefined in production → each idp route keeps its shipped max. Tests that
   // hammer an idp endpoint from one loopback IP pass a high value.
@@ -594,6 +631,29 @@ export function createServer(options = {}) {
     }
   });
 
+  // Trust-aware rate-limit identity resolver (Task 4c).
+  //
+  // The resource-endpoint limits (writes + /types/*) are two-tier: anonymous →
+  // strict per-IP cap, authenticated → generous per-webId cap. But the
+  // @fastify/rate-limit keyGenerator/max run in a ROUTE-LEVEL `onRequest`, and
+  // `request.webId` isn't set until the auth `preHandler` (writes) or the
+  // in-handler resolution (/types/*), both of which run LATER. So we resolve
+  // identity ONCE here, in a GLOBAL onRequest hook (global onRequest fires
+  // before route-level onRequest in Fastify's lifecycle), and stash
+  // `request.webId`. The sync keyGenerator/max below just read that stash.
+  //
+  // No double-verify: getWebIdFromRequestAsync memoizes on the request, so the
+  // later authorize() (writes) and the /types/* handlers reuse this result
+  // rather than re-verifying the token. Anonymous requests short-circuit inside
+  // getWebIdFromRequestAsync (no Authorization header, no client cert) at
+  // negligible cost. Scoped to the trust-aware routes only — the pre-auth IP
+  // guards (/.pods, /idp/*, /oauth/*, /.well-known/*) are left untouched.
+  fastify.addHook('onRequest', async (request) => {
+    if (!needsTrustAwareRateLimit(request)) return;
+    const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+    request.webId = webId;
+  });
+
   // Git HTTP backend handler - uses git http-backend CGI
   // Authorization: Read for clone/fetch, Write for push
   if (gitEnabled) {
@@ -834,16 +894,15 @@ export function createServer(options = {}) {
     });
   }
 
-  // Rate limit configuration for write operations
-  // Protects against resource exhaustion and abuse
+  // Rate limit configuration for write operations (Task 4c: trust-aware).
+  // Anonymous → strict 60/min per IP (crawler/flood defense; anon writes 401
+  // via WAC anyway). Authenticated → generous writeRateLimitMax/min per webId
+  // (runaway-loop backstop; real abuse bounded by WAC + quota). `request.webId`
+  // is set by the global resolver hook above, before this route-level limiter.
   const writeRateLimit = {
     config: {
-      rateLimit: {
-        max: 60,
-        timeWindow: '1 minute',
-        keyGenerator: (request) => request.webId || request.ip
-      }
-    }
+      rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax),
+    },
   };
 
   // Read rate limit for the LWS type-discovery aggregate endpoints (unauth-reachable,
@@ -859,16 +918,18 @@ export function createServer(options = {}) {
   // worked, status never left 200). `context.after` is a formatted string
   // (e.g. "1 minute"), not milliseconds — `context.ttl` is the numeric
   // ms-remaining to compute the retry-after seconds from.
-  const typeQueryRateLimit = { config: { rateLimit: {
-    max: 60, timeWindow: '1 minute',
-    keyGenerator: (request) => request.webId || request.ip,
+  // Trust-aware like writeRateLimit: anonymous → 60/min per IP, authenticated →
+  // writeRateLimitMax/min per webId. Same tiers as writes — a full-tree walk is
+  // the cost being bounded, and an authenticated agent doing legitimate bulk
+  // discovery shouldn't be throttled at the anon crawler cap.
+  const typeQueryRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax, {
     errorResponseBuilder: (request, context) => {
       const retryAfter = Math.ceil(context.ttl / 1000);
       const err = new Error(`Rate limit exceeded. Try again in ${retryAfter} seconds.`);
       err.statusCode = context.statusCode;
       return err;
     }
-  } } };
+  }) } };
 
   // /.well-known/did/nostr/<pubkey>(.json|.jsonld)? — did:nostr HTTP
   // resolution for accounts on this pod (#407). Registered before the
