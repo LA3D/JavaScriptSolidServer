@@ -2,7 +2,7 @@
 import * as storage from '../storage/filesystem.js';
 import { walkResources } from '../storage/filesystem.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
-import { resourceTypes, buildTypeIndex, parseTypeFilter, matchesTypeFilter, FilterError } from '../lws/type-index.js';
+import { resourceTypes, buildTypeIndex, parseTypeFilter, matchesTypeFilter, containerItemTypes, FilterError } from '../lws/type-index.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
@@ -102,6 +102,6 @@ export async function handleTypeSearch(request, reply) {
   reply.type(LWS_JSON);
   return reply.send(JSON.stringify({
     '@context': LWS_CONTEXT, type: 'ContainerPage', totalItems: matched.length,
-    items: matched.map((r) => ({ id: r.id, type: r.types })),
+    items: matched.map((r) => ({ id: r.id, type: containerItemTypes(r.types) })),
   }, null, 2));
 }

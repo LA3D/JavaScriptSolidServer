@@ -62,6 +62,19 @@ export function resourceTypes({ isDirectory, declared = [] }) {
   return out;
 }
 
+// ContainerPage item `type` must present the intrinsic LWS class compactly
+// ("Container"/"DataResource") while leaving user-defined types as full URIs.
+// Filter/matching (matchesTypeFilter) still operates on full URIs — this is
+// output presentation only.
+const COMPACT_INTRINSIC = {
+  [LWS_NS + 'Container']: 'Container',
+  [LWS_NS + 'DataResource']: 'DataResource',
+};
+
+export function containerItemTypes(types) {
+  return types.map((t) => COMPACT_INTRINSIC[t] ?? t);
+}
+
 export function buildTypeIndex(typeLists) {
   const seen = new Set();
   for (const list of typeLists) for (const t of list) seen.add(t);

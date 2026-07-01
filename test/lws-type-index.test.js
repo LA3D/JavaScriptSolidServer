@@ -94,6 +94,12 @@ describe('GET/POST /types/search', () => {
     const ids = r.items.map((i) => i.id);
     assert.ok(ids.some((u) => u.endsWith('/carol/p1')));
     assert.ok(!ids.some((u) => u.endsWith('/carol/n1')));
+
+    const p1 = r.items.find((i) => i.id.endsWith('/carol/p1'));
+    assert.deepEqual(p1.type, ['DataResource', PERSON],
+      `item type must present the intrinsic class compactly, got ${JSON.stringify(p1.type)}`);
+    assert.ok(!p1.type.includes('https://www.w3.org/ns/lws#DataResource'),
+      'item type must NOT include the full lws#DataResource URI');
   });
   it('POST body form is equivalent', async () => {
     const r = await (await fetch(`${base}/types/search`, { method: 'POST',
