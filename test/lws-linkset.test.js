@@ -22,3 +22,11 @@ test('linkset: container type + no up at storage root', () => {
   assert.deepEqual(ls.linkset[0].type, [{ href: LWS + 'Container' }]);
   assert.equal('up' in ls.linkset[0], false);
 });
+
+test('includes declared types alongside the intrinsic class', () => {
+  const ls = generateLinkset('https://pod/alice/p1', {
+    isContainer: false, declaredTypes: ['https://schema.org/Person'],
+  });
+  const types = ls.linkset[0].type.map((t) => t.href);
+  assert.deepEqual(types, ['https://www.w3.org/ns/lws#DataResource', 'https://schema.org/Person']);
+});

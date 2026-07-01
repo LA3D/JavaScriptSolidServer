@@ -9,6 +9,7 @@ import { createToken } from '../auth/token.js';
 import { canAcceptInput, toJsonLd, RDF_TYPES } from '../rdf/conneg.js';
 import { emitChange } from '../notifications/events.js';
 import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
+import { captureDeclaredTypes, parseTypeLinks, typeStorePath } from '../lws/type-metadata.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -155,6 +156,17 @@ export async function handlePost(request, reply) {
     }
 
     success = await storage.write(newStoragePath, content);
+
+    // Capture server-managed `type` metadata from Link: rel="type" (--lws
+    // only). A creation with NO rel="type" header must clear any stale
+    // store left at this path (e.g. a prior resource here was deleted
+    // without its .lwstypes sidecar being cleaned up) — otherwise old
+    // types leak into the new resource's linkset.
+    if (success && request.lwsEnabled && !isCreatingContainer) {
+      const declared = parseTypeLinks(linkHeader);
+      if (declared.length) await captureDeclaredTypes(storage, newStoragePath, declared);
+      else await storage.remove(typeStorePath(newStoragePath));
+    }
 
     // Update quota usage after successful write
     if (success && podName) {

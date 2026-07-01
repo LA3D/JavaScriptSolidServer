@@ -20,6 +20,7 @@ import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
 import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
+import { captureDeclaredTypes, parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -377,10 +378,12 @@ export async function handleGet(request, reply) {
 
     // LWS per-resource linkset — only when enabled AND explicitly negotiated.
     if (request.lwsEnabled && negotiated === RDF_TYPES.LINKSET) {
+      const declaredTypes = await readDeclaredTypes(storage, storagePath);
       const ls = generateLinkset(resourceUrl, {
         parentUrl: parentContainerUrl(resourceUrl),
         isContainer: true,
         describedByUrl: storageDescriptionUrl(resourceUrl),
+        declaredTypes,
       });
       const headers = getAllHeaders({
         isContainer: true,
@@ -569,10 +572,12 @@ export async function handleGet(request, reply) {
 
   // LWS per-resource linkset for files — only when enabled AND explicitly negotiated.
   if (request.lwsEnabled && selectContentType(request.headers.accept || '', connegEnabled) === RDF_TYPES.LINKSET) {
+    const declaredTypes = await readDeclaredTypes(storage, storagePath);
     const ls = generateLinkset(resourceUrl, {
       parentUrl: parentContainerUrl(resourceUrl),
       isContainer: false,
       describedByUrl: storageDescriptionUrl(resourceUrl),
+      declaredTypes,
     });
     const headers = getAllHeaders({
       isContainer: false,
@@ -1186,6 +1191,16 @@ export async function handlePut(request, reply) {
     return reply.code(500).send({ error: 'Write failed' });
   }
 
+  // Capture server-managed `type` metadata from Link: rel="type" (--lws
+  // only). A rewrite with NO rel="type" header must clear any stale
+  // store from a prior write — otherwise old types outlive the body
+  // that declared them.
+  if (request.lwsEnabled) {
+    const declared = parseTypeLinks(request.headers.link || '');
+    if (declared.length) await captureDeclaredTypes(storage, storagePath, declared);
+    else await storage.remove(typeStorePath(storagePath));
+  }
+
   // Update quota usage after successful write
   if (podName && sizeDelta !== 0) {
     await updateQuotaUsage(podName, sizeDelta);
@@ -1251,6 +1266,14 @@ export async function handleDelete(request, reply) {
   const success = await storage.remove(storagePath);
   if (!success) {
     return reply.code(500).send({ error: 'Delete failed' });
+  }
+
+  // Clean up the server-managed type store so a resource later created
+  // at this same path (with no rel="type" Link) doesn't inherit phantom
+  // types from this deleted resource. Best-effort — remove() no-ops if
+  // the store never existed.
+  if (request.lwsEnabled) {
+    await storage.remove(typeStorePath(storagePath));
   }
 
   // Update quota usage (subtract deleted file size)
