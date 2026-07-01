@@ -55,7 +55,7 @@ describe('PUT /idp/credentials — change password', () => {
     await fs.ensureDir(DATA_DIR);
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: DATA_DIR,
       idp: true,

@@ -144,6 +144,16 @@ export function createServer(options = {}) {
   const singleUserPassword = options.singleUserPassword ?? null;
   // Default storage quota per pod (50MB default, 0 = unlimited)
   const defaultQuota = options.defaultQuota ?? 50 * 1024 * 1024;
+  // Pod-creation rate limit (POST /.pods) — max per IP per day. Defaults to
+  // 1, the shipped anti-squatting / resource-exhaustion cap. Overridable so
+  // tests that legitimately create many pods against one loopback IP aren't
+  // blocked by the (now correctly armed) limit; the default is unchanged, so
+  // production behavior is identical.
+  const podCreateRateLimitMax = options.podCreateRateLimitMax ?? 1;
+  // Optional single override for every idp brute-force cap (see idpPlugin).
+  // Undefined in production → each idp route keeps its shipped max. Tests that
+  // hammer an idp endpoint from one loopback IP pass a high value.
+  const idpRateLimitMax = options.idpRateLimitMax;
   // WebID-TLS client certificate authentication is OFF by default
   const webidTlsEnabled = options.webidTls ?? false;
   // Live reload - injects script to auto-refresh browser on file changes
@@ -380,6 +390,37 @@ export function createServer(options = {}) {
     }, `${request.method} ${request.url} ${reply.statusCode} ${Math.round(reply.elapsedTime)}ms`);
   });
 
+  // Register rate limiting plugin FIRST, before any plugin (idp/ap) or route
+  // that carries a `config.rateLimit` override. @fastify/rate-limit wires
+  // per-route limits via an `onRoute` hook added inside the plugin body, and
+  // that hook only fires for routes registered AFTER this plugin has booted.
+  // Plugins boot in registration order, so registering rate-limit before the
+  // idp/ap plugins is what actually arms their brute-force limits. (The
+  // synchronous write/`.pods`/type routes registered directly on this instance
+  // still need `fastify.after(...)` — they register before ready() runs any
+  // plugin body at all; see those registrations below.)
+  // Protects against brute force attacks and resource exhaustion.
+  fastify.register(rateLimit, {
+    global: false, // Don't apply globally, only to specific routes
+    max: 100, // Default max requests per window
+    timeWindow: '1 minute',
+    // Custom error response. @fastify/rate-limit does `throw errorResponseBuilder(...)`
+    // and Fastify only routes a THROWN value through its error handler (which sets
+    // the reply status from `.statusCode`) when it is an Error instance — a plain
+    // object silently serializes as a 200 body, so a tripped counter never yields a
+    // real 429. Return an Error with `.statusCode` (429) so every armed limit responds
+    // correctly. `context.after` is a formatted string ("1 minute"); `context.ttl` is
+    // the numeric ms-remaining used to compute Retry-After seconds.
+    errorResponseBuilder: (request, context) => {
+      const retryAfter = Math.ceil(context.ttl / 1000);
+      const err = new Error(`Rate limit exceeded. Try again in ${retryAfter} seconds.`);
+      err.statusCode = context.statusCode;
+      err.error = 'Too Many Requests';
+      err.retryAfter = retryAfter;
+      return err;
+    }
+  });
+
   // Register WebSocket notifications plugin if enabled (or live reload needs it)
   if (notificationsEnabled || liveReloadEnabled) {
     fastify.register(notificationsPlugin);
@@ -408,6 +449,7 @@ export function createServer(options = {}) {
     } catch { /* keep 'unknown' */ }
     fastify.register(idpPlugin, {
       issuer: idpIssuer, inviteOnly, singleUser, singleUserName, jssVersion,
+      idpRateLimitMax,
     });
   }
 
@@ -462,19 +504,9 @@ export function createServer(options = {}) {
     fastify.register(mcpPlugin);
   }
 
-  // Register rate limiting plugin
-  // Protects against brute force attacks and resource exhaustion
-  fastify.register(rateLimit, {
-    global: false, // Don't apply globally, only to specific routes
-    max: 100, // Default max requests per window
-    timeWindow: '1 minute',
-    // Custom error response
-    errorResponseBuilder: (request, context) => ({
-      error: 'Too Many Requests',
-      message: `Rate limit exceeded. Try again in ${Math.ceil(context.after / 1000)} seconds.`,
-      retryAfter: Math.ceil(context.after / 1000)
-    })
-  });
+  // (rate-limit plugin registration moved up — see the block before the
+  // notifications plugin registration; it must boot before the idp/ap plugins
+  // and the write/`.pods`/type routes so their `config.rateLimit` overrides wire.)
 
   // Global CORS preflight
   fastify.addHook('onRequest', async (request, reply) => {
@@ -772,15 +804,21 @@ export function createServer(options = {}) {
       return reply.code(403).send({ error: 'Forbidden', message: 'Pod creation disabled in single-user mode' });
     });
   } else {
-    fastify.post('/.pods', {
-      config: {
-        rateLimit: {
-          max: 1,
-          timeWindow: '1 day',
-          keyGenerator: (request) => request.ip
+    // Deferred with fastify.after() so the rate-limit plugin's onRoute hook
+    // (registered above but only booted during ready()) has run before this
+    // route registers — otherwise the max:1/day cap silently no-ops. Same
+    // fix as the /types/* and write wildcard routes.
+    fastify.after(() => {
+      fastify.post('/.pods', {
+        config: {
+          rateLimit: {
+            max: podCreateRateLimitMax,
+            timeWindow: '1 day',
+            keyGenerator: (request) => request.ip
+          }
         }
-      }
-    }, handleCreatePod);
+      }, handleCreatePod);
+    });
   }
 
   // Mashlib CDN mode: redirect chunk requests to CDN
@@ -968,17 +1006,24 @@ export function createServer(options = {}) {
   fastify.head('/*', handleHead);
   fastify.options('/*', handleOptions);
 
-  // Write operations - rate limited
-  fastify.put('/*', writeRateLimit, handlePut);
-  fastify.delete('/*', writeRateLimit, handleDelete);
-  fastify.post('/*', writeRateLimit, handlePost);
-  fastify.patch('/*', writeRateLimit, handlePatch);
-
-  // Root route
+  // Root route (reads)
   fastify.get('/', handleGet);
   fastify.head('/', handleHead);
   fastify.options('/', handleOptions);
-  fastify.post('/', writeRateLimit, handlePost);
+
+  // Write operations - rate limited. Deferred with fastify.after() so the
+  // rate-limit plugin's onRoute hook has booted before these register;
+  // createServer() is synchronous, so a bare fastify.put(..., writeRateLimit)
+  // here would run before any plugin body and the max:60/min cap would
+  // silently no-op (no x-ratelimit-* headers, no 429 ever). Same fix as the
+  // /types/* and /.pods routes.
+  fastify.after(() => {
+    fastify.put('/*', writeRateLimit, handlePut);
+    fastify.delete('/*', writeRateLimit, handleDelete);
+    fastify.post('/*', writeRateLimit, handlePost);
+    fastify.patch('/*', writeRateLimit, handlePatch);
+    fastify.post('/', writeRateLimit, handlePost);
+  });
 
   // Server-root landing page: seed /index.html and a public-read /.acl
   // on first start (skip-if-exists, so operator-provided files are

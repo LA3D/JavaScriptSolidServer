@@ -35,7 +35,7 @@ async function startServer(dataDir, options = {}) {
   const prevDataRoot = process.env.DATA_ROOT;
   await fs.remove(dataDir);
   await fs.ensureDir(dataDir);
-  const server = createServer({
+  const server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
     logger: false,
     forceCloseConnections: true,
     root: dataDir,

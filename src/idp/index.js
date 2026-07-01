@@ -51,7 +51,12 @@ import { landingPage, accountDeletePage } from './views.js';
  *   purposes. Defaults to 'unknown' inside the export handler.
  */
 export async function idpPlugin(fastify, options) {
-  const { issuer, inviteOnly = false, singleUser = false, singleUserName = null, jssVersion } = options;
+  const { issuer, inviteOnly = false, singleUser = false, singleUserName = null, jssVersion, idpRateLimitMax } = options;
+  // idpRateLimitMax (optional) overrides every per-route brute-force cap below
+  // with a single value. Left undefined in production, so each route keeps its
+  // shipped max. Used by tests that legitimately exercise an endpoint many
+  // times against one loopback IP now that the limits actually fire — raising
+  // the cap rather than weakening the shipped default.
 
   if (!issuer) {
     throw new Error('IdP requires issuer URL');
@@ -277,7 +282,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/credentials', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -290,7 +295,7 @@ export async function idpPlugin(fastify, options) {
   fastify.put('/idp/credentials', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -305,7 +310,7 @@ export async function idpPlugin(fastify, options) {
   fastify.delete('/idp/account', {
     config: {
       rateLimit: {
-        max: 5,
+        max: idpRateLimitMax ?? 5,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -329,7 +334,7 @@ export async function idpPlugin(fastify, options) {
   fastify.get('/idp/account/export', {
     config: {
       rateLimit: {
-        max: 3,
+        max: idpRateLimitMax ?? 3,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -363,7 +368,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/account/delete', {
     config: {
       rateLimit: {
-        max: 5,
+        max: idpRateLimitMax ?? 5,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -386,7 +391,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/interaction/:uid', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -399,7 +404,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/interaction/:uid/login', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -451,7 +456,7 @@ export async function idpPlugin(fastify, options) {
     fastify.post('/idp/register', {
       config: {
         rateLimit: {
-          max: 5,
+          max: idpRateLimitMax ?? 5,
           timeWindow: '1 hour',
           keyGenerator: (request) => request.ip
         }
@@ -466,7 +471,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/passkey/register/options', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -479,7 +484,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/passkey/register/verify', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -492,7 +497,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/passkey/login/options', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -505,7 +510,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/passkey/login/verify', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute',
         keyGenerator: (request) => request.ip
       }
@@ -527,7 +532,7 @@ export async function idpPlugin(fastify, options) {
   fastify.post('/idp/interaction/:uid/schnorr-login', {
     config: {
       rateLimit: {
-        max: 10,
+        max: idpRateLimitMax ?? 10,
         timeWindow: '1 minute'
       }
     }

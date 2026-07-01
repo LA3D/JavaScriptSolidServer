@@ -56,7 +56,7 @@ describe('DELETE /idp/account — self-delete', () => {
     await fs.ensureDir(DATA_DIR);
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: DATA_DIR,
       idp: true,
@@ -281,7 +281,7 @@ describe('GET/POST /idp/account/delete — HTML form (#392)', () => {
     await fs.ensureDir(DATA_DIR);
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: DATA_DIR,
       idp: true,
@@ -511,7 +511,7 @@ describe('GET/POST /idp/account/delete — single-user mode renders disabled mes
     await fs.ensureDir(DATA_DIR);
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: DATA_DIR,
       idp: true,
@@ -585,7 +585,7 @@ describe('DELETE /idp/account — single-user mode', () => {
     await fs.ensureDir(DATA_DIR);
     const port = await getAvailablePort();
     baseUrl = `http://${TEST_HOST}:${port}`;
-    server = createServer({
+    server = createServer({ podCreateRateLimitMax: 1000, idpRateLimitMax: 1000,
       logger: false,
       root: DATA_DIR,
       idp: true,
