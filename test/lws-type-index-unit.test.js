@@ -105,4 +105,30 @@ describe('CNF complexity caps', () => {
     for (let i = 0; i < MAX_GROUPS; i++) q.append('type', uri(i));
     assert.equal(parseTypeFilter({ query: q }).length, MAX_GROUPS);
   });
+  it('rejects single group padded with duplicates exceeding MAX_VALUES_PER_GROUP', () => {
+    // Raw count check: many copies of the same URI exceed the per-group cap, even though dedup → 1
+    const dup = 'https://ex.org/Dup';
+    const rawValues = Array.from({ length: MAX_VALUES_PER_GROUP + 5 }, () => dup);
+    const q = new URLSearchParams(); q.append('type', rawValues.join(','));
+    assert.throws(() => parseTypeFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
+  });
+  it('rejects multiple groups where each exceeds MAX_VALUES_PER_GROUP with per-group duplicates', () => {
+    // Each group: many URIs padded with internal duplication, such that deduped total stays low
+    // but RAW per-group cap is exceeded (demonstrating dedup-evasion protection)
+    const q = new URLSearchParams();
+    for (let g = 0; g < 5; g++) {
+      // Each group has 3 unique URIs, but each padded by repetition to exceed the per-group raw cap
+      const rawValues = [];
+      for (let u = 0; u < 3; u++) {
+        const uniqueUri = `https://ex.org/G${g}U${u}`;
+        // Repeat each unique URI enough times so the raw count exceeds MAX_VALUES_PER_GROUP / 3
+        for (let rep = 0; rep < Math.ceil((MAX_VALUES_PER_GROUP + 2) / 3); rep++) {
+          rawValues.push(uniqueUri);
+        }
+      }
+      // rawValues.length will exceed MAX_VALUES_PER_GROUP per group
+      q.append('type', rawValues.join(','));
+    }
+    assert.throws(() => parseTypeFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
+  });
 });
