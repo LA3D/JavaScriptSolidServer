@@ -27,6 +27,10 @@ describe('CNF type filter', () => {
     assert.throws(() => parseTypeFilter({ query: new URLSearchParams('type=notauri') }),
       (e) => e instanceof FilterError && e.status === 400);
   });
+  it('rejects a non-string type value in nested array with a 400 FilterError', () => {
+    assert.throws(() => parseTypeFilter({ body: { type: [[A, 5]] } }),
+      (e) => e instanceof FilterError && e.status === 400);
+  });
   it('empty/duplicate groups are ignored, not errors', () => {
     const q = new URLSearchParams(`type=${A},,${A}`);
     assert.deepEqual(parseTypeFilter({ query: q }), [[A]]);

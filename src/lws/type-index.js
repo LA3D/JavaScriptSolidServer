@@ -14,6 +14,7 @@ export function isAbsoluteUri(s) {
 function group(values) {
   const out = [];
   for (const raw of values) {
+    if (typeof raw !== 'string') throw new FilterError('type value must be a string');
     const v = raw.trim();
     if (!v) continue;                              // empty → ignored
     if (!isAbsoluteUri(v)) throw new FilterError(`type value is not an absolute URI: ${v}`);
