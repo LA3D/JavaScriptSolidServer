@@ -178,3 +178,17 @@ describe('server-managed type store does not outlive the resource', () => {
     assert.ok(!types.includes(PERSON), `stale schema:Person survived a rewrite with no Link header, got ${types}`);
   });
 });
+
+describe('lwsTypeIndex config gate', () => {
+  before(async () => { await stopTestServer(); await startTestServer({ lws: true, lwsTypeIndex: false }); });
+  after(async () => { await stopTestServer(); });
+  it('when disabled, services are not advertised and endpoints are not the type handler', async () => {
+    const sd = await (await fetch(`${getBaseUrl()}/.well-known/lws-storage`)).json();
+    const types = sd.service.map((s) => s.type);
+    assert.ok(!types.includes('TypeIndexService'));
+    assert.ok(!types.includes('TypeSearchService'));
+    // /types/index is no longer the aggregate handler → not a 200 TypeIndex
+    const r = await fetch(`${getBaseUrl()}/types/index`);
+    assert.notEqual(r.status, 200);
+  });
+});

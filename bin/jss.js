@@ -93,6 +93,8 @@ program
   .option('--conneg', 'Enable content negotiation (Turtle support)')
   .option('--no-conneg', 'Disable content negotiation')
   .option('--lws', 'Enable the W3C Linked Web Storage surface (application/lws+json containers)')
+  .option('--lws-type-index', 'Enable the LWS Type Index/Search services (default on when --lws)')
+  .option('--no-lws-type-index', 'Disable the LWS Type Index/Search services')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -218,6 +220,7 @@ program
         logger: config.logger,
         conneg: config.conneg,
         lws: config.lws,
+        lwsTypeIndex: config.lwsTypeIndex,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,

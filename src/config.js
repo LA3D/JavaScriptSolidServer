@@ -35,6 +35,7 @@ export const defaults = {
   multiuser: true,
   conneg: false,
   lws: false,
+  lwsTypeIndex: true,
   notifications: false,
 
   // Identity Provider
@@ -159,6 +160,7 @@ const envMap = {
   JSS_MULTIUSER: 'multiuser',
   JSS_CONNEG: 'conneg',
   JSS_LWS: 'lws',
+  JSS_LWS_TYPE_INDEX: 'lwsTypeIndex',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
@@ -237,6 +239,7 @@ const BOOLEAN_KEYS = new Set([
   'ssl',
   'conneg',
   'lws',
+  'lwsTypeIndex',
   'subdomains',
   'mashlib',
   'mashlibCdn',
