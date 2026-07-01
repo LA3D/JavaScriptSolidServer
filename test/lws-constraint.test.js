@@ -39,3 +39,29 @@ test('resolveShapeUrl: malformed JSON-LD in .meta → null (parse-corrupt treate
     containerMetaPath: '/alice/.meta', baseIri: 'http://h/alice/x' });
   assert.equal(got, null);
 });
+
+import { describedbyTargets } from '../src/lws/constraint.js';
+
+const metaTwo = (subject, ...shapes) => Buffer.from(JSON.stringify({
+  '@id': subject, [DESCRIBEDBY]: shapes.map((s) => ({ '@id': s })),
+}));
+
+test('describedbyTargets: returns all shape targets in the .meta', async () => {
+  const s = fakeStorage({ '/alice/x.meta': metaTwo('http://h/alice/x', 'http://h/shapes/A', 'http://h/shapes/B') });
+  const got = await describedbyTargets(s, '/alice/x.meta', 'http://h/alice/x');
+  assert.deepEqual(got.sort(), ['http://h/shapes/A', 'http://h/shapes/B']);
+});
+
+test('describedbyTargets: single target', async () => {
+  const s = fakeStorage({ '/alice/x.meta': metaJson('http://h/alice/x', 'http://h/shapes/X.ttl') });
+  assert.deepEqual(await describedbyTargets(s, '/alice/x.meta', 'http://h/alice/x'), ['http://h/shapes/X.ttl']);
+});
+
+test('describedbyTargets: no .meta → []', async () => {
+  assert.deepEqual(await describedbyTargets(fakeStorage({}), '/alice/x.meta', 'http://h/alice/x'), []);
+});
+
+test('describedbyTargets: malformed .meta → [] (unconstrained)', async () => {
+  const s = fakeStorage({ '/alice/x.meta': Buffer.from('{ not json-ld') });
+  assert.deepEqual(await describedbyTargets(s, '/alice/x.meta', 'http://h/alice/x'), []);
+});
