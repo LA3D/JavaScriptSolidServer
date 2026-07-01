@@ -205,3 +205,38 @@ describe('lwsTypeIndex config gate', () => {
     assert.notEqual(r.status, 200);
   });
 });
+
+describe('linkset describedby = declared shape (not storage description)', () => {
+  let base, token;
+  const SHAPE_URL = () => `${base}/alice/shapes/Note`;
+  before(async () => {
+    await startTestServer({ lws: true });
+    base = getBaseUrl();
+    const p = await createTestPod('alice'); token = p.token;
+    await fetch(`${base}/alice/shapes/Note`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${token}` }, body: '{}' });
+    await fetch(`${base}/alice/doc1`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: '{}' });
+    await fetch(`${base}/alice/doc1.meta`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ '@id': `${base}/alice/doc1`,
+        'http://www.w3.org/2007/05/powder-s#describedby': { '@id': `${base}/alice/shapes/Note` } }) });
+  });
+  after(async () => { await stopTestServer(); });
+
+  it('constrained resource: linkset describedby is the shape; storageDescription stays a header', async () => {
+    const r = await fetch(`${base}/alice/doc1`, { headers: { Accept: 'application/linkset+json', Authorization: `Bearer ${token}` } });
+    const link = (await r.json()).linkset[0];
+    assert.deepEqual(link.describedby, [{ href: SHAPE_URL() }]);
+    assert.match(r.headers.get('link') || '', /rel="https:\/\/www\.w3\.org\/ns\/lws#storageDescription"/);  // header unchanged
+    assert.ok(!/lws-storage/.test(JSON.stringify(link.describedby)));         // storage-desc NOT under describedby
+  });
+
+  it('unconstrained resource: linkset omits describedby', async () => {
+    await fetch(`${base}/alice/doc2`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: '{}' });
+    const r = await fetch(`${base}/alice/doc2`, { headers: { Accept: 'application/linkset+json', Authorization: `Bearer ${token}` } });
+    const link = (await r.json()).linkset[0];
+    assert.equal('describedby' in link, false);
+  });
+});
