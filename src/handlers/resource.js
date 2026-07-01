@@ -378,10 +378,12 @@ export async function handleGet(request, reply) {
 
     // LWS per-resource linkset — only when enabled AND explicitly negotiated.
     if (request.lwsEnabled && negotiated === RDF_TYPES.LINKSET) {
+      const declaredTypes = await readDeclaredTypes(storage, storagePath);
       const ls = generateLinkset(resourceUrl, {
         parentUrl: parentContainerUrl(resourceUrl),
         isContainer: true,
         describedByUrl: storageDescriptionUrl(resourceUrl),
+        declaredTypes,
       });
       const headers = getAllHeaders({
         isContainer: true,
@@ -570,10 +572,12 @@ export async function handleGet(request, reply) {
 
   // LWS per-resource linkset for files — only when enabled AND explicitly negotiated.
   if (request.lwsEnabled && selectContentType(request.headers.accept || '', connegEnabled) === RDF_TYPES.LINKSET) {
+    const declaredTypes = await readDeclaredTypes(storage, storagePath);
     const ls = generateLinkset(resourceUrl, {
       parentUrl: parentContainerUrl(resourceUrl),
       isContainer: false,
       describedByUrl: storageDescriptionUrl(resourceUrl),
+      declaredTypes,
     });
     const headers = getAllHeaders({
       isContainer: false,
