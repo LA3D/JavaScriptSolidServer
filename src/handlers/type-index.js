@@ -2,7 +2,7 @@
 import * as storage from '../storage/filesystem.js';
 import { walkResources } from '../storage/filesystem.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
-import { resourceTypes, buildTypeIndex } from '../lws/type-index.js';
+import { resourceTypes, buildTypeIndex, parseTypeFilter, matchesTypeFilter, FilterError } from '../lws/type-index.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
@@ -38,4 +38,70 @@ export async function handleTypeIndex(request, reply) {
   reply.header('Cache-Control', 'private, no-store');
   reply.type(LWS_JSON);
   return reply.send(JSON.stringify(buildTypeIndex(lists), null, 2));
+}
+
+const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
+
+// Like authorizedTypeLists but returns per-resource {id, types} so
+// TypeSearch can filter by CNF and describe the surviving resources.
+// Same authorization story as authorizedTypeLists above: /types/search
+// is a virtual aggregate endpoint exempted from the blanket preHandler,
+// so the per-resource checkAccess()-and-drop loop here IS the authz.
+async function authorizedResources(request) {
+  const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+  const aclCache = new Map();
+  const resources = await walkResources('/');
+  const out = [];
+  for (const r of resources) {
+    const { allowed } = await checkAccess({
+      resourceUrl: buildResourceUrl(request, r.urlPath), resourcePath: r.urlPath,
+      isContainer: r.isDirectory, agentWebId, requiredMode: AccessMode.READ, aclCache,
+    });
+    if (!allowed) continue;
+    const declared = await readDeclaredTypes(storage, r.urlPath);
+    out.push({ id: buildResourceUrl(request, r.urlPath), types: resourceTypes({ isDirectory: r.isDirectory, declared }) });
+  }
+  return out;
+}
+
+// LWS TypeSearchService — GET/POST /types/search. `type` is the only
+// filter parameter in v1 (CNF: comma = OR within a group, repeated
+// param/array element = AND across groups). GET reads ?type=..., POST
+// requires application/lws+json and the array-of-arrays body shape;
+// any other content type is 415. A malformed filter (non-absolute URI,
+// wrong body shape) is a 400 — a well-formed filter matching nothing is
+// just an empty ContainerPage, not an error.
+export async function handleTypeSearch(request, reply) {
+  let cnf;
+  try {
+    if (request.method === 'POST') {
+      const ct = (request.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (ct !== LWS_JSON) {
+        return reply.code(415).type('application/problem+json')
+          .send({ type: 'about:blank', status: 415, title: 'Unsupported Media Type' });
+      }
+      let body;
+      if (Buffer.isBuffer(request.body)) body = JSON.parse(request.body.toString('utf8') || '{}');
+      else if (typeof request.body === 'string') body = JSON.parse(request.body || '{}');
+      else if (request.body && typeof request.body === 'object') body = request.body;
+      else body = {};
+      cnf = parseTypeFilter({ body });
+    } else {
+      const q = new URLSearchParams(request.url.split('?')[1] || '');
+      cnf = parseTypeFilter({ query: q });
+    }
+  } catch (e) {
+    const status = e instanceof FilterError ? e.status : 400;
+    return reply.code(status).type('application/problem+json')
+      .send({ type: 'about:blank', status, title: 'Bad Request', detail: e.message });
+  }
+
+  const resources = await authorizedResources(request);
+  const matched = resources.filter((r) => matchesTypeFilter(r.types, cnf));
+  reply.header('Cache-Control', 'private, no-store');
+  reply.type(LWS_JSON);
+  return reply.send(JSON.stringify({
+    '@context': LWS_CONTEXT, type: 'ContainerPage', totalItems: matched.length,
+    items: matched.map((r) => ({ id: r.id, type: r.types })),
+  }, null, 2));
 }

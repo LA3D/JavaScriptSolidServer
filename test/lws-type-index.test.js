@@ -76,3 +76,38 @@ describe('GET /types/index', () => {
     assert.ok(!anon.items.some((i) => i.id === PERSON), 'anonymous must not see the private type');
   });
 });
+
+describe('GET/POST /types/search', () => {
+  let base, token;
+  before(async () => {
+    await stopTestServer(); await startTestServer({ lws: true }); base = getBaseUrl();
+    token = (await createTestPod('carol')).token;
+    const h = (t) => ({ method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Link: `<${t}>; rel="type"` }, body: '{}' });
+    await fetch(`${base}/carol/p1`, h(PERSON));
+    await fetch(`${base}/carol/n1`, h('http://ex/Note'));
+  });
+  after(async () => { await stopTestServer(); });
+
+  it('GET ?type=Person returns only the Person resource', async () => {
+    const r = await (await fetch(`${base}/types/search?type=${encodeURIComponent(PERSON)}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    assert.equal(r.type, 'ContainerPage');
+    const ids = r.items.map((i) => i.id);
+    assert.ok(ids.some((u) => u.endsWith('/carol/p1')));
+    assert.ok(!ids.some((u) => u.endsWith('/carol/n1')));
+  });
+  it('POST body form is equivalent', async () => {
+    const r = await (await fetch(`${base}/types/search`, { method: 'POST',
+      headers: { 'Content-Type': 'application/lws+json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ type: [PERSON] }) })).json();
+    assert.ok(r.items.map((i) => i.id).some((u) => u.endsWith('/carol/p1')));
+  });
+  it('POST with wrong media type → 415', async () => {
+    const r = await fetch(`${base}/types/search`, { method: 'POST',
+      headers: { 'Content-Type': 'text/plain', Authorization: `Bearer ${token}` }, body: 'x' });
+    assert.equal(r.status, 415);
+  });
+  it('invalid type URI → 400', async () => {
+    const r = await fetch(`${base}/types/search?type=notauri`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(r.status, 400);
+  });
+});

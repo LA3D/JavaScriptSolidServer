@@ -25,7 +25,7 @@ import { registerNostrRelay } from './nostr/relay.js';
 import { createPayHandler, isPayRequest } from './handlers/pay.js';
 import { activityPubPlugin, getActorHandler } from './ap/index.js';
 import { defaults, parseSize } from './config.js';
-import { handleTypeIndex } from './handlers/type-index.js';
+import { handleTypeIndex, handleTypeSearch } from './handlers/type-index.js';
 import { remoteStoragePlugin } from './remotestorage.js';
 import { dbPlugin } from './db/index.js';
 import { mcpPlugin } from './mcp/index.js';
@@ -720,6 +720,7 @@ export function createServer(options = {}) {
         isProfileAP ||
         request.url.startsWith('/storage/') ||
         (lwsEnabled && (request.url === '/types/index' || request.url.startsWith('/types/index?'))) ||
+        (lwsEnabled && (request.url === '/types/search' || request.url.startsWith('/types/search?'))) ||
         (payEnabled && isPayRequest(request.url)) ||
         (mongoEnabled && (request.url === '/db' || request.url.startsWith('/db/'))) ||
         (mcpEnabled && (request.url === '/mcp' || request.url.startsWith('/mcp?'))) ||
@@ -904,6 +905,14 @@ export function createServer(options = {}) {
     // that internal checkAccess()-and-drop loop IS the authorization here.
     fastify.get('/types/index', handleTypeIndex);
     for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
+
+    // LWS TypeSearchService — GET/POST /types/search. Same virtual-aggregate
+    // exemption as /types/index above (see `request.url === '/types/search'`);
+    // authorizedResources() inside handleTypeSearch does the per-resource
+    // WAC check that a route-level ACL would normally provide.
+    fastify.get('/types/search', handleTypeSearch);
+    fastify.post('/types/search', handleTypeSearch);
+    for (const m of ['put', 'patch', 'delete']) fastify[m]('/types/search', methodNotAllowed);
   }
 
   // LDP routes - using wildcard routing
