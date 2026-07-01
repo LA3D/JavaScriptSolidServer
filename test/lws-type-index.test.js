@@ -240,3 +240,58 @@ describe('linkset describedby = declared shape (not storage description)', () =>
     assert.equal('describedby' in link, false);
   });
 });
+
+describe('GET/POST /types/search — describedby indexed relation', () => {
+  let base, token;
+  before(async () => {
+    await startTestServer({ lws: true });
+    base = getBaseUrl();
+    const p = await createTestPod('alice'); token = p.token;
+    const auth = { Authorization: `Bearer ${token}` };
+    await fetch(`${base}/alice/shapes/Note`, { method: 'PUT', headers: { 'Content-Type': 'application/ld+json', ...auth }, body: '{}' });
+    await fetch(`${base}/alice/doc1`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...auth }, body: '{}' });
+    await fetch(`${base}/alice/doc1.meta`, { method: 'PUT', headers: { 'Content-Type': 'application/ld+json', ...auth },
+      body: JSON.stringify({ '@id': `${base}/alice/doc1`,
+        'http://www.w3.org/2007/05/powder-s#describedby': { '@id': `${base}/alice/shapes/Note` } }) });
+    await fetch(`${base}/alice/doc2`, { method: 'PUT', headers: { 'Content-Type': 'application/json', ...auth }, body: '{}' });
+  });
+  after(async () => { await stopTestServer(); });
+
+  const ids = (page) => page.items.map((i) => i.id);
+  const search = async (qs) => (await fetch(`${base}/types/search?${qs}`, { headers: { Authorization: `Bearer ${token}` } })).json();
+
+  it('?describedby=<shape> returns the constrained resource, not the unconstrained one', async () => {
+    const page = await search(`describedby=${encodeURIComponent(`${base}/alice/shapes/Note`)}`);
+    assert.ok(ids(page).some((u) => u.endsWith('/alice/doc1')));
+    assert.ok(!ids(page).some((u) => u.endsWith('/alice/doc2')));
+  });
+
+  it('?describedby=<other-shape> returns nothing (empty, not error)', async () => {
+    const r = await fetch(`${base}/types/search?describedby=${encodeURIComponent(`${base}/alice/shapes/Nope`)}`,
+      { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).items.length, 0);
+  });
+
+  it('type AND describedby compose', async () => {
+    const dr = encodeURIComponent('https://www.w3.org/ns/lws#DataResource');
+    const sh = encodeURIComponent(`${base}/alice/shapes/Note`);
+    const page = await search(`type=${dr}&describedby=${sh}`);
+    assert.ok(ids(page).some((u) => u.endsWith('/alice/doc1')));
+  });
+
+  it('an unindexed relation key yields empty (no-oracle), status 200', async () => {
+    const r = await fetch(`${base}/types/search?madeup=${encodeURIComponent(`${base}/alice/shapes/Note`)}`,
+      { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).items.length, 0);
+  });
+
+  it('POST equivalent of describedby filter matches GET', async () => {
+    const sh = `${base}/alice/shapes/Note`;
+    const post = await (await fetch(`${base}/types/search`, { method: 'POST',
+      headers: { 'Content-Type': 'application/lws+json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ '@context': 'https://www.w3.org/ns/lws/v1', describedby: [sh] }) })).json();
+    assert.ok(post.items.some((i) => i.id.endsWith('/alice/doc1')));
+  });
+});
