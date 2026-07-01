@@ -6,6 +6,7 @@ import { resourceTypes, buildTypeIndex } from '../lws/type-index.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
+import { buildResourceUrl } from '../auth/middleware.js';
 
 const LWS_JSON = 'application/lws+json';
 
@@ -16,14 +17,13 @@ const LWS_JSON = 'application/lws+json';
 // authorization: dropping denials is what keeps this endpoint safe to
 // expose without a resource-level ACL of its own.
 async function authorizedTypeLists(request) {
-  const origin = `${request.protocol}://${request.hostname}`;
   const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
   const aclCache = new Map();
   const resources = await walkResources('/');
   const lists = [];
   for (const r of resources) {
     const { allowed } = await checkAccess({
-      resourceUrl: origin + r.urlPath, resourcePath: r.urlPath,
+      resourceUrl: buildResourceUrl(request, r.urlPath), resourcePath: r.urlPath,
       isContainer: r.isDirectory, agentWebId, requiredMode: AccessMode.READ, aclCache,
     });
     if (!allowed) continue;
