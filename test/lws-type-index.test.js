@@ -54,3 +54,25 @@ describe('checkAccess per-query ACL cache', () => {
     assert.ok(cache.size >= 1, 'cache should hold at least one parsed ACL');
   });
 });
+
+describe('GET /types/index', () => {
+  let base, token;
+  before(async () => {
+    await stopTestServer();                       // fresh pod for this block
+    await startTestServer({ lws: true }); base = getBaseUrl();
+    token = (await createTestPod('bob')).token;
+    await fetch(`${base}/bob/person`, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Link: `<${PERSON}>; rel="type"` },
+      body: '{}' });
+  });
+  after(async () => { await stopTestServer(); });
+
+  it('bearer caller sees schema:Person; anonymous does not', async () => {
+    const authed = await (await fetch(`${base}/types/index`, { headers: { Authorization: `Bearer ${token}` } })).json();
+    assert.equal(authed.type, 'TypeIndex');
+    assert.ok(authed.items.some((i) => i.id === PERSON));
+
+    const anon = await (await fetch(`${base}/types/index`)).json();
+    assert.ok(!anon.items.some((i) => i.id === PERSON), 'anonymous must not see the private type');
+  });
+});

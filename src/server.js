@@ -25,6 +25,7 @@ import { registerNostrRelay } from './nostr/relay.js';
 import { createPayHandler, isPayRequest } from './handlers/pay.js';
 import { activityPubPlugin, getActorHandler } from './ap/index.js';
 import { defaults, parseSize } from './config.js';
+import { handleTypeIndex } from './handlers/type-index.js';
 import { remoteStoragePlugin } from './remotestorage.js';
 import { dbPlugin } from './db/index.js';
 import { mcpPlugin } from './mcp/index.js';
@@ -718,6 +719,7 @@ export function createServer(options = {}) {
         (activitypubEnabled && apPaths.some(p => request.url === p || request.url.startsWith(p + '?'))) ||
         isProfileAP ||
         request.url.startsWith('/storage/') ||
+        (lwsEnabled && (request.url === '/types/index' || request.url.startsWith('/types/index?'))) ||
         (payEnabled && isPayRequest(request.url)) ||
         (mongoEnabled && (request.url === '/db' || request.url.startsWith('/db/'))) ||
         (mcpEnabled && (request.url === '/mcp' || request.url.startsWith('/mcp?'))) ||
@@ -893,6 +895,15 @@ export function createServer(options = {}) {
     for (const m of ['put', 'post', 'patch', 'delete']) {
       fastify[m](lwsStoragePath, methodNotAllowed);
     }
+
+    // LWS TypeIndexService — GET /types/index. This is a virtual aggregate
+    // over every resource in the pod tree, not a single WAC-protected
+    // resource, so (like /mcp, /db, /.terminal) it's exempted from the
+    // blanket preHandler above (see `request.url === '/types/index'`) and
+    // resolves identity + per-resource access itself inside the handler —
+    // that internal checkAccess()-and-drop loop IS the authorization here.
+    fastify.get('/types/index', handleTypeIndex);
+    for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
   }
 
   // LDP routes - using wildcard routing
