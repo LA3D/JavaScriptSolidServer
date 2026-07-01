@@ -50,7 +50,7 @@ describe('checkAccess per-query ACL cache', () => {
                    isContainer: false, agentWebId: null, requiredMode: AccessMode.READ };
     const a = await checkAccess({ ...args });               // no cache
     const b = await checkAccess({ ...args, aclCache: cache }); // with cache
-    assert.equal(a.allowed, b.allowed);
+    assert.deepEqual(b, a); // cache must not change ANY field of the decision (allowed, wacAllow, isDefault effects, etc.)
     assert.ok(cache.size >= 1, 'cache should hold at least one parsed ACL');
   });
 });
