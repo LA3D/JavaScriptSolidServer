@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError } from '../src/lws/type-index.js';
+import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError, intrinsicType, resourceTypes, buildTypeIndex } from '../src/lws/type-index.js';
 
 const A = 'https://schema.org/Person';
 const B = 'http://xmlns.com/foaf/0.1/Person';
@@ -38,5 +38,31 @@ describe('CNF type filter', () => {
   it('isAbsoluteUri', () => {
     assert.equal(isAbsoluteUri(A), true);
     assert.equal(isAbsoluteUri('relative/path'), false);
+  });
+});
+
+describe('type resolution + index', () => {
+  it('intrinsicType', () => {
+    assert.equal(intrinsicType(true), 'https://www.w3.org/ns/lws#Container');
+    assert.equal(intrinsicType(false), 'https://www.w3.org/ns/lws#DataResource');
+  });
+  it('resourceTypes = intrinsic ∪ declared, deduped, intrinsic first', () => {
+    assert.deepEqual(
+      resourceTypes({ isDirectory: false, declared: ['https://schema.org/Person'] }),
+      ['https://www.w3.org/ns/lws#DataResource', 'https://schema.org/Person']);
+    assert.deepEqual(
+      resourceTypes({ isDirectory: false, declared: ['https://www.w3.org/ns/lws#DataResource'] }),
+      ['https://www.w3.org/ns/lws#DataResource']); // dedupe intrinsic
+  });
+  it('buildTypeIndex returns distinct types with count', () => {
+    const idx = buildTypeIndex([
+      ['https://www.w3.org/ns/lws#DataResource', 'https://schema.org/Person'],
+      ['https://www.w3.org/ns/lws#DataResource'],
+    ]);
+    assert.equal(idx.type, 'TypeIndex');
+    assert.equal(idx['@context'], 'https://www.w3.org/ns/lws/v1');
+    assert.equal(idx.totalItems, 2);
+    assert.deepEqual(idx.items.map((i) => i.id).sort(),
+      ['https://schema.org/Person', 'https://www.w3.org/ns/lws#DataResource']);
   });
 });

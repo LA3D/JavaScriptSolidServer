@@ -49,3 +49,26 @@ export function parseTypeFilter({ query, body } = {}) {
 export function matchesTypeFilter(types, cnf) {
   return cnf.every((g) => g.some((t) => types.includes(t)));
 }
+
+const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
+
+export function intrinsicType(isDirectory) {
+  return LWS_NS + (isDirectory ? 'Container' : 'DataResource');
+}
+
+export function resourceTypes({ isDirectory, declared = [] }) {
+  const out = [intrinsicType(isDirectory)];
+  for (const t of declared) if (!out.includes(t)) out.push(t);
+  return out;
+}
+
+export function buildTypeIndex(typeLists) {
+  const seen = new Set();
+  for (const list of typeLists) for (const t of list) seen.add(t);
+  return {
+    '@context': LWS_CONTEXT,
+    type: 'TypeIndex',
+    totalItems: seen.size,
+    items: [...seen].map((id) => ({ id })),
+  };
+}
