@@ -20,6 +20,7 @@ import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
 import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
+import { captureDeclaredTypes, parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -1184,6 +1185,12 @@ export async function handlePut(request, reply) {
   const success = await storage.write(storagePath, content);
   if (!success) {
     return reply.code(500).send({ error: 'Write failed' });
+  }
+
+  // Capture server-managed `type` metadata from Link: rel="type" (--lws only).
+  if (request.lwsEnabled) {
+    const declared = parseTypeLinks(request.headers.link || '');
+    if (declared.length) await captureDeclaredTypes(storage, storagePath, declared);
   }
 
   // Update quota usage after successful write

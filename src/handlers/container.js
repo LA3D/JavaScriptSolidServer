@@ -9,6 +9,7 @@ import { createToken } from '../auth/token.js';
 import { canAcceptInput, toJsonLd, RDF_TYPES } from '../rdf/conneg.js';
 import { emitChange } from '../notifications/events.js';
 import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
+import { captureDeclaredTypes, parseTypeLinks } from '../lws/type-metadata.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -155,6 +156,12 @@ export async function handlePost(request, reply) {
     }
 
     success = await storage.write(newStoragePath, content);
+
+    // Capture server-managed `type` metadata from Link: rel="type" (--lws only).
+    if (success && request.lwsEnabled && !isCreatingContainer) {
+      const declared = parseTypeLinks(linkHeader);
+      if (declared.length) await captureDeclaredTypes(storage, newStoragePath, declared);
+    }
 
     // Update quota usage after successful write
     if (success && podName) {
