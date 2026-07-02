@@ -1012,7 +1012,14 @@ export function createServer(options = {}) {
       const origin = `${request.protocol}://${request.hostname}`;
       reply.header('Cache-Control', 'public, max-age=3600');
       reply.type('application/lws+json');
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled });
+      // Use request.notificationsEnabled (the onRequest-decorated OR of
+      // notificationsEnabled || liveReloadEnabled, ~line 397) rather than the
+      // raw notificationsEnabled local, so this matches both the actual
+      // NotificationService registration condition (~line 464) and the MCP
+      // lws_storage_description ctx (src/mcp/index.js) — otherwise HTTP
+      // under-advertises NotificationService when liveReload is on but
+      // notifications is off.
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

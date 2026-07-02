@@ -75,3 +75,37 @@ test('lws_storage_description mirrors /.well-known/lws-storage', async (t) => {
   assert.deepEqual(toolBody.service, httpBody.service);
   assert.equal(toolBody.type, 'Storage');
 });
+
+// Edge combo: liveReload on, notifications explicitly off. The
+// NotificationService plugin is still registered in this combo
+// (notificationsEnabled || liveReloadEnabled, src/server.js ~464), and the
+// request-level decoration used by both surfaces agrees (~397). Before the
+// fix, the HTTP route passed the raw (false) notifications flag and
+// under-advertised NotificationService while the MCP ctx (which reads
+// request.notificationsEnabled) correctly advertised it — this proves both
+// surfaces now agree, matching actual service registration.
+test('lws_storage_description and HTTP route agree when liveReload is on but notifications is off', async (t) => {
+  await startTestServer({ lws: true, mcp: true, liveReload: true, notifications: false });
+  t.after(async () => { await stopTestServer(); });
+  const base = getBaseUrl();
+
+  const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+  const httpBody = await httpRes.json();
+
+  const mcpRes = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: 'lws_storage_description', arguments: {} },
+    }),
+  });
+  const mcpJson = await mcpRes.json();
+  const toolBody = JSON.parse(mcpJson.result.content[0].text);
+
+  const httpHasNotify = httpBody.service.some((s) => s.type === 'NotificationService');
+  const mcpHasNotify = toolBody.service.some((s) => s.type === 'NotificationService');
+  assert.equal(httpHasNotify, true, 'HTTP route must advertise NotificationService when liveReload is on');
+  assert.equal(mcpHasNotify, true, 'MCP ctx must advertise NotificationService when liveReload is on');
+  assert.deepEqual(toolBody.service, httpBody.service);
+});
