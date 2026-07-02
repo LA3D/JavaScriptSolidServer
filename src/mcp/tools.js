@@ -625,6 +625,7 @@ async function call_remote_pod({ pod_url, tool, arguments: remoteArgs, auth }, c
 
 async function pod_info(_args, ctx) {
   const skill = await readPodSkill().catch(() => null);
+  const skillVisible = skill && (await wac(ctx, skill.path, AccessMode.READ));
   return toolJson({
     pod: ctx.origin,
     server: 'jss',
@@ -636,7 +637,7 @@ async function pod_info(_args, ctx) {
       skills: true,
       docs: true
     },
-    skill: skill ? { path: skill.path, format: skill.format } : null
+    skill: skillVisible ? { path: skill.path, format: skill.format } : null
   });
 }
 
