@@ -19,8 +19,9 @@ import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
-import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
-import { captureDeclaredTypes, parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
+import { constraintProblem } from '../lws/admission.js';
+import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
+import { applyLwsWrite } from '../lws/write.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -1160,48 +1161,28 @@ export async function handlePut(request, reply) {
     }
   }
 
-  // L3 SHACL admission — --lws-gated, opt-in via powder-s:describedby in .meta.
-  // `content` is the post-conneg body: JSON-LD when conneg converted Turtle, else as-sent.
-  if (request.lwsEnabled) {
-    const targetMetaPath = storagePath + '.meta';
-    const containerMetaPath = storagePath.slice(0, storagePath.lastIndexOf('/') + 1) + '.meta';
-    const result = await admit({
-      storage,
-      content,
-      // Post-conversion type: Turtle/N3 was converted to JSON-LD above when conneg is on.
-      contentType: (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
-        ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
-      resourceUrl,
-      targetMetaPath,
-      containerMetaPath,
-      shapeUrlToPath: urlToStoragePath,  // path-mode: pathname === storagePath
-    });
-    if (result.decision === 'reject') {
-      reply.header('content-type', 'application/problem+json');
-      if (result.shapeUrl) reply.header('Link', `<${result.shapeUrl}>; rel="describedby"`);
-      return reply.code(400).send(constraintProblem({
-        shapeUrl: result.shapeUrl, violations: result.violations, instance: resourceUrl,
-      }));
-    }
-    // Stash for success-path header + advisory body (set after getAllHeaders).
-    if (result.shapeUrl) request.__lwsShapeUrl = result.shapeUrl;
-    if (result.advisories.length) request.__lwsAdvisories = result.advisories;
+  // L3 admission + write + type-capture via the shared LWS core (--lws-gated inside).
+  const declared = request.lwsEnabled ? parseTypeLinks(request.headers.link || '') : [];
+  const w = await applyLwsWrite({
+    storage, storagePath, resourceUrl,
+    content,
+    contentType: (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
+      ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
+    declaredTypes: declared,
+    lwsEnabled: request.lwsEnabled,
+  });
+  if (!w.ok) {
+    reply.header('content-type', 'application/problem+json');
+    if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
+    return reply.code(400).send(constraintProblem({
+      shapeUrl: w.shapeUrl, violations: w.violations, instance: resourceUrl,
+    }));
   }
-
-  const success = await storage.write(storagePath, content);
-  if (!success) {
+  if (!w.wrote) {
     return reply.code(500).send({ error: 'Write failed' });
   }
-
-  // Capture server-managed `type` metadata from Link: rel="type" (--lws
-  // only). A rewrite with NO rel="type" header must clear any stale
-  // store from a prior write — otherwise old types outlive the body
-  // that declared them.
-  if (request.lwsEnabled) {
-    const declared = parseTypeLinks(request.headers.link || '');
-    if (declared.length) await captureDeclaredTypes(storage, storagePath, declared);
-    else await storage.remove(typeStorePath(storagePath));
-  }
+  if (w.shapeUrl) request.__lwsShapeUrl = w.shapeUrl;
+  if (w.advisories.length) request.__lwsAdvisories = w.advisories;
 
   // Update quota usage after successful write
   if (podName && sizeDelta !== 0) {

@@ -8,8 +8,9 @@ import { provisionOwnerKey, assertProvisionKeysCompatible } from '../keys/provis
 import { createToken } from '../auth/token.js';
 import { canAcceptInput, toJsonLd, RDF_TYPES } from '../rdf/conneg.js';
 import { emitChange } from '../notifications/events.js';
-import { admit, constraintProblem, urlToStoragePath } from '../lws/admission.js';
-import { captureDeclaredTypes, parseTypeLinks, typeStorePath } from '../lws/type-metadata.js';
+import { constraintProblem } from '../lws/admission.js';
+import { parseTypeLinks } from '../lws/type-metadata.js';
+import { applyLwsWrite } from '../lws/write.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -129,44 +130,28 @@ export async function handlePost(request, reply) {
       }
     }
 
-    // L3 SHACL admission — --lws-gated, opt-in via powder-s:describedby in container .meta.
-    // New member has no own .meta yet; resolveShapeUrl falls through to the container rule.
-    if (request.lwsEnabled) {
-      const containerMetaPath = storagePath + '.meta';
-      const result = await admit({
-        storage, content,
-        // Post-conversion type: Turtle/N3 was converted to JSON-LD above when conneg is on.
-        contentType: (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
-          ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
-        resourceUrl,
-        targetMetaPath: newStoragePath + '.meta',
-        containerMetaPath,
-        shapeUrlToPath: urlToStoragePath,
-      });
-      if (result.decision === 'reject') {
-        reply.header('content-type', 'application/problem+json');
-        if (result.shapeUrl) reply.header('Link', `<${result.shapeUrl}>; rel="describedby"`);
-        return reply.code(400).send(constraintProblem({
-          shapeUrl: result.shapeUrl, violations: result.violations, instance: resourceUrl,
-        }));
-      }
-      // Stash for success-path header + advisory body (set after getAllHeaders).
-      if (result.shapeUrl) request.__lwsShapeUrl = result.shapeUrl;
-      if (result.advisories.length) request.__lwsAdvisories = result.advisories;
+    // L3 admission + write + type-capture via the shared LWS core (--lws-gated
+    // inside). New member has no own .meta yet; resolveShapeUrl falls through
+    // to the container rule.
+    const postContentType = (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
+      ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || '');
+    const declared = request.lwsEnabled ? parseTypeLinks(linkHeader) : [];
+    const w = await applyLwsWrite({
+      storage, storagePath: newStoragePath, resourceUrl,
+      content, contentType: postContentType,
+      declaredTypes: isCreatingContainer ? [] : declared,
+      lwsEnabled: request.lwsEnabled,
+    });
+    if (!w.ok) {
+      reply.header('content-type', 'application/problem+json');
+      if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
+      return reply.code(400).send(constraintProblem({
+        shapeUrl: w.shapeUrl, violations: w.violations, instance: resourceUrl,
+      }));
     }
-
-    success = await storage.write(newStoragePath, content);
-
-    // Capture server-managed `type` metadata from Link: rel="type" (--lws
-    // only). A creation with NO rel="type" header must clear any stale
-    // store left at this path (e.g. a prior resource here was deleted
-    // without its .lwstypes sidecar being cleaned up) — otherwise old
-    // types leak into the new resource's linkset.
-    if (success && request.lwsEnabled && !isCreatingContainer) {
-      const declared = parseTypeLinks(linkHeader);
-      if (declared.length) await captureDeclaredTypes(storage, newStoragePath, declared);
-      else await storage.remove(typeStorePath(newStoragePath));
-    }
+    success = w.wrote;
+    if (w.shapeUrl) request.__lwsShapeUrl = w.shapeUrl;
+    if (w.advisories.length) request.__lwsAdvisories = w.advisories;
 
     // Update quota usage after successful write
     if (success && podName) {
