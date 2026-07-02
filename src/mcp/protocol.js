@@ -43,8 +43,10 @@ export function toolText(text) {
   return { content: [{ type: 'text', text }], isError: false };
 }
 
-export function toolError(message) {
-  return { content: [{ type: 'text', text: message }], isError: true };
+export function toolError(message, data) {
+  const err = { content: [{ type: 'text', text: message }], isError: true };
+  if (data && typeof data === 'object') Object.assign(err, data);
+  return err;
 }
 
 export function toolJson(value) {

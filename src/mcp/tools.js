@@ -14,10 +14,17 @@ import { checkAccess } from '../wac/checker.js';
 import { AccessMode, parseAcl, serializeAcl } from '../wac/parser.js';
 import { resourceEvents, emitChange } from '../notifications/events.js';
 import { toolText, toolError, toolJson } from './protocol.js';
+import { applyLwsWrite } from '../lws/write.js';
 import { discoverSkills, readSkill, readPodSkill } from './skills.js';
 import { readFile, readdir, stat as fsStat } from 'fs/promises';
 import { join, dirname, resolve as pathResolve } from 'path';
 import { fileURLToPath } from 'url';
+import { collectAuthorizedResources } from '../lws/authorized-resources.js';
+import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
+import { generateLinkset } from '../lws/linkset.js';
+import { readDeclaredTypes } from '../lws/type-metadata.js';
+import { describedbyTargets } from '../lws/constraint.js';
+import { buildStorageDescription } from '../lws/storage-description.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -129,21 +136,33 @@ async function read_resource({ path }, ctx) {
   return toolJson(result);
 }
 
-async function write_resource({ path, content, contentType }, ctx) {
+async function write_resource({ path, content, contentType, types }, ctx) {
   if (!path) return toolError('path required');
   if (path.endsWith('/')) return toolError('cannot PUT a container; use create_resource');
   if (content == null) return toolError('content required');
   if (!(await wac(ctx, path, AccessMode.WRITE))) {
     return toolError(`access denied: write ${path}`);
   }
-  await storage.write(path, Buffer.from(content, 'utf8'), {
-    contentType: contentType || 'text/plain'
+  const w = await applyLwsWrite({
+    storage,
+    storagePath: path,
+    resourceUrl: buildUrl(ctx, path),
+    content: Buffer.from(content, 'utf8'),
+    contentType: contentType || 'text/plain',
+    declaredTypes: Array.isArray(types) ? types : [],
+    lwsEnabled: ctx.lwsEnabled
   });
+  if (!w.ok) {
+    return toolError(`admission rejected ${path}`, {
+      violations: w.violations, describedby: w.shapeUrl
+    });
+  }
+  if (!w.wrote) return toolError(`write failed: ${path}`);
   emitChange(buildUrl(ctx, path));
   return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes)`);
 }
 
-async function create_resource({ container, slug, content, contentType, isContainer }, ctx) {
+async function create_resource({ container, slug, content, contentType, isContainer, types }, ctx) {
   if (!container || !container.endsWith('/')) {
     return toolError('container path required (must end in /)');
   }
@@ -160,9 +179,21 @@ async function create_resource({ container, slug, content, contentType, isContai
     emitChange(buildUrl(ctx, childPath));
     return toolText(`created container ${childPath}`);
   }
-  await storage.write(childPath, Buffer.from(content || '', 'utf8'), {
-    contentType: contentType || 'text/plain'
+  const w = await applyLwsWrite({
+    storage,
+    storagePath: childPath,
+    resourceUrl: buildUrl(ctx, childPath),
+    content: Buffer.from(content || '', 'utf8'),
+    contentType: contentType || 'text/plain',
+    declaredTypes: Array.isArray(types) ? types : [],
+    lwsEnabled: ctx.lwsEnabled
   });
+  if (!w.ok) {
+    return toolError(`admission rejected ${childPath}`, {
+      violations: w.violations, describedby: w.shapeUrl
+    });
+  }
+  if (!w.wrote) return toolError(`write failed: ${childPath}`);
   emitChange(buildUrl(ctx, childPath));
   return toolText(`created ${childPath}`);
 }
@@ -199,24 +230,31 @@ async function head_resource({ path }, ctx) {
 
 // --- skill tools ---
 
-async function list_skills(_args, _ctx) {
+async function list_skills(_args, ctx) {
   const idx = await discoverSkills();
-  return toolJson(idx);
+  const visible = [];
+  for (const s of idx['skill:items']) {
+    if (await wac(ctx, s['@id'], AccessMode.READ)) visible.push(s);
+  }
+  return toolJson({ ...idx, 'skill:items': visible });
 }
 
-async function get_skill({ path }, _ctx) {
+async function get_skill({ path }, ctx) {
   if (!path) return toolError('path required');
+  const p = path.startsWith('/') ? path : '/' + path;
+  if (!(await wac(ctx, p, AccessMode.READ))) return toolError(`access denied: read ${p}`);
   try {
-    const skill = await readSkill(path);
+    const skill = await readSkill(p);
     return toolJson(skill);
   } catch (e) {
     return toolError(e.message);
   }
 }
 
-async function get_pod_skill(_args, _ctx) {
+async function get_pod_skill(_args, ctx) {
   const skill = await readPodSkill();
   if (!skill) return toolText('no pod-wide SKILL.md or SKILL.jsonld');
+  if (!(await wac(ctx, skill.path, AccessMode.READ))) return toolError(`access denied: read ${skill.path}`);
   return toolJson(skill);
 }
 
@@ -587,6 +625,7 @@ async function call_remote_pod({ pod_url, tool, arguments: remoteArgs, auth }, c
 
 async function pod_info(_args, ctx) {
   const skill = await readPodSkill().catch(() => null);
+  const skillVisible = skill && (await wac(ctx, skill.path, AccessMode.READ));
   return toolJson({
     pod: ctx.origin,
     server: 'jss',
@@ -598,8 +637,53 @@ async function pod_info(_args, ctx) {
       skills: true,
       docs: true
     },
-    skill: skill ? { path: skill.path, format: skill.format } : null
+    skill: skillVisible ? { path: skill.path, format: skill.format } : null
   });
+}
+
+// --- LWS-aware read tools ---
+//
+// These reuse collectAuthorizedResources — the SAME WAC-filtered walk the
+// HTTP /types/* handlers use (src/handlers/type-index.js) — so the no-oracle
+// property (a resource the caller can't Read is simply absent from the
+// result, never surfaced-then-denied) is inherited, not reimplemented.
+
+async function lws_type_search(args, ctx) {
+  let filter;
+  try { filter = parseFilter({ body: args || {} }); }
+  catch (e) { return toolError(`bad filter: ${e.message}`); }
+  const needDescribedby = Object.keys(filter.relations).length > 0;
+  const resources = await collectAuthorizedResources({
+    agentWebId: ctx.webId, origin: ctx.origin, needDescribedby,
+  });
+  const matched = resources.filter((r) => matchesFilter(r, filter));
+  return toolJson({
+    type: 'ContainerPage', totalItems: matched.length,
+    items: matched.map((r) => ({ id: r.id, type: containerItemTypes(r.types) })),
+  });
+}
+
+async function lws_linkset({ path }, ctx) {
+  if (!path) return toolError('path required');
+  if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
+  if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
+  const isContainer = path.endsWith('/');
+  const declared = await readDeclaredTypes(storage, path);
+  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
+  const ls = generateLinkset(buildUrl(ctx, path), {
+    parentUrl: buildUrl(ctx, parentPath(path)),
+    isContainer, describedByShapes: shapes, declaredTypes: declared,
+  });
+  return toolJson(ls);
+}
+
+async function lws_storage_description(_args, ctx) {
+  // Mirror the /.well-known/lws-storage generator (same service set) — the
+  // shared buildStorageDescription() is the single source of the service
+  // list, called by both the HTTP route (src/server.js) and this tool.
+  return toolJson(buildStorageDescription(ctx.origin, {
+    typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
+  }));
 }
 
 // --- registry ---
@@ -632,7 +716,9 @@ export const TOOLS = {
       properties: {
         path: { type: 'string' },
         content: { type: 'string' },
-        contentType: { type: 'string', description: 'MIME type (default text/plain)' }
+        contentType: { type: 'string', description: 'MIME type (default text/plain)' },
+        types: { type: 'array', items: { type: 'string' },
+          description: 'Optional server-managed type URIs (LWS rel="type" equivalent).' }
       },
       required: ['path', 'content']
     },
@@ -647,7 +733,9 @@ export const TOOLS = {
         slug: { type: 'string', description: 'Optional filename hint' },
         content: { type: 'string' },
         contentType: { type: 'string' },
-        isContainer: { type: 'boolean', description: 'Create a child container instead of a resource' }
+        isContainer: { type: 'boolean', description: 'Create a child container instead of a resource' },
+        types: { type: 'array', items: { type: 'string' },
+          description: 'Optional server-managed type URIs (LWS rel="type" equivalent).' }
       },
       required: ['container']
     },
@@ -751,6 +839,24 @@ export const TOOLS = {
       }
     },
     handler: subscribe
+  },
+  lws_type_search: {
+    description: 'Search pod resources by LWS type (and describedby) — WAC-filtered, no-oracle.',
+    inputSchema: { type: 'object', properties: {
+      type: { type: 'array', items: {}, description: 'CNF type filter (see LWS Type Search).' },
+      describedby: { type: 'array', items: {}, description: 'CNF describedby (shape) filter.' },
+    } },
+    handler: lws_type_search,
+  },
+  lws_linkset: {
+    description: "A resource's RFC 9264 linkset: anchor/up/type/describedby.",
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    handler: lws_linkset,
+  },
+  lws_storage_description: {
+    description: 'The pod storage description (type:Storage + advertised services).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: lws_storage_description,
   },
   call_remote_pod: {
     description: 'Invoke an MCP tool on another pod. Caller must have acl:Write on /private/federation/ on this pod. Depth-capped at 3.',

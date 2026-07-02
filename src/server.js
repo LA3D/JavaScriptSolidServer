@@ -36,7 +36,7 @@ import { terminalPlugin } from './terminal/index.js';
 import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
-import { generateStorageDescription } from './lws/storage-description.js';
+import { buildStorageDescription } from './lws/storage-description.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -186,7 +186,9 @@ export function createServer(options = {}) {
   // to reach the backstop. Mirrors podCreateRateLimitMax's options pass-through.
   const writeRateLimitMax = options.writeRateLimitMax ?? 600;
   // Strict per-IP cap for anonymous callers on the same resource endpoints.
-  const anonRateLimitMax = 60;
+  // Overridable (mirrors writeRateLimitMax) so tests reach the cap without
+  // driving 60+ requests; production default is unchanged.
+  const anonRateLimitMax = options.anonRateLimitMax ?? 60;
   // Optional single override for every idp brute-force cap (see idpPlugin).
   // Undefined in production → each idp route keeps its shipped max. Tests that
   // hammer an idp endpoint from one loopback IP pass a high value.
@@ -201,6 +203,15 @@ export function createServer(options = {}) {
   // surface for agents (Claude Desktop, Cursor, etc.). OFF by default.
   // See docs/mcp.md and #490.
   const mcpEnabled = options.mcp ?? false;
+  // Credential-tier seam for /mcp (task-6). 'trusted-local' (default) is
+  // today's behavior; 'audience-bound' refuses the replayable RS256 bearer
+  // and requires an audience-bound credential (LWS-CID or Solid-OIDC DPoP).
+  // An unrecognized value falls back to the safe default rather than
+  // silently disabling the seam.
+  const validMcpCredentialPolicies = ['trusted-local', 'audience-bound'];
+  const mcpCredentialPolicy = validMcpCredentialPolicies.includes(options.mcpCredentialPolicy)
+    ? options.mcpCredentialPolicy
+    : 'trusted-local';
   // Provision a Schnorr secp256k1 owner key in /private/privkey.jsonld
   // when a single-user pod is first created. Phase 1 of #437. Off by
   // default: keys-on-disk is a real security tradeoff, opt-in keeps
@@ -364,6 +375,7 @@ export function createServer(options = {}) {
   fastify.decorateRequest('rawBody', null);
   fastify.decorateRequest('connegEnabled', null);
   fastify.decorateRequest('lwsEnabled', null);
+  fastify.decorateRequest('typeIndexEnabled', null);
   fastify.decorateRequest('notificationsEnabled', null);
   fastify.decorateRequest('idpEnabled', null);
   fastify.decorateRequest('subdomainsEnabled', null);
@@ -382,6 +394,7 @@ export function createServer(options = {}) {
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
+    request.typeIndexEnabled = typeIndexEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
     request.idpEnabled = idpEnabled;
     request.subdomainsEnabled = subdomainsEnabled;
@@ -536,9 +549,20 @@ export function createServer(options = {}) {
     fastify.register(dbPlugin, { mongoUrl, mongoDatabase, singleUser });
   }
 
-  // Register MCP server if enabled (issue #490)
+  // Register MCP server if enabled (issue #490). POST /mcp carries the same
+  // trust-aware limiter as writeRateLimit/typeQueryRateLimit (Task 4: the LWS
+  // read tools make an uncapped type-search-over-MCP walk possible otherwise) —
+  // anon per-IP cap, authenticated per-webId cap. Unlike the bare
+  // fastify.post(...) routes below (/.pods, /types/*, writes), mcpPlugin is
+  // itself registered via fastify.register(), so it boots asynchronously in
+  // registration order along with every other plugin — since @fastify/rate-limit
+  // was registered earlier (~:442) and boots first, its onRoute hook already
+  // exists by the time mcpPlugin's body runs and calls fastify.post('/mcp', ...),
+  // so no fastify.after() wrapping is needed here (that workaround is only for
+  // routes registered directly/synchronously on this outer instance).
   if (mcpEnabled) {
-    fastify.register(mcpPlugin);
+    const mcpRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax) } };
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
@@ -1007,20 +1031,17 @@ export function createServer(options = {}) {
   if (lwsEnabled) {
     const lwsStoragePath = '/.well-known/lws-storage';
     fastify.get(lwsStoragePath, async (request, reply) => {
-      const proto = request.protocol;
-      const host = request.hostname;
-      const root = `${proto}://${host}/`;
-      const services = [{ type: 'StorageDescription', serviceEndpoint: `${proto}://${host}${lwsStoragePath}` }];
-      if (typeIndexEnabled) {
-        services.push({ type: 'TypeIndexService', serviceEndpoint: `${proto}://${host}/types/index` });
-        services.push({ type: 'TypeSearchService', serviceEndpoint: `${proto}://${host}/types/search` });
-      }
-      if (notificationsEnabled) {
-        services.push({ type: 'NotificationService', serviceEndpoint: `${proto}://${host}/notification/api` });
-      }
+      const origin = `${request.protocol}://${request.hostname}`;
       reply.header('Cache-Control', 'public, max-age=3600');
       reply.type('application/lws+json');
-      return generateStorageDescription(root, services);
+      // Use request.notificationsEnabled (the onRequest-decorated OR of
+      // notificationsEnabled || liveReloadEnabled, ~line 397) rather than the
+      // raw notificationsEnabled local, so this matches both the actual
+      // NotificationService registration condition (~line 464) and the MCP
+      // lws_storage_description ctx (src/mcp/index.js) — otherwise HTTP
+      // under-advertises NotificationService when liveReload is on but
+      // notifications is off.
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

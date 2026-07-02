@@ -25,6 +25,8 @@ import {
 } from './protocol.js';
 import { listToolsForRpc, callTool, TOOLS } from './tools.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
+import { hasLwsCidAuth } from '../auth/lws-cid.js';
+import { hasSolidOidcAuth } from '../auth/solid-oidc.js';
 
 const ALLOWED_METHODS = new Set([
   'initialize',
@@ -104,6 +106,15 @@ function isStreamingToolCall(body) {
 
 const STREAMING_TOOLS = new Set(['subscribe']);
 
+// Credential-tier seam (task-6). 'audience-bound' mode refuses the
+// replayable RS256 bearer on /mcp — only an audience-bound credential class
+// (LWS-CID or Solid-OIDC DPoP, detected by header shape same as the auth
+// dispatch) may proceed. 'trusted-local' (default) accepts anything the
+// normal auth chain resolves a webId from, unchanged from today.
+function isAudienceBoundCredential(request) {
+  return hasLwsCidAuth(request) || hasSolidOidcAuth(request);
+}
+
 async function handleStreamingTool(request, reply, body, ctx) {
   const tool = TOOLS[body.params.name];
   let descriptor;
@@ -156,8 +167,15 @@ async function handleStreamingTool(request, reply, body, ctx) {
 /**
  * Register the MCP plugin with Fastify.
  */
-export async function mcpPlugin(fastify, _options) {
-  fastify.post('/mcp', async (request, reply) => {
+export async function mcpPlugin(fastify, options = {}) {
+  // Optional per-route config (e.g. `{ config: { rateLimit } }`) threaded in
+  // by server.js so /mcp gets the same trust-aware limiter as writes and
+  // /types/* — see server.js's mcpRateLimit / fastify.after() wiring.
+  const routeOptions = options.routeOptions || {};
+  // Credential-tier seam (task-6). Threaded from server.js the same way as
+  // routeOptions — createServer({ mcpCredentialPolicy }) -> here.
+  const credentialPolicy = options.credentialPolicy || 'trusted-local';
+  fastify.post('/mcp', routeOptions, async (request, reply) => {
     const body = request.body;
     if (!body || typeof body !== 'object') {
       reply.code(400);
@@ -168,6 +186,18 @@ export async function mcpPlugin(fastify, _options) {
     // null webId means "anonymous"; WAC will treat it accordingly.
     const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
 
+    // Credential-tier seam: in 'audience-bound' mode, refuse a request that
+    // isn't carrying one of the audience-bound credential classes — never
+    // proceed to dispatch/tool-call. Checked before ctx is built so a batch
+    // body's first message doesn't waste dispatch work.
+    if (credentialPolicy === 'audience-bound' && !isAudienceBoundCredential(request)) {
+      reply.code(401);
+      const errId = (!Array.isArray(body) && body && typeof body === 'object') ? (body.id ?? null) : null;
+      reply.header('Content-Type', 'application/json');
+      return rpcError(errId, RPC_ERRORS.AUTH_REQUIRED,
+        'this endpoint requires an audience-bound credential (LWS-CID or Solid-OIDC DPoP)');
+    }
+
     // Federation depth (used by call_remote_pod to enforce the cap)
     const depthHdr = request.headers['mcp-federation-depth'];
     const federationDepth = depthHdr ? parseInt(depthHdr, 10) || 0 : 0;
@@ -175,7 +205,10 @@ export async function mcpPlugin(fastify, _options) {
     const ctx = {
       webId: webId || null,
       origin: originOf(request),
-      federationDepth
+      federationDepth,
+      lwsEnabled: request.lwsEnabled || false,
+      typeIndexEnabled: request.typeIndexEnabled || false,
+      notificationsEnabled: request.notificationsEnabled || false
     };
 
     // Streaming tool? Hand off to SSE handler.

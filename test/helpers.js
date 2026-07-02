@@ -5,6 +5,8 @@
 import { createServer } from '../src/server.js';
 import fs from 'fs-extra';
 import path from 'path';
+import * as storage from '../src/storage/filesystem.js';
+import { generatePublicReadAcl, serializeAcl } from '../src/wac/parser.js';
 
 const TEST_DATA_DIR = './data';
 
@@ -162,4 +164,152 @@ export function extractJsonLdFromHtml(html) {
     throw new Error('No JSON-LD found in HTML');
   }
   return JSON.parse(match[1]);
+}
+
+// --- LWS test-harness helpers (mirrors the --lws setup in
+// test/lws-type-index.test.js / test/lws-admission-put.test.js, packaged so
+// tests that call MCP tools directly via `callTool()` — bypassing the /mcp
+// HTTP route — can build a ctx and provision shapes/.meta with one line). ---
+
+/**
+ * Start a --lws test server + one pod, and register teardown on `t` (the
+ * node:test TestContext) via t.after(). Returns a pod handle: { base, token,
+ * webId, podName }. All paths passed to putShape/putContainerMeta/callTool
+ * must include the podName prefix (storage paths always do, non-subdomain).
+ */
+export async function startLwsPod(t, name = 'lwsmcp') {
+  await startTestServer({ lws: true });
+  const pod = await createTestPod(name);
+  const token = getPodToken(name);
+  const base = getBaseUrl();
+  if (t && typeof t.after === 'function') {
+    t.after(async () => { await stopTestServer(); });
+  }
+  // `origin` is an alias for `base` — MCP ctx/collectAuthorizedResources call
+  // it `origin`; kept both names on the pod handle so either reads naturally.
+  return { base, origin: base, token, webId: pod.webId, podName: name };
+}
+
+/** Build an MCP tool ctx for the pod owner. Caller sets `lwsEnabled`. */
+export function ownerCtx(pod) {
+  return { webId: pod.webId, origin: pod.base, federationDepth: 0 };
+}
+
+/**
+ * Start a plain (non-`--lws`) test server and register teardown on `t` via
+ * `t.after()`. For tests that call MCP tools directly via `callTool()` and
+ * only need a bare server origin (e.g. pod-root skill discovery, which
+ * operates on absolute storage paths, not a named pod's subtree).
+ */
+export async function startServer(t, options = {}) {
+  const { baseUrl } = await startTestServer(options);
+  if (t && typeof t.after === 'function') {
+    t.after(async () => { await stopTestServer(); });
+  }
+  return { origin: baseUrl };
+}
+
+/**
+ * Write a file directly to storage at a pod-root-relative `path` (e.g.
+ * `/SKILL.md`, `/private/secret.md`) — bypassing HTTP/pod-token plumbing,
+ * since pod-root skill discovery (`discoverSkills`/`readSkill`) works on
+ * raw storage paths rather than a named pod's namespace. When `publicRead`
+ * is true, also writes a resource-level `.acl` granting foaf:Agent Read.
+ */
+export async function putFile(pod, path, content, { publicRead = false } = {}) {
+  const p = path.startsWith('/') ? path : '/' + path;
+  await storage.write(p, content);
+  if (publicRead) {
+    const url = `${pod.origin}${p}`;
+    await storage.write(p + '.acl', serializeAcl(generatePublicReadAcl(url)));
+  }
+  return p;
+}
+
+/**
+ * PUT a resource declaring `type` via Link rel="type", at a pod-relative
+ * `path` (e.g. `/lwsmcp/pub/a`). When `publicRead` is true, also PUT a
+ * resource-level `.acl` granting the owner full control + foaf:Agent Read
+ * (generateOwnerAcl) — otherwise the resource stays owner-only, inheriting
+ * the pod root's private default. Returns the resource's absolute URL.
+ */
+export async function seedTyped(pod, path, type, { publicRead = false } = {}) {
+  const url = `${pod.base}${path.startsWith('/') ? path : '/' + path}`;
+  const put = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${pod.token}`,
+      Link: `<${type}>; rel="type"`,
+    },
+    body: '{}',
+  });
+  if (!put.ok) throw new Error(`seedTyped: PUT ${path} failed: ${put.status}`);
+  if (publicRead) {
+    const { generateOwnerAcl, serializeAcl } = await import('../src/wac/parser.js');
+    const acl = generateOwnerAcl(url, pod.webId, false);
+    const aclRes = await fetch(`${url}.acl`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${pod.token}` },
+      body: serializeAcl(acl),
+    });
+    if (!aclRes.ok) throw new Error(`seedTyped: PUT ${path}.acl failed: ${aclRes.status}`);
+  }
+  return url;
+}
+
+/** PUT a SHACL shape (JSON-LD object) at `path` (pod-relative, e.g. `/lwsmcp/shapes/note`). */
+export async function putShape(pod, path, shapeJsonLd) {
+  const url = `${pod.base}${path.startsWith('/') ? path : '/' + path}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${pod.token}` },
+    body: JSON.stringify(shapeJsonLd),
+  });
+  if (!res.ok) throw new Error(`putShape ${path} failed: ${res.status}`);
+  return url;
+}
+
+/**
+ * POST a JSON-RPC body to /mcp on a pod handle (anything with `.origin` or
+ * `.base` — startServer/startLwsPod/local test-file pod handles all qualify),
+ * with optional extra headers (e.g. Authorization). Returns { status, body }.
+ */
+export async function postMcp(pod, rpcBody, headers = {}) {
+  const origin = pod.origin || pod.base;
+  const res = await fetch(`${origin}/mcp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(rpcBody),
+  });
+  const body = res.status === 204 ? null : await res.json();
+  return { status: res.status, body };
+}
+
+/** Owner bearer token for a pod handle carrying `.token` (startLwsPod, or a
+ * test-local pod handle built from createTestPod/getPodToken). */
+export function ownerBearer(pod) {
+  return pod.token;
+}
+
+/**
+ * Ensure `containerPath` (pod-relative, trailing /) exists and PUT its
+ * .meta declaring `describedby` (pod-relative shape path or absolute URL).
+ */
+export async function putContainerMeta(pod, containerPath, { describedby }) {
+  const containerUrl = `${pod.base}${containerPath}`;
+  const mk = await fetch(containerUrl, { method: 'PUT', headers: { Authorization: `Bearer ${pod.token}` } });
+  if (!mk.ok) throw new Error(`putContainerMeta: container create ${containerPath} failed: ${mk.status}`);
+  const shapeUrl = describedby.startsWith('http')
+    ? describedby
+    : `${pod.base}${describedby.startsWith('/') ? describedby : '/' + describedby}`;
+  const res = await fetch(`${containerUrl}.meta`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${pod.token}` },
+    body: JSON.stringify({
+      '@id': containerUrl,
+      'http://www.w3.org/2007/05/powder-s#describedby': { '@id': shapeUrl },
+    }),
+  });
+  if (!res.ok) throw new Error(`putContainerMeta ${containerPath} failed: ${res.status}`);
 }
