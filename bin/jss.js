@@ -160,6 +160,7 @@ program
   .option('--mongo-database <name>', 'MongoDB database name (default: solid)')
   .option('--mcp', 'Enable MCP (Model Context Protocol) server at /mcp — pod as a tool surface for agents (#490)')
   .option('--no-mcp', 'Disable MCP server')
+  .option('--mcp-credential-policy <policy>', "Credential tier required on /mcp: 'trusted-local' (default) or 'audience-bound' (refuses the replayable bearer, requires LWS-CID/Solid-OIDC DPoP)")
   .option('-q, --quiet', 'Suppress log output')
   .option('--log-level <level>', 'Log level: error, warn, info, debug (default: info)')
   .option('--print-config', 'Print configuration and exit')
@@ -278,6 +279,7 @@ program
         mongoUrl: config.mongoUrl,
         mongoDatabase: config.mongoDatabase,
         mcp: config.mcp,
+        mcpCredentialPolicy: config.mcpCredentialPolicy,
       });
 
       await server.listen({ port: config.port, host: config.host });

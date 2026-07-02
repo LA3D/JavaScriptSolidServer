@@ -146,6 +146,13 @@ export const defaults = {
 
   // MCP (Model Context Protocol) server — pod as a tool surface for agents (#490)
   mcp: false,
+  // Credential-tier seam for POST /mcp (task-6). 'trusted-local' (default) is
+  // today's behavior — any webId-resolving bearer (including the replayable
+  // RS256 owner token) is accepted, same as every other JSS route. Flip to
+  // 'audience-bound' to require an audience-bound credential class (LWS-CID
+  // or Solid-OIDC DPoP) on /mcp — for exposing MCP to an untrusted/networked
+  // agent rather than a trusted local one. See docs/foundations/05-jss-spec-conformance.md axis 6.
+  mcpCredentialPolicy: 'trusted-local',
 
   // Logging
   logger: true,
@@ -222,6 +229,7 @@ const envMap = {
   JSS_MONGO_URL: 'mongoUrl',
   JSS_MONGO_DATABASE: 'mongoDatabase',
   JSS_MCP: 'mcp',
+  JSS_MCP_CREDENTIAL_POLICY: 'mcpCredentialPolicy',
 };
 
 /**
@@ -377,6 +385,13 @@ export async function loadConfig(cliOptions = {}, configFile = null) {
   if (!validLevels.includes(config.logLevel)) {
     console.warn(`Invalid log level '${config.logLevel}', falling back to 'info'. Valid levels: ${validLevels.join(', ')}`);
     config.logLevel = 'info';
+  }
+
+  // Validate MCP credential policy (task-6 credential-tier seam)
+  const validCredentialPolicies = ['trusted-local', 'audience-bound'];
+  if (!validCredentialPolicies.includes(config.mcpCredentialPolicy)) {
+    console.warn(`Invalid mcpCredentialPolicy '${config.mcpCredentialPolicy}', falling back to 'trusted-local'. Valid values: ${validCredentialPolicies.join(', ')}`);
+    config.mcpCredentialPolicy = 'trusted-local';
   }
 
   // Mashlib requires content negotiation for Turtle support

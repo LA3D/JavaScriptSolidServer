@@ -271,6 +271,28 @@ export async function putShape(pod, path, shapeJsonLd) {
 }
 
 /**
+ * POST a JSON-RPC body to /mcp on a pod handle (anything with `.origin` or
+ * `.base` — startServer/startLwsPod/local test-file pod handles all qualify),
+ * with optional extra headers (e.g. Authorization). Returns { status, body }.
+ */
+export async function postMcp(pod, rpcBody, headers = {}) {
+  const origin = pod.origin || pod.base;
+  const res = await fetch(`${origin}/mcp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(rpcBody),
+  });
+  const body = res.status === 204 ? null : await res.json();
+  return { status: res.status, body };
+}
+
+/** Owner bearer token for a pod handle carrying `.token` (startLwsPod, or a
+ * test-local pod handle built from createTestPod/getPodToken). */
+export function ownerBearer(pod) {
+  return pod.token;
+}
+
+/**
  * Ensure `containerPath` (pod-relative, trailing /) exists and PUT its
  * .meta declaring `describedby` (pod-relative shape path or absolute URL).
  */

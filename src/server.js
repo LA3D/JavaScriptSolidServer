@@ -203,6 +203,15 @@ export function createServer(options = {}) {
   // surface for agents (Claude Desktop, Cursor, etc.). OFF by default.
   // See docs/mcp.md and #490.
   const mcpEnabled = options.mcp ?? false;
+  // Credential-tier seam for /mcp (task-6). 'trusted-local' (default) is
+  // today's behavior; 'audience-bound' refuses the replayable RS256 bearer
+  // and requires an audience-bound credential (LWS-CID or Solid-OIDC DPoP).
+  // An unrecognized value falls back to the safe default rather than
+  // silently disabling the seam.
+  const validMcpCredentialPolicies = ['trusted-local', 'audience-bound'];
+  const mcpCredentialPolicy = validMcpCredentialPolicies.includes(options.mcpCredentialPolicy)
+    ? options.mcpCredentialPolicy
+    : 'trusted-local';
   // Provision a Schnorr secp256k1 owner key in /private/privkey.jsonld
   // when a single-user pod is first created. Phase 1 of #437. Off by
   // default: keys-on-disk is a real security tradeoff, opt-in keeps
@@ -553,7 +562,7 @@ export function createServer(options = {}) {
   // routes registered directly/synchronously on this outer instance).
   if (mcpEnabled) {
     const mcpRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax) } };
-    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit });
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
