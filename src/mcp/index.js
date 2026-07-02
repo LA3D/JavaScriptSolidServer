@@ -156,8 +156,12 @@ async function handleStreamingTool(request, reply, body, ctx) {
 /**
  * Register the MCP plugin with Fastify.
  */
-export async function mcpPlugin(fastify, _options) {
-  fastify.post('/mcp', async (request, reply) => {
+export async function mcpPlugin(fastify, options = {}) {
+  // Optional per-route config (e.g. `{ config: { rateLimit } }`) threaded in
+  // by server.js so /mcp gets the same trust-aware limiter as writes and
+  // /types/* — see server.js's mcpRateLimit / fastify.after() wiring.
+  const routeOptions = options.routeOptions || {};
+  fastify.post('/mcp', routeOptions, async (request, reply) => {
     const body = request.body;
     if (!body || typeof body !== 'object') {
       reply.code(400);

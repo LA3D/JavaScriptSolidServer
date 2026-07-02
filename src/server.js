@@ -186,7 +186,9 @@ export function createServer(options = {}) {
   // to reach the backstop. Mirrors podCreateRateLimitMax's options pass-through.
   const writeRateLimitMax = options.writeRateLimitMax ?? 600;
   // Strict per-IP cap for anonymous callers on the same resource endpoints.
-  const anonRateLimitMax = 60;
+  // Overridable (mirrors writeRateLimitMax) so tests reach the cap without
+  // driving 60+ requests; production default is unchanged.
+  const anonRateLimitMax = options.anonRateLimitMax ?? 60;
   // Optional single override for every idp brute-force cap (see idpPlugin).
   // Undefined in production → each idp route keeps its shipped max. Tests that
   // hammer an idp endpoint from one loopback IP pass a high value.
@@ -538,9 +540,20 @@ export function createServer(options = {}) {
     fastify.register(dbPlugin, { mongoUrl, mongoDatabase, singleUser });
   }
 
-  // Register MCP server if enabled (issue #490)
+  // Register MCP server if enabled (issue #490). POST /mcp carries the same
+  // trust-aware limiter as writeRateLimit/typeQueryRateLimit (Task 4: the LWS
+  // read tools make an uncapped type-search-over-MCP walk possible otherwise) —
+  // anon per-IP cap, authenticated per-webId cap. Unlike the bare
+  // fastify.post(...) routes below (/.pods, /types/*, writes), mcpPlugin is
+  // itself registered via fastify.register(), so it boots asynchronously in
+  // registration order along with every other plugin — since @fastify/rate-limit
+  // was registered earlier (~:442) and boots first, its onRoute hook already
+  // exists by the time mcpPlugin's body runs and calls fastify.post('/mcp', ...),
+  // so no fastify.after() wrapping is needed here (that workaround is only for
+  // routes registered directly/synchronously on this outer instance).
   if (mcpEnabled) {
-    fastify.register(mcpPlugin);
+    const mcpRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax) } };
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
