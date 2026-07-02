@@ -230,24 +230,31 @@ async function head_resource({ path }, ctx) {
 
 // --- skill tools ---
 
-async function list_skills(_args, _ctx) {
+async function list_skills(_args, ctx) {
   const idx = await discoverSkills();
-  return toolJson(idx);
+  const visible = [];
+  for (const s of idx['skill:items']) {
+    if (await wac(ctx, s['@id'], AccessMode.READ)) visible.push(s);
+  }
+  return toolJson({ ...idx, 'skill:items': visible });
 }
 
-async function get_skill({ path }, _ctx) {
+async function get_skill({ path }, ctx) {
   if (!path) return toolError('path required');
+  const p = path.startsWith('/') ? path : '/' + path;
+  if (!(await wac(ctx, p, AccessMode.READ))) return toolError(`access denied: read ${p}`);
   try {
-    const skill = await readSkill(path);
+    const skill = await readSkill(p);
     return toolJson(skill);
   } catch (e) {
     return toolError(e.message);
   }
 }
 
-async function get_pod_skill(_args, _ctx) {
+async function get_pod_skill(_args, ctx) {
   const skill = await readPodSkill();
   if (!skill) return toolText('no pod-wide SKILL.md or SKILL.jsonld');
+  if (!(await wac(ctx, skill.path, AccessMode.READ))) return toolError(`access denied: read ${skill.path}`);
   return toolJson(skill);
 }
 

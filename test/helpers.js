@@ -5,6 +5,8 @@
 import { createServer } from '../src/server.js';
 import fs from 'fs-extra';
 import path from 'path';
+import * as storage from '../src/storage/filesystem.js';
+import { generatePublicReadAcl, serializeAcl } from '../src/wac/parser.js';
 
 const TEST_DATA_DIR = './data';
 
@@ -191,6 +193,37 @@ export async function startLwsPod(t, name = 'lwsmcp') {
 /** Build an MCP tool ctx for the pod owner. Caller sets `lwsEnabled`. */
 export function ownerCtx(pod) {
   return { webId: pod.webId, origin: pod.base, federationDepth: 0 };
+}
+
+/**
+ * Start a plain (non-`--lws`) test server and register teardown on `t` via
+ * `t.after()`. For tests that call MCP tools directly via `callTool()` and
+ * only need a bare server origin (e.g. pod-root skill discovery, which
+ * operates on absolute storage paths, not a named pod's subtree).
+ */
+export async function startServer(t, options = {}) {
+  const { baseUrl } = await startTestServer(options);
+  if (t && typeof t.after === 'function') {
+    t.after(async () => { await stopTestServer(); });
+  }
+  return { origin: baseUrl };
+}
+
+/**
+ * Write a file directly to storage at a pod-root-relative `path` (e.g.
+ * `/SKILL.md`, `/private/secret.md`) — bypassing HTTP/pod-token plumbing,
+ * since pod-root skill discovery (`discoverSkills`/`readSkill`) works on
+ * raw storage paths rather than a named pod's namespace. When `publicRead`
+ * is true, also writes a resource-level `.acl` granting foaf:Agent Read.
+ */
+export async function putFile(pod, path, content, { publicRead = false } = {}) {
+  const p = path.startsWith('/') ? path : '/' + path;
+  await storage.write(p, content);
+  if (publicRead) {
+    const url = `${pod.origin}${p}`;
+    await storage.write(p + '.acl', serializeAcl(generatePublicReadAcl(url)));
+  }
+  return p;
 }
 
 /**
