@@ -3,11 +3,11 @@ import * as storage from '../storage/filesystem.js';
 import { walkResources } from '../storage/filesystem.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { resourceTypes, buildTypeIndex, parseFilter, matchesFilter, containerItemTypes, FilterError } from '../lws/type-index.js';
-import { describedbyTargets } from '../lws/constraint.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { buildResourceUrl } from '../auth/middleware.js';
+import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 
 const LWS_JSON = 'application/lws+json';
 
@@ -52,24 +52,10 @@ const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 // references them, to avoid an extra .meta read on every resource.
 async function authorizedResources(request, { needDescribedby = false } = {}) {
   const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
-  const aclCache = new Map();
-  const resources = await walkResources('/');
-  const out = [];
-  for (const r of resources) {
-    const id = buildResourceUrl(request, r.urlPath);
-    const { allowed } = await checkAccess({
-      resourceUrl: id, resourcePath: r.urlPath,
-      isContainer: r.isDirectory, agentWebId, requiredMode: AccessMode.READ, aclCache,
-    });
-    if (!allowed) continue;
-    const declared = await readDeclaredTypes(storage, r.urlPath);
-    const entry = { id, types: resourceTypes({ isDirectory: r.isDirectory, declared }) };
-    if (needDescribedby) {
-      entry.relations = { describedby: await describedbyTargets(storage, r.urlPath + '.meta', id) };
-    }
-    out.push(entry);
-  }
-  return out;
+  return collectAuthorizedResources({
+    agentWebId, needDescribedby,
+    buildId: (urlPath) => buildResourceUrl(request, urlPath),
+  });
 }
 
 // LWS TypeSearchService — GET/POST /types/search. `type` is the only

@@ -27,3 +27,26 @@ export function generateStorageDescription(storageRootUrl, services = []) {
     service: services,
   };
 }
+
+/**
+ * Build the full LWS Storage Description document for an origin, given
+ * which optional services are enabled. Single source of the service list —
+ * the HTTP GET /.well-known/lws-storage route and the MCP
+ * `lws_storage_description` tool both call this so the advertised service
+ * set can never drift between the two surfaces.
+ * @param {string} origin  `${proto}://${host}` (no trailing slash)
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean}} flags
+ * @returns {object}
+ */
+export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false } = {}) {
+  const lwsStoragePath = '/.well-known/lws-storage';
+  const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
+  if (typeIndexEnabled) {
+    services.push({ type: 'TypeIndexService', serviceEndpoint: `${origin}/types/index` });
+    services.push({ type: 'TypeSearchService', serviceEndpoint: `${origin}/types/search` });
+  }
+  if (notificationsEnabled) {
+    services.push({ type: 'NotificationService', serviceEndpoint: `${origin}/notification/api` });
+  }
+  return generateStorageDescription(`${origin}/`, services);
+}

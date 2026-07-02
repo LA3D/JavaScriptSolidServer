@@ -19,6 +19,12 @@ import { discoverSkills, readSkill, readPodSkill } from './skills.js';
 import { readFile, readdir, stat as fsStat } from 'fs/promises';
 import { join, dirname, resolve as pathResolve } from 'path';
 import { fileURLToPath } from 'url';
+import { collectAuthorizedResources } from '../lws/authorized-resources.js';
+import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
+import { generateLinkset } from '../lws/linkset.js';
+import { readDeclaredTypes } from '../lws/type-metadata.js';
+import { describedbyTargets } from '../lws/constraint.js';
+import { buildStorageDescription } from '../lws/storage-description.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -627,6 +633,51 @@ async function pod_info(_args, ctx) {
   });
 }
 
+// --- LWS-aware read tools ---
+//
+// These reuse collectAuthorizedResources — the SAME WAC-filtered walk the
+// HTTP /types/* handlers use (src/handlers/type-index.js) — so the no-oracle
+// property (a resource the caller can't Read is simply absent from the
+// result, never surfaced-then-denied) is inherited, not reimplemented.
+
+async function lws_type_search(args, ctx) {
+  let filter;
+  try { filter = parseFilter({ body: args || {} }); }
+  catch (e) { return toolError(`bad filter: ${e.message}`); }
+  const needDescribedby = Object.keys(filter.relations).length > 0;
+  const resources = await collectAuthorizedResources({
+    agentWebId: ctx.webId, origin: ctx.origin, needDescribedby,
+  });
+  const matched = resources.filter((r) => matchesFilter(r, filter));
+  return toolJson({
+    type: 'ContainerPage', totalItems: matched.length,
+    items: matched.map((r) => ({ id: r.id, type: containerItemTypes(r.types) })),
+  });
+}
+
+async function lws_linkset({ path }, ctx) {
+  if (!path) return toolError('path required');
+  if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
+  if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
+  const isContainer = path.endsWith('/');
+  const declared = await readDeclaredTypes(storage, path);
+  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
+  const ls = generateLinkset(buildUrl(ctx, path), {
+    parentUrl: buildUrl(ctx, parentPath(path)),
+    isContainer, describedByShapes: shapes, declaredTypes: declared,
+  });
+  return toolJson(ls);
+}
+
+async function lws_storage_description(_args, ctx) {
+  // Mirror the /.well-known/lws-storage generator (same service set) — the
+  // shared buildStorageDescription() is the single source of the service
+  // list, called by both the HTTP route (src/server.js) and this tool.
+  return toolJson(buildStorageDescription(ctx.origin, {
+    typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
+  }));
+}
+
 // --- registry ---
 
 export const TOOLS = {
@@ -780,6 +831,24 @@ export const TOOLS = {
       }
     },
     handler: subscribe
+  },
+  lws_type_search: {
+    description: 'Search pod resources by LWS type (and describedby) — WAC-filtered, no-oracle.',
+    inputSchema: { type: 'object', properties: {
+      type: { type: 'array', items: {}, description: 'CNF type filter (see LWS Type Search).' },
+      describedby: { type: 'array', items: {}, description: 'CNF describedby (shape) filter.' },
+    } },
+    handler: lws_type_search,
+  },
+  lws_linkset: {
+    description: "A resource's RFC 9264 linkset: anchor/up/type/describedby.",
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    handler: lws_linkset,
+  },
+  lws_storage_description: {
+    description: 'The pod storage description (type:Storage + advertised services).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: lws_storage_description,
   },
   call_remote_pod: {
     description: 'Invoke an MCP tool on another pod. Caller must have acl:Write on /private/federation/ on this pod. Depth-capped at 3.',

@@ -36,7 +36,7 @@ import { terminalPlugin } from './terminal/index.js';
 import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
-import { generateStorageDescription } from './lws/storage-description.js';
+import { buildStorageDescription } from './lws/storage-description.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -364,6 +364,7 @@ export function createServer(options = {}) {
   fastify.decorateRequest('rawBody', null);
   fastify.decorateRequest('connegEnabled', null);
   fastify.decorateRequest('lwsEnabled', null);
+  fastify.decorateRequest('typeIndexEnabled', null);
   fastify.decorateRequest('notificationsEnabled', null);
   fastify.decorateRequest('idpEnabled', null);
   fastify.decorateRequest('subdomainsEnabled', null);
@@ -382,6 +383,7 @@ export function createServer(options = {}) {
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
+    request.typeIndexEnabled = typeIndexEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
     request.idpEnabled = idpEnabled;
     request.subdomainsEnabled = subdomainsEnabled;
@@ -1007,20 +1009,10 @@ export function createServer(options = {}) {
   if (lwsEnabled) {
     const lwsStoragePath = '/.well-known/lws-storage';
     fastify.get(lwsStoragePath, async (request, reply) => {
-      const proto = request.protocol;
-      const host = request.hostname;
-      const root = `${proto}://${host}/`;
-      const services = [{ type: 'StorageDescription', serviceEndpoint: `${proto}://${host}${lwsStoragePath}` }];
-      if (typeIndexEnabled) {
-        services.push({ type: 'TypeIndexService', serviceEndpoint: `${proto}://${host}/types/index` });
-        services.push({ type: 'TypeSearchService', serviceEndpoint: `${proto}://${host}/types/search` });
-      }
-      if (notificationsEnabled) {
-        services.push({ type: 'NotificationService', serviceEndpoint: `${proto}://${host}/notification/api` });
-      }
+      const origin = `${request.protocol}://${request.hostname}`;
       reply.header('Cache-Control', 'public, max-age=3600');
       reply.type('application/lws+json');
-      return generateStorageDescription(root, services);
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

@@ -176,7 +176,9 @@ export async function mcpPlugin(fastify, _options) {
       webId: webId || null,
       origin: originOf(request),
       federationDepth,
-      lwsEnabled: request.lwsEnabled || false
+      lwsEnabled: request.lwsEnabled || false,
+      typeIndexEnabled: request.typeIndexEnabled || false,
+      notificationsEnabled: request.notificationsEnabled || false
     };
 
     // Streaming tool? Hand off to SSE handler.

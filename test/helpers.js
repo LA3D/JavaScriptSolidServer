@@ -183,12 +183,46 @@ export async function startLwsPod(t, name = 'lwsmcp') {
   if (t && typeof t.after === 'function') {
     t.after(async () => { await stopTestServer(); });
   }
-  return { base, token, webId: pod.webId, podName: name };
+  // `origin` is an alias for `base` — MCP ctx/collectAuthorizedResources call
+  // it `origin`; kept both names on the pod handle so either reads naturally.
+  return { base, origin: base, token, webId: pod.webId, podName: name };
 }
 
 /** Build an MCP tool ctx for the pod owner. Caller sets `lwsEnabled`. */
 export function ownerCtx(pod) {
   return { webId: pod.webId, origin: pod.base, federationDepth: 0 };
+}
+
+/**
+ * PUT a resource declaring `type` via Link rel="type", at a pod-relative
+ * `path` (e.g. `/lwsmcp/pub/a`). When `publicRead` is true, also PUT a
+ * resource-level `.acl` granting the owner full control + foaf:Agent Read
+ * (generateOwnerAcl) — otherwise the resource stays owner-only, inheriting
+ * the pod root's private default. Returns the resource's absolute URL.
+ */
+export async function seedTyped(pod, path, type, { publicRead = false } = {}) {
+  const url = `${pod.base}${path.startsWith('/') ? path : '/' + path}`;
+  const put = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${pod.token}`,
+      Link: `<${type}>; rel="type"`,
+    },
+    body: '{}',
+  });
+  if (!put.ok) throw new Error(`seedTyped: PUT ${path} failed: ${put.status}`);
+  if (publicRead) {
+    const { generateOwnerAcl, serializeAcl } = await import('../src/wac/parser.js');
+    const acl = generateOwnerAcl(url, pod.webId, false);
+    const aclRes = await fetch(`${url}.acl`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${pod.token}` },
+      body: serializeAcl(acl),
+    });
+    if (!aclRes.ok) throw new Error(`seedTyped: PUT ${path}.acl failed: ${aclRes.status}`);
+  }
+  return url;
 }
 
 /** PUT a SHACL shape (JSON-LD object) at `path` (pod-relative, e.g. `/lwsmcp/shapes/note`). */
