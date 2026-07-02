@@ -163,3 +163,64 @@ export function extractJsonLdFromHtml(html) {
   }
   return JSON.parse(match[1]);
 }
+
+// --- LWS test-harness helpers (mirrors the --lws setup in
+// test/lws-type-index.test.js / test/lws-admission-put.test.js, packaged so
+// tests that call MCP tools directly via `callTool()` — bypassing the /mcp
+// HTTP route — can build a ctx and provision shapes/.meta with one line). ---
+
+/**
+ * Start a --lws test server + one pod, and register teardown on `t` (the
+ * node:test TestContext) via t.after(). Returns a pod handle: { base, token,
+ * webId, podName }. All paths passed to putShape/putContainerMeta/callTool
+ * must include the podName prefix (storage paths always do, non-subdomain).
+ */
+export async function startLwsPod(t, name = 'lwsmcp') {
+  await startTestServer({ lws: true });
+  const pod = await createTestPod(name);
+  const token = getPodToken(name);
+  const base = getBaseUrl();
+  if (t && typeof t.after === 'function') {
+    t.after(async () => { await stopTestServer(); });
+  }
+  return { base, token, webId: pod.webId, podName: name };
+}
+
+/** Build an MCP tool ctx for the pod owner. Caller sets `lwsEnabled`. */
+export function ownerCtx(pod) {
+  return { webId: pod.webId, origin: pod.base, federationDepth: 0 };
+}
+
+/** PUT a SHACL shape (JSON-LD object) at `path` (pod-relative, e.g. `/lwsmcp/shapes/note`). */
+export async function putShape(pod, path, shapeJsonLd) {
+  const url = `${pod.base}${path.startsWith('/') ? path : '/' + path}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${pod.token}` },
+    body: JSON.stringify(shapeJsonLd),
+  });
+  if (!res.ok) throw new Error(`putShape ${path} failed: ${res.status}`);
+  return url;
+}
+
+/**
+ * Ensure `containerPath` (pod-relative, trailing /) exists and PUT its
+ * .meta declaring `describedby` (pod-relative shape path or absolute URL).
+ */
+export async function putContainerMeta(pod, containerPath, { describedby }) {
+  const containerUrl = `${pod.base}${containerPath}`;
+  const mk = await fetch(containerUrl, { method: 'PUT', headers: { Authorization: `Bearer ${pod.token}` } });
+  if (!mk.ok) throw new Error(`putContainerMeta: container create ${containerPath} failed: ${mk.status}`);
+  const shapeUrl = describedby.startsWith('http')
+    ? describedby
+    : `${pod.base}${describedby.startsWith('/') ? describedby : '/' + describedby}`;
+  const res = await fetch(`${containerUrl}.meta`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/ld+json', Authorization: `Bearer ${pod.token}` },
+    body: JSON.stringify({
+      '@id': containerUrl,
+      'http://www.w3.org/2007/05/powder-s#describedby': { '@id': shapeUrl },
+    }),
+  });
+  if (!res.ok) throw new Error(`putContainerMeta ${containerPath} failed: ${res.status}`);
+}

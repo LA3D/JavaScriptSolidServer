@@ -14,6 +14,7 @@ import { checkAccess } from '../wac/checker.js';
 import { AccessMode, parseAcl, serializeAcl } from '../wac/parser.js';
 import { resourceEvents, emitChange } from '../notifications/events.js';
 import { toolText, toolError, toolJson } from './protocol.js';
+import { applyLwsWrite } from '../lws/write.js';
 import { discoverSkills, readSkill, readPodSkill } from './skills.js';
 import { readFile, readdir, stat as fsStat } from 'fs/promises';
 import { join, dirname, resolve as pathResolve } from 'path';
@@ -129,21 +130,33 @@ async function read_resource({ path }, ctx) {
   return toolJson(result);
 }
 
-async function write_resource({ path, content, contentType }, ctx) {
+async function write_resource({ path, content, contentType, types }, ctx) {
   if (!path) return toolError('path required');
   if (path.endsWith('/')) return toolError('cannot PUT a container; use create_resource');
   if (content == null) return toolError('content required');
   if (!(await wac(ctx, path, AccessMode.WRITE))) {
     return toolError(`access denied: write ${path}`);
   }
-  await storage.write(path, Buffer.from(content, 'utf8'), {
-    contentType: contentType || 'text/plain'
+  const w = await applyLwsWrite({
+    storage,
+    storagePath: path,
+    resourceUrl: buildUrl(ctx, path),
+    content: Buffer.from(content, 'utf8'),
+    contentType: contentType || 'text/plain',
+    declaredTypes: Array.isArray(types) ? types : [],
+    lwsEnabled: ctx.lwsEnabled
   });
+  if (!w.ok) {
+    return toolError(`admission rejected ${path}`, {
+      violations: w.violations, describedby: w.shapeUrl
+    });
+  }
+  if (!w.wrote) return toolError(`write failed: ${path}`);
   emitChange(buildUrl(ctx, path));
   return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes)`);
 }
 
-async function create_resource({ container, slug, content, contentType, isContainer }, ctx) {
+async function create_resource({ container, slug, content, contentType, isContainer, types }, ctx) {
   if (!container || !container.endsWith('/')) {
     return toolError('container path required (must end in /)');
   }
@@ -160,9 +173,21 @@ async function create_resource({ container, slug, content, contentType, isContai
     emitChange(buildUrl(ctx, childPath));
     return toolText(`created container ${childPath}`);
   }
-  await storage.write(childPath, Buffer.from(content || '', 'utf8'), {
-    contentType: contentType || 'text/plain'
+  const w = await applyLwsWrite({
+    storage,
+    storagePath: childPath,
+    resourceUrl: buildUrl(ctx, childPath),
+    content: Buffer.from(content || '', 'utf8'),
+    contentType: contentType || 'text/plain',
+    declaredTypes: Array.isArray(types) ? types : [],
+    lwsEnabled: ctx.lwsEnabled
   });
+  if (!w.ok) {
+    return toolError(`admission rejected ${childPath}`, {
+      violations: w.violations, describedby: w.shapeUrl
+    });
+  }
+  if (!w.wrote) return toolError(`write failed: ${childPath}`);
   emitChange(buildUrl(ctx, childPath));
   return toolText(`created ${childPath}`);
 }
@@ -632,7 +657,9 @@ export const TOOLS = {
       properties: {
         path: { type: 'string' },
         content: { type: 'string' },
-        contentType: { type: 'string', description: 'MIME type (default text/plain)' }
+        contentType: { type: 'string', description: 'MIME type (default text/plain)' },
+        types: { type: 'array', items: { type: 'string' },
+          description: 'Optional server-managed type URIs (LWS rel="type" equivalent).' }
       },
       required: ['path', 'content']
     },
@@ -647,7 +674,9 @@ export const TOOLS = {
         slug: { type: 'string', description: 'Optional filename hint' },
         content: { type: 'string' },
         contentType: { type: 'string' },
-        isContainer: { type: 'boolean', description: 'Create a child container instead of a resource' }
+        isContainer: { type: 'boolean', description: 'Create a child container instead of a resource' },
+        types: { type: 'array', items: { type: 'string' },
+          description: 'Optional server-managed type URIs (LWS rel="type" equivalent).' }
       },
       required: ['container']
     },
