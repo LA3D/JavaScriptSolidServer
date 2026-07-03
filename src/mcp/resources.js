@@ -1,13 +1,15 @@
 // src/mcp/resources.js
 // Declarative resource registry for the MCP Resources primitive. Read-only,
-// URI-addressed, WAC-checked, sanitized (sanitize wiring in Task 8). Every
-// resolver reuses the same read logic + wac() as the former read tools, so
-// the no-oracle property is inherited, not reimplemented.
+// URI-addressed, WAC-checked, sanitized (externally-sourced bodies/fields go
+// through sanitize.js before leaving this module). Every resolver reuses the
+// same read logic + wac() as the former read tools, so the no-oracle
+// property is inherited, not reimplemented.
 import { parseUri, fixedUri } from './uri.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
 import { AccessMode, parseAcl } from '../wac/parser.js';
+import { sanitizeBody, sanitizeField } from './sanitize.js';
 import { readPodSkill, readSkill, discoverSkills } from './skills.js';
 import * as storage from '../storage/filesystem.js';
 import { generateLinkset } from '../lws/linkset.js';
@@ -108,8 +110,7 @@ async function readResourceBody(path, ctx, uri) {
   let text = content.toString('utf8');
   const MAX = 200_000;
   if (text.length > MAX) text = text.slice(0, MAX);
-  // Sanitizer envelope wired in Task 8; raw text for now.
-  return { contents: [{ uri, mimeType: mimeFor(path), text }] };
+  return { contents: [{ uri, mimeType: 'text/plain', text: sanitizeBody(text, `untrusted pod content — original type ${mimeFor(path)}`) }] };
 }
 
 async function readContainer(path, ctx, uri) {
@@ -120,8 +121,8 @@ async function readContainer(path, ctx, uri) {
   return jsonContents(uri, {
     container: p,
     items: (entries || []).map(e => ({
-      name: e.name,
-      path: `${p}${e.name}${e.isDirectory ? '/' : ''}`,
+      name: sanitizeField(e.name),
+      path: `${p}${sanitizeField(e.name)}${e.isDirectory ? '/' : ''}`,
       isContainer: e.isDirectory,
       size: e.size ?? null,
       modified: e.modified ?? null,
@@ -166,7 +167,7 @@ async function readAcl(path, ctx, uri) {
   return jsonContents(uri, {
     path, aclPath, exists: true,
     authorizations: auths.map(a => ({
-      agents: a.agents || [],
+      agents: (a.agents || []).map(sanitizeField),
       agentClasses: a.agentClasses || [],
       modes: (a.modes || []).map(m => m.split('#').pop()),
       isDefault: !!a.default,
@@ -179,7 +180,7 @@ async function readSkillResource(path, ctx, uri) {
   let skill;
   try { skill = await readSkill(path); }
   catch (e) { throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`); }
-  return jsonContents(uri, skill);   // body sanitized in Task 8
+  return jsonContents(uri, { ...skill, body: sanitizeBody(skill.body, 'untrusted skill content') });
 }
 
 const KIND = {

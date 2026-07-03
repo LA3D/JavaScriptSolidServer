@@ -21,6 +21,7 @@ import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { wac, buildUrl, parentPath } from './wac.js';
+import { sanitizeBody } from './sanitize.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -481,10 +482,10 @@ async function describe_resource({ path }, ctx) {
   let body = null;
   if (!isContainer) {
     const content = await storage.read(path);
-    body = content.toString('utf8');
+    let raw = content.toString('utf8');
     const MAX = 200_000;
-    if (body.length > MAX) body = body.slice(0, MAX);
-    // Sanitizer envelope wired in Task 8.
+    if (raw.length > MAX) raw = raw.slice(0, MAX);
+    body = sanitizeBody(raw, 'untrusted pod content');
   }
   const declared = await readDeclaredTypes(storage, path);
   const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
