@@ -11,13 +11,13 @@ import { wac, buildUrl } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
 import { AccessMode, parseAcl } from '../wac/parser.js';
-import { sanitizeBody, sanitizeField } from './sanitize.js';
+import { sanitizeBody, sanitizeField, sanitizeJsonLeaves } from './sanitize.js';
 import { readPodSkill, discoverSkills } from './skills.js';
 import * as storage from '../storage/filesystem.js';
 import { generateLwsContainer } from '../ldp/container.js';
 import { buildStorageDescription } from '../lws/storage-description.js';
 import { LWS_CONTEXT_OBJECT, LWS_VOCAB, withInlineContext } from '../lws/context.js';
-import { getContentType } from '../utils/url.js';
+import { getContentType, isRdfContentType } from '../utils/url.js';
 import { readBounded, MAX_BODY_BYTES } from './read.js';
 
 // --- helpers ----------------------------------------------------------------
@@ -147,6 +147,15 @@ async function readBody(path, ctx, uri) {
   const r = await readBounded(path);
   requireExists(r, uri);
   const type = getContentType(path);
+  // Trust rule: the pod's own RDF/JSON-LD is affordance — preserve structure +
+  // @context; strip only leaf values. Opaque/free-text is untrusted — envelope.
+  if (isRdfContentType(type) && !r.truncated) {
+    try {
+      const obj = JSON.parse(r.text);
+      const safe = withInlineContext(sanitizeJsonLeaves(obj));   // field-level strip, structure kept
+      return { contents: [{ uri, mimeType: type, text: JSON.stringify(safe, null, 2) }] };
+    } catch { /* not JSON (e.g. Turtle) or malformed — fall through to envelope */ }
+  }
   let label = `untrusted pod content — original type ${type}`;
   if (r.truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
   return { contents: [{ uri, mimeType: 'text/plain', text: sanitizeBody(r.text, label) }] };

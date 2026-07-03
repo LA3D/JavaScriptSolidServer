@@ -48,6 +48,18 @@ export function sanitizeTypes(arr) {
   return Array.isArray(arr) ? arr.map(stripHidden) : [];
 }
 
+// A resource body the pod itself wrote as RDF/JSON-LD (`readBody`'s trusted
+// branch): the STRUCTURE is the affordance — `@context`, `@id`, predicates —
+// so it must survive intact for the model to use it. Only leaf string values
+// are client-controlled data and get stripHidden; do NOT envelope (that would
+// hide the very structure this exists to preserve).
+export function sanitizeJsonLeaves(v) {
+  if (typeof v === 'string') return stripHidden(v);
+  if (Array.isArray(v)) return v.map(sanitizeJsonLeaves);
+  if (v && typeof v === 'object') { const o = {}; for (const [k, x] of Object.entries(v)) o[k] = sanitizeJsonLeaves(x); return o; }
+  return v;
+}
+
 // Recursively strip hidden chars from every string in an arbitrary JSON value.
 // For federated content (call_remote_pod's remote_result) — the least-trusted
 // source on the pod — where the shape is a foreign MCP result, not a body we
