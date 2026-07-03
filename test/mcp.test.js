@@ -4,9 +4,12 @@
  * Covers:
  *   - handshake (initialize / tools/list)
  *   - CRUD tools (list, read, write, create, delete, head)
- *   - skill discovery (list_skills, get_skill, get_pod_skill)
- *   - docs (list_docs, read_docs)
  *   - WAC enforcement (anonymous denied write, owner allowed)
+ *
+ * Skill discovery (list_skills/get_skill/get_pod_skill -> lws://skill(s)),
+ * pod_info (-> lws://pod-info), and docs (list_docs/read_docs, dropped
+ * entirely) moved out of tools.js in Task 5 — see test/mcp-v2-resources-
+ * skill.test.js and test/mcp-skill-wac.test.js.
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -73,13 +76,14 @@ describe('MCP server (--mcp enabled)', () => {
     const names = body.result.tools.map(t => t.name);
     for (const expected of [
       'write_resource', 'create_resource', 'delete_resource',
-      'list_skills', 'get_skill', 'get_pod_skill',
-      'list_docs', 'read_docs', 'pod_info'
+      'write_acl', 'subscribe', 'lws_type_search', 'call_remote_pod'
     ]) {
       assert.ok(names.includes(expected), `missing tool: ${expected}`);
     }
     for (const removed of [
-      'list_resources', 'read_resource', 'head_resource', 'lws_linkset', 'read_acl'
+      'list_resources', 'read_resource', 'head_resource', 'lws_linkset', 'read_acl',
+      'list_skills', 'get_skill', 'get_pod_skill', 'pod_info', 'lws_storage_description',
+      'list_docs', 'read_docs'
     ]) {
       assert.ok(!names.includes(removed), `tool should have been removed: ${removed}`);
     }
@@ -145,18 +149,15 @@ describe('MCP server (--mcp enabled)', () => {
     assert.ok(body.error, 'expected an RPC error for a missing resource');
   });
 
-  it('list_skills returns the index shape', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 10, method: 'tools/call',
-      params: { name: 'list_skills', arguments: {} }
-    }, { token });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
+  it('lws://skills returns the index shape', async () => {
+    const body = await readResource('lws://skills', { token });
+    assert.ok(!body.error, body.error?.message);
+    const payload = JSON.parse(body.result.contents[0].text);
     assert.strictEqual(payload['@type'], 'skill:SkillIndex');
     assert.ok(Array.isArray(payload['skill:items']));
   });
 
-  it('list_skills discovers per-app SKILL.md', async () => {
+  it('lws://skills discovers per-app SKILL.md', async () => {
     // Seed a per-app skill
     await rpc({
       jsonrpc: '2.0', id: 1010, method: 'tools/call',
@@ -192,46 +193,6 @@ describe('MCP server (--mcp enabled)', () => {
     const demo = payload.items.find(i => i.name === 'demo');
     assert.ok(demo, 'demo container should be listed');
     assert.strictEqual(demo.isContainer, true, 'isContainer must be true for directories');
-  });
-
-  it('list_docs returns the JSS-builtin doc set', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 11, method: 'tools/call',
-      params: { name: 'list_docs', arguments: {} }
-    });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
-    assert.strictEqual(payload.source, 'jss-builtin');
-    assert.ok(payload.docs.some(d => d.name.endsWith('.md')));
-  });
-
-  it('read_docs fetches a known doc', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 12, method: 'tools/call',
-      params: { name: 'read_docs', arguments: { name: 'git-support.md' } }
-    });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
-    assert.match(payload.body, /git/i);
-  });
-
-  it('read_docs rejects path traversal', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 13, method: 'tools/call',
-      params: { name: 'read_docs', arguments: { name: '../package.json' } }
-    });
-    assert.ok(body.result.isError);
-  });
-
-  it('pod_info returns identity info', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 14, method: 'tools/call',
-      params: { name: 'pod_info', arguments: {} }
-    }, { token });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
-    assert.strictEqual(payload.server, 'jss');
-    assert.ok(payload.identity);
   });
 
   it('rejects unknown method', async () => {
@@ -362,7 +323,7 @@ describe('MCP server (--mcp enabled)', () => {
         name: 'call_remote_pod',
         arguments: {
           pod_url: 'http://example.invalid',
-          tool: 'pod_info',
+          tool: 'lws_type_search',
           arguments: {}
         }
       }
@@ -400,7 +361,7 @@ describe('MCP server (--mcp enabled)', () => {
       }
     }, { token });
 
-    // Now call our own MCP back at /mcp invoking pod_info
+    // Now call our own MCP back at /mcp invoking lws_type_search
     const base = getBaseUrl();
     const { body } = await rpc({
       jsonrpc: '2.0', id: 222, method: 'tools/call',
@@ -408,7 +369,7 @@ describe('MCP server (--mcp enabled)', () => {
         name: 'call_remote_pod',
         arguments: {
           pod_url: base,
-          tool: 'pod_info',
+          tool: 'lws_type_search',
           arguments: {}
         }
       }
@@ -434,7 +395,7 @@ describe('MCP server (--mcp enabled)', () => {
           name: 'call_remote_pod',
           arguments: {
             pod_url: getBaseUrl(),
-            tool: 'pod_info',
+            tool: 'lws_type_search',
             arguments: {}
           }
         }

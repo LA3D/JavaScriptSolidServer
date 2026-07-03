@@ -14,13 +14,8 @@ import { AccessMode, parseAcl, serializeAcl } from '../wac/parser.js';
 import { resourceEvents, emitChange } from '../notifications/events.js';
 import { toolText, toolError, toolJson } from './protocol.js';
 import { applyLwsWrite } from '../lws/write.js';
-import { discoverSkills, readSkill, readPodSkill } from './skills.js';
-import { readFile, readdir, stat as fsStat } from 'fs/promises';
-import { join, dirname, resolve as pathResolve } from 'path';
-import { fileURLToPath } from 'url';
 import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
-import { buildStorageDescription } from '../lws/storage-description.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
@@ -36,9 +31,6 @@ const FULL_AGENT_CLASS = {
   'foaf:Agent': FOAF_AGENT,
   'acl:AuthenticatedAgent': ACL_AUTH_AGENT
 };
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const JSS_DOCS_DIR = pathResolve(__dirname, '..', '..', 'docs');
 
 // --- CRUD tools ---
 
@@ -115,65 +107,6 @@ async function delete_resource({ path }, ctx) {
   await storage.remove(path);
   emitChange(buildUrl(ctx, path));
   return toolText(`deleted ${path}`);
-}
-
-// --- skill tools ---
-
-async function list_skills(_args, ctx) {
-  const idx = await discoverSkills();
-  const visible = [];
-  for (const s of idx['skill:items']) {
-    if (await wac(ctx, s['@id'], AccessMode.READ)) visible.push(s);
-  }
-  return toolJson({ ...idx, 'skill:items': visible });
-}
-
-async function get_skill({ path }, ctx) {
-  if (!path) return toolError('path required');
-  const p = path.startsWith('/') ? path : '/' + path;
-  if (!(await wac(ctx, p, AccessMode.READ))) return toolError(`access denied: read ${p}`);
-  try {
-    const skill = await readSkill(p);
-    return toolJson(skill);
-  } catch (e) {
-    return toolError(e.message);
-  }
-}
-
-async function get_pod_skill(_args, ctx) {
-  const skill = await readPodSkill();
-  if (!skill) return toolText('no pod-wide SKILL.md or SKILL.jsonld');
-  if (!(await wac(ctx, skill.path, AccessMode.READ))) return toolError(`access denied: read ${skill.path}`);
-  return toolJson(skill);
-}
-
-// --- docs tools ---
-
-async function list_docs(_args, _ctx) {
-  try {
-    const entries = await readdir(JSS_DOCS_DIR);
-    const md = entries.filter(n => n.endsWith('.md'));
-    const docs = await Promise.all(md.map(async name => {
-      const fullPath = join(JSS_DOCS_DIR, name);
-      const s = await fsStat(fullPath).catch(() => null);
-      return { name, size: s?.size ?? null };
-    }));
-    return toolJson({ source: 'jss-builtin', docs });
-  } catch {
-    return toolJson({ source: 'jss-builtin', docs: [] });
-  }
-}
-
-async function read_docs({ name }, _ctx) {
-  if (!name) return toolError('name required (e.g. "git-support.md")');
-  if (name.includes('..') || name.includes('/')) return toolError('name must be a bare filename');
-  if (!name.endsWith('.md')) name = name + '.md';
-  try {
-    const body = await readFile(join(JSS_DOCS_DIR, name), 'utf8');
-    return toolJson({ name, body });
-  } catch (e) {
-    return toolError(`doc not found: ${name}`);
-  }
 }
 
 // --- ACL tools (#496) ---
@@ -476,26 +409,6 @@ async function call_remote_pod({ pod_url, tool, arguments: remoteArgs, auth }, c
   });
 }
 
-// --- pod info ---
-
-async function pod_info(_args, ctx) {
-  const skill = await readPodSkill().catch(() => null);
-  const skillVisible = skill && (await wac(ctx, skill.path, AccessMode.READ));
-  return toolJson({
-    pod: ctx.origin,
-    server: 'jss',
-    protocolVersion: '2025-03-26',
-    identity: ctx.webId || null,
-    capabilities: {
-      crud: true,
-      acl: true,
-      skills: true,
-      docs: true
-    },
-    skill: skillVisible ? { path: skill.path, format: skill.format } : null
-  });
-}
-
 // --- LWS-aware read tools ---
 //
 // These reuse collectAuthorizedResources — the SAME WAC-filtered walk the
@@ -516,15 +429,6 @@ async function lws_type_search(args, ctx) {
     type: 'ContainerPage', totalItems: matched.length,
     items: matched.map((r) => ({ id: r.id, type: containerItemTypes(r.types) })),
   });
-}
-
-async function lws_storage_description(_args, ctx) {
-  // Mirror the /.well-known/lws-storage generator (same service set) — the
-  // shared buildStorageDescription() is the single source of the service
-  // list, called by both the HTTP route (src/server.js) and this tool.
-  return toolJson(buildStorageDescription(ctx.origin, {
-    typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
-  }));
 }
 
 // --- registry ---
@@ -571,44 +475,6 @@ export const TOOLS = {
     },
     handler: delete_resource
   },
-  list_skills: {
-    description: 'List SKILL.md / SKILL.jsonld files at conventional paths (pod-wide, per-app, per-bot).',
-    inputSchema: { type: 'object', properties: {} },
-    handler: list_skills
-  },
-  get_skill: {
-    description: 'Read a specific skill file by pod path.',
-    inputSchema: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path']
-    },
-    handler: get_skill
-  },
-  get_pod_skill: {
-    description: 'Read the pod-wide SKILL.md (the owner\'s instructions to bots).',
-    inputSchema: { type: 'object', properties: {} },
-    handler: get_pod_skill
-  },
-  list_docs: {
-    description: 'List JSS\'s built-in docs (markdown files shipped with the server).',
-    inputSchema: { type: 'object', properties: {} },
-    handler: list_docs
-  },
-  read_docs: {
-    description: 'Read a JSS doc by filename (e.g. "git-support.md", "app-install.md").',
-    inputSchema: {
-      type: 'object',
-      properties: { name: { type: 'string' } },
-      required: ['name']
-    },
-    handler: read_docs
-  },
-  pod_info: {
-    description: 'Basic pod identity and MCP capabilities.',
-    inputSchema: { type: 'object', properties: {} },
-    handler: pod_info
-  },
   write_acl: {
     description: 'Write a structured ACL for a resource. authorizations: [{ agents?, agentClasses?, modes, isDefault? }]. Requires acl:Control.',
     inputSchema: {
@@ -650,11 +516,6 @@ export const TOOLS = {
       describedby: { type: 'array', items: {}, description: 'CNF describedby (shape) filter.' },
     } },
     handler: lws_type_search,
-  },
-  lws_storage_description: {
-    description: 'The pod storage description (type:Storage + advertised services).',
-    inputSchema: { type: 'object', properties: {} },
-    handler: lws_storage_description,
   },
   call_remote_pod: {
     description: 'Invoke an MCP tool on another pod. Caller must have acl:Write on /private/federation/ on this pod. Depth-capped at 3.',

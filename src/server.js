@@ -1038,7 +1038,7 @@ export function createServer(options = {}) {
       // notificationsEnabled || liveReloadEnabled, ~line 397) rather than the
       // raw notificationsEnabled local, so this matches both the actual
       // NotificationService registration condition (~line 464) and the MCP
-      // lws_storage_description ctx (src/mcp/index.js) — otherwise HTTP
+      // lws://storage-description ctx (src/mcp/index.js) — otherwise HTTP
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
       return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled });

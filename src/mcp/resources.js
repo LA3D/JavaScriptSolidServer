@@ -8,11 +8,12 @@ import { wac, buildUrl, parentPath } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
 import { AccessMode, parseAcl } from '../wac/parser.js';
-import { readPodSkill } from './skills.js';
+import { readPodSkill, readSkill, discoverSkills } from './skills.js';
 import * as storage from '../storage/filesystem.js';
 import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets } from '../lws/constraint.js';
+import { buildStorageDescription } from '../lws/storage-description.js';
 
 // --- template + fixed advertisement -----------------------------------------
 
@@ -56,9 +57,25 @@ async function readPodInfo(ctx) {
   });
 }
 
+async function readSkills(ctx, uri) {
+  const idx = await discoverSkills();
+  const visible = [];
+  for (const s of idx['skill:items']) {
+    if (await wac(ctx, s['@id'], AccessMode.READ)) visible.push(s);
+  }
+  return jsonContents(uri, { ...idx, 'skill:items': visible });
+}
+
+async function readStorageDescription(ctx, uri) {
+  return jsonContents(uri, buildStorageDescription(ctx.origin, {
+    typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
+  }));
+}
+
 const FIXED = {
   'pod-info': readPodInfo,
-  // 'storage-description' and 'skills' added in Task 5.
+  'skills': readSkills,
+  'storage-description': readStorageDescription,
 };
 
 // --- templated resolvers (added in Tasks 4-5) -------------------------------
@@ -157,13 +174,21 @@ async function readAcl(path, ctx, uri) {
   });
 }
 
+async function readSkillResource(path, ctx, uri) {
+  await requireRead(ctx, path, uri);
+  let skill;
+  try { skill = await readSkill(path); }
+  catch (e) { throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`); }
+  return jsonContents(uri, skill);   // body sanitized in Task 8
+}
+
 const KIND = {
   resource: readResourceBody,
   container: readContainer,
   linkset: readLinkset,
   meta: readMeta,
   acl: readAcl,
-  // 'skill' added in Task 5.
+  skill: readSkillResource,
 };
 
 // --- dispatch ---------------------------------------------------------------

@@ -58,9 +58,11 @@ test('lws://linkset returns anchor/type for a resource, WAC-gated', async (t) =>
 
 // Round-trips through the real /mcp HTTP route (not a hand-built ctx) so
 // this actually exercises the typeIndexEnabled/notificationsEnabled wiring
-// from request -> ctx -> buildStorageDescription, proving the MCP tool and
-// the HTTP /.well-known/lws-storage route can't drift apart.
-test('lws_storage_description mirrors /.well-known/lws-storage', async (t) => {
+// from request -> ctx -> buildStorageDescription, proving the MCP Resource
+// and the HTTP /.well-known/lws-storage route can't drift apart.
+// lws_storage_description (tool) was removed in Task 5; its coverage moves
+// to resources/read of lws://storage-description (src/mcp/resources.js).
+test('lws://storage-description mirrors /.well-known/lws-storage', async (t) => {
   await startTestServer({ lws: true, mcp: true });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
@@ -72,15 +74,15 @@ test('lws_storage_description mirrors /.well-known/lws-storage', async (t) => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'tools/call',
-      params: { name: 'lws_storage_description', arguments: {} },
+      jsonrpc: '2.0', id: 1, method: 'resources/read',
+      params: { uri: 'lws://storage-description' },
     }),
   });
   const mcpJson = await mcpRes.json();
-  const toolBody = JSON.parse(mcpJson.result.content[0].text);
+  const resourceBody = JSON.parse(mcpJson.result.contents[0].text);
 
-  assert.deepEqual(toolBody.service, httpBody.service);
-  assert.equal(toolBody.type, 'Storage');
+  assert.deepEqual(resourceBody.service, httpBody.service);
+  assert.equal(resourceBody.type, 'Storage');
 });
 
 // Edge combo: liveReload on, notifications explicitly off. The
@@ -91,7 +93,7 @@ test('lws_storage_description mirrors /.well-known/lws-storage', async (t) => {
 // under-advertised NotificationService while the MCP ctx (which reads
 // request.notificationsEnabled) correctly advertised it — this proves both
 // surfaces now agree, matching actual service registration.
-test('lws_storage_description and HTTP route agree when liveReload is on but notifications is off', async (t) => {
+test('lws://storage-description and HTTP route agree when liveReload is on but notifications is off', async (t) => {
   await startTestServer({ lws: true, mcp: true, liveReload: true, notifications: false });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
@@ -103,16 +105,16 @@ test('lws_storage_description and HTTP route agree when liveReload is on but not
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      jsonrpc: '2.0', id: 1, method: 'tools/call',
-      params: { name: 'lws_storage_description', arguments: {} },
+      jsonrpc: '2.0', id: 1, method: 'resources/read',
+      params: { uri: 'lws://storage-description' },
     }),
   });
   const mcpJson = await mcpRes.json();
-  const toolBody = JSON.parse(mcpJson.result.content[0].text);
+  const resourceBody = JSON.parse(mcpJson.result.contents[0].text);
 
   const httpHasNotify = httpBody.service.some((s) => s.type === 'NotificationService');
-  const mcpHasNotify = toolBody.service.some((s) => s.type === 'NotificationService');
+  const mcpHasNotify = resourceBody.service.some((s) => s.type === 'NotificationService');
   assert.equal(httpHasNotify, true, 'HTTP route must advertise NotificationService when liveReload is on');
   assert.equal(mcpHasNotify, true, 'MCP ctx must advertise NotificationService when liveReload is on');
-  assert.deepEqual(toolBody.service, httpBody.service);
+  assert.deepEqual(resourceBody.service, httpBody.service);
 });

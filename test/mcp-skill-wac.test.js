@@ -1,99 +1,97 @@
 /**
- * MCP skill tools honor WAC (#task-5).
+ * MCP skill Resources honor WAC (#task-5).
  *
- * `get_skill` / `get_pod_skill` / `list_skills` must gate on the same
- * `wac(ctx, path, AccessMode.READ)` check every other MCP read tool uses —
- * "skills are public" is an ACL fact (a public-read ACL on the skill file),
- * not an auth-layer bypass.
+ * `lws://skill/{+path}` / `lws://skills` / `lws://pod-info` must gate on the
+ * same `wac(ctx, path, AccessMode.READ)` check every other MCP resource
+ * resolver uses — "skills are public" is an ACL fact (a public-read ACL on
+ * the skill file), not an auth-layer bypass.
  *
- * `pod_info` was a follow-up finding: it called readPodSkill() unconditionally
- * and surfaced skill.path/skill.format with no WAC check — an existence/
- * metadata oracle for a pod-wide SKILL file regardless of its ACL. It must
- * report `skill: null` for a caller who can't Read the skill file, same as a
- * pod with no skill at all.
+ * `lws://pod-info` was a follow-up finding (formerly the `pod_info` tool): it
+ * called readPodSkill() unconditionally and surfaced skill.path/skill.format
+ * with no WAC check — an existence/metadata oracle for a pod-wide SKILL file
+ * regardless of its ACL. It must report `skill: null` for a caller who can't
+ * Read the skill file, same as a pod with no skill at all.
  *
- * Note: the brief names the read tool `read_skill`; this codebase's actual
- * tool name is `get_skill` (see src/mcp/tools.js TOOLS registry) — tests use
- * the real name.
+ * These tools were removed in Task 5 (migrated to the Resources primitive,
+ * src/mcp/resources.js): `list_skills` -> `lws://skills`, `get_skill` ->
+ * `lws://skill/{+path}`, `get_pod_skill` -> read `lws://skill/{+path}` on the
+ * pod-wide path directly, `pod_info` -> `lws://pod-info`.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { callTool } from '../src/mcp/tools.js';
-import { startServer, putFile } from './helpers.js';
+import { startServer, putFile, postMcp } from './helpers.js';
 
-test('get_skill denies a private path to anonymous', async (t) => {
+async function read(pod, uri) {
+  const { body } = await postMcp(pod, { jsonrpc: '2.0', id: 1, method: 'resources/read', params: { uri } });
+  return body;
+}
+
+test('lws://skill denies a private path to anonymous', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/private/secret.md', 'top secret', { publicRead: false });
-  const res = await callTool('get_skill', { path: '/private/secret.md' },
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError, true);
-  assert.match(JSON.stringify(res), /access denied/i);
+  const body = await read(pod, 'lws://skill/private/secret.md');
+  assert.ok(body.error);
+  assert.match(body.error.message, /access denied/i);
 });
 
-test('get_skill allows a public-read skill file', async (t) => {
+test('lws://skill allows a public-read skill file', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: true });
-  const res = await callTool('get_skill', { path: '/SKILL.md' },
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError ?? false, false);
+  const body = await read(pod, 'lws://skill/SKILL.md');
+  assert.ok(!body.error, body.error?.message);
+  assert.match(body.result.contents[0].text, /# skill/);
 });
 
-test('get_pod_skill denies when the pod-wide SKILL.md is not public-read', async (t) => {
+test('lws://skill (pod-wide path) denies when the pod-wide SKILL.md is not public-read', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: false });
-  const res = await callTool('get_pod_skill', {},
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError, true);
-  assert.match(JSON.stringify(res), /access denied/i);
+  const body = await read(pod, 'lws://skill/SKILL.md');
+  assert.ok(body.error);
+  assert.match(body.error.message, /access denied/i);
 });
 
-test('get_pod_skill allows when the pod-wide SKILL.md is public-read', async (t) => {
+test('lws://skill (pod-wide path) allows when the pod-wide SKILL.md is public-read', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: true });
-  const res = await callTool('get_pod_skill', {},
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError ?? false, false);
+  const body = await read(pod, 'lws://skill/SKILL.md');
+  assert.ok(!body.error, body.error?.message);
 });
 
-test('list_skills omits skills the caller cannot READ', async (t) => {
+test('lws://skills omits skills the caller cannot READ', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: false });
-  const res = await callTool('list_skills', {},
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError ?? false, false);
-  const payload = JSON.parse(res.content[0].text);
+  const body = await read(pod, 'lws://skills');
+  assert.ok(!body.error, body.error?.message);
+  const payload = JSON.parse(body.result.contents[0].text);
   assert.equal(payload['skill:items'].length, 0, 'private pod skill must not be listed to anonymous');
 });
 
-test('list_skills includes skills the caller CAN READ', async (t) => {
+test('lws://skills includes skills the caller CAN READ', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: true });
-  const res = await callTool('list_skills', {},
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError ?? false, false);
-  const payload = JSON.parse(res.content[0].text);
+  const body = await read(pod, 'lws://skills');
+  assert.ok(!body.error, body.error?.message);
+  const payload = JSON.parse(body.result.contents[0].text);
   assert.equal(payload['skill:items'].length, 1);
   assert.equal(payload['skill:items'][0]['@id'], '/SKILL.md');
 });
 
-test('pod_info reports skill: null when the pod-wide SKILL.md is not public-read (anonymous)', async (t) => {
+test('lws://pod-info reports skill: null when the pod-wide SKILL.md is not public-read (anonymous)', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: false });
-  const res = await callTool('pod_info', {},
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError ?? false, false);
-  const payload = JSON.parse(res.content[0].text);
+  const body = await read(pod, 'lws://pod-info');
+  assert.ok(!body.error, body.error?.message);
+  const payload = JSON.parse(body.result.contents[0].text);
   assert.equal(payload.skill, null, 'anonymous caller must not learn the skill file exists');
 });
 
-test('pod_info surfaces skill metadata when the pod-wide SKILL.md is public-read', async (t) => {
+test('lws://pod-info surfaces skill metadata when the pod-wide SKILL.md is public-read', async (t) => {
   const pod = await startServer(t, { mcp: true });
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: true });
-  const res = await callTool('pod_info', {},
-    { webId: null, origin: pod.origin });
-  assert.equal(res.isError ?? false, false);
-  const payload = JSON.parse(res.content[0].text);
+  const body = await read(pod, 'lws://pod-info');
+  assert.ok(!body.error, body.error?.message);
+  const payload = JSON.parse(body.result.contents[0].text);
   assert.ok(payload.skill, 'skill metadata should be present when readable');
   assert.equal(payload.skill.path, '/SKILL.md');
 });
