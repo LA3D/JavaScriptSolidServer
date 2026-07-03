@@ -16,6 +16,9 @@ import { toolText, toolError, toolJson } from './protocol.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
+import { generateLinkset } from '../lws/linkset.js';
+import { readDeclaredTypes } from '../lws/type-metadata.js';
+import { describedbyTargets } from '../lws/constraint.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
@@ -431,6 +434,77 @@ async function lws_type_search(args, ctx) {
   });
 }
 
+// --- convenience tools ---
+//
+// Composed from the primitives above — no new server capability, just fewer
+// agent round-trips for the common "store a typed thing" / "orient on a
+// resource" flows.
+
+const DESCRIBEDBY = 'http://www.w3.org/2007/05/powder-s#describedby';
+
+// Convenience: the common "store a typed thing" flow in one call. Optionally
+// declares a describedby shape into the target .meta (needs Write on .meta)
+// BEFORE the governed write, so declare+validate happen together. Still
+// LWS-general (no profile assumptions).
+async function put_typed_resource({ path, content, contentType, types, describedby }, ctx) {
+  if (!path) return toolError('path required');
+  if (path.endsWith('/')) return toolError('cannot PUT a container; use create_resource');
+  if (content == null) return toolError('content required');
+  if (!(await wac(ctx, path, AccessMode.WRITE))) return toolError(`access denied: write ${path}`);
+
+  if (describedby) {
+    const metaPath = path + '.meta';
+    if (!(await wac(ctx, metaPath, AccessMode.WRITE))) {
+      return toolError(`access denied: write ${metaPath} (needed to declare describedby)`);
+    }
+    const meta = {
+      '@context': { describedby: { '@id': DESCRIBEDBY, '@type': '@id' } },
+      '@id': buildUrl(ctx, path),
+      describedby: describedby,
+    };
+    await storage.write(metaPath, Buffer.from(JSON.stringify(meta), 'utf8'), {
+      contentType: 'application/ld+json',
+    });
+  }
+
+  const w = await applyLwsWrite({
+    storage, storagePath: path, resourceUrl: buildUrl(ctx, path),
+    content: Buffer.from(content, 'utf8'), contentType: contentType || 'text/plain',
+    declaredTypes: Array.isArray(types) ? types : [], lwsEnabled: ctx.lwsEnabled,
+  });
+  if (!w.ok) {
+    // Teaching content upgraded in Task 7; mirror the current shape for now.
+    return toolError(`admission rejected ${path}`, { violations: w.violations, describedby: w.shapeUrl });
+  }
+  if (!w.wrote) return toolError(`write failed: ${path}`);
+  emitChange(buildUrl(ctx, path));
+  return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes${types?.length ? `, types: ${types.join(', ')}` : ''})`);
+}
+
+// Convenience: one read returning body + linkset + declared types together,
+// saving an agent 2-3 round-trips to orient on a resource.
+async function describe_resource({ path }, ctx) {
+  if (!path) return toolError('path required');
+  if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
+  if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
+  const isContainer = path.endsWith('/');
+  let body = null;
+  if (!isContainer) {
+    const content = await storage.read(path);
+    body = content.toString('utf8');
+    const MAX = 200_000;
+    if (body.length > MAX) body = body.slice(0, MAX);
+    // Sanitizer envelope wired in Task 8.
+  }
+  const declared = await readDeclaredTypes(storage, path);
+  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
+  const linkset = generateLinkset(buildUrl(ctx, path), {
+    parentUrl: buildUrl(ctx, parentPath(path)),
+    isContainer, describedByShapes: shapes, declaredTypes: declared,
+  });
+  return toolJson({ path, isContainer, body, types: declared, linkset });
+}
+
 // --- registry ---
 
 export const TOOLS = {
@@ -539,7 +613,31 @@ export const TOOLS = {
       required: ['pod_url', 'tool']
     },
     handler: call_remote_pod
-  }
+  },
+  put_typed_resource: {
+    description: 'Store a typed resource in one call: writes the body, captures LWS types (rel="type"), and optionally declares a describedby shape into the target .meta. Routes through SHACL admission.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+        contentType: { type: 'string', description: 'MIME type (default text/plain)' },
+        types: { type: 'array', items: { type: 'string' }, description: 'Server-managed type URIs (LWS rel="type").' },
+        describedby: { type: 'string', description: 'Optional SHACL shape URI to declare into the target .meta (needs Write on .meta).' },
+      },
+      required: ['path', 'content'],
+    },
+    handler: put_typed_resource,
+  },
+  describe_resource: {
+    description: "One-shot orientation on a resource: its body, declared types, and RFC 9264 linkset together.",
+    inputSchema: {
+      type: 'object',
+      properties: { path: { type: 'string' } },
+      required: ['path'],
+    },
+    handler: describe_resource,
+  },
 };
 
 /**
