@@ -3,8 +3,8 @@
 // a byte-range stream (never loads a multi-hundred-MB object fully into memory
 // just to slice it — review #6) and reports whether the body was truncated so
 // the model isn't handed a partial document as if it were whole (review #5).
-// Both lws://resource and the describe_resource tool go through here so they
-// can't drift on the limit or the signal (review #12).
+// Both the resources/read body view and the describe_resource tool go through
+// here so they can't drift on the limit or the signal (review #12).
 import * as storage from '../storage/filesystem.js';
 
 export const MAX_BODY_BYTES = 200_000;
