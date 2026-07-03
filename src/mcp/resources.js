@@ -5,37 +5,35 @@
 // same read logic + wac() as the former read tools, so the no-oracle
 // property is inherited, not reimplemented.
 import { parseUri, fixedUri } from './uri.js';
+import { SURFACE_TEMPLATES, SURFACE_FIXED } from './surface.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
 import { AccessMode, parseAcl } from '../wac/parser.js';
-import { sanitizeBody, sanitizeField } from './sanitize.js';
+import { sanitizeBody, sanitizeField, sanitizeTypes } from './sanitize.js';
 import { readPodSkill, readSkill, discoverSkills } from './skills.js';
 import * as storage from '../storage/filesystem.js';
 import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { buildStorageDescription } from '../lws/storage-description.js';
+import { getContentType } from '../utils/url.js';
+import { readBounded, MAX_BODY_BYTES } from './read.js';
 
-// --- template + fixed advertisement -----------------------------------------
+// --- template + fixed advertisement (derived from the surface registry) ------
 
 export function listResourceTemplates() {
-  return [
-    { uriTemplate: 'lws://resource/{+path}', name: 'resource', description: 'A resource body (any content type), enveloped as untrusted data.', mimeType: 'text/plain' },
-    { uriTemplate: 'lws://container/{+path}', name: 'container', description: 'A container listing (ldp:contains children).', mimeType: 'application/json' },
-    { uriTemplate: 'lws://linkset/{+path}', name: 'linkset', description: 'RFC 9264 linkset: anchor/up/type/describedby.', mimeType: 'application/linkset+json' },
-    { uriTemplate: 'lws://meta/{+path}', name: 'meta', description: 'Resource metadata (size/modified).', mimeType: 'application/json' },
-    { uriTemplate: 'lws://acl/{+path}', name: 'acl', description: 'Structured ACL (requires acl:Control).', mimeType: 'application/json' },
-    { uriTemplate: 'lws://skill/{+path}', name: 'skill', description: 'A skill file body.', mimeType: 'application/json' },
-  ];
+  return SURFACE_TEMPLATES.map(t => ({
+    uriTemplate: `lws://${t.kind}/{+path}`, name: t.kind,
+    description: t.description, mimeType: t.mimeType,
+  }));
 }
 
 export function listFixedResources() {
-  return [
-    { uri: 'lws://storage-description', name: 'storage-description', description: 'The LWS storage description (type:Storage + services).', mimeType: 'application/json' },
-    { uri: 'lws://pod-info', name: 'pod-info', description: 'Pod identity + MCP capabilities.', mimeType: 'application/json' },
-    { uri: 'lws://skills', name: 'skills', description: 'Skill index (WAC-filtered, no-oracle).', mimeType: 'application/json' },
-  ];
+  return SURFACE_FIXED.map(f => ({
+    uri: `lws://${f.name}`, name: f.name,
+    description: f.description, mimeType: f.mimeType,
+  }));
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -82,15 +80,6 @@ const FIXED = {
 
 // --- templated resolvers (added in Tasks 4-5) -------------------------------
 
-const MIME = {
-  '.json': 'application/json', '.jsonld': 'application/ld+json',
-  '.ttl': 'text/turtle', '.md': 'text/markdown', '.html': 'text/html', '.txt': 'text/plain',
-};
-function mimeFor(path) {
-  const dot = path.lastIndexOf('.');
-  return dot === -1 ? 'text/plain' : (MIME[path.slice(dot).toLowerCase()] || 'text/plain');
-}
-
 // WAC-check BEFORE storage.exists so a denied read is indistinguishable from
 // not-found where existence is privileged (spec §4, mirrors lws_linkset).
 async function requireRead(ctx, path, uri) {
@@ -105,12 +94,12 @@ function requireExists(exists, uri) {
 async function readResourceBody(path, ctx, uri) {
   await requireRead(ctx, path, uri);
   if (path.endsWith('/')) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `use lws://container for containers: ${uri}`);
-  requireExists(await storage.exists(path), uri);
-  const content = await storage.read(path);
-  let text = content.toString('utf8');
-  const MAX = 200_000;
-  if (text.length > MAX) text = text.slice(0, MAX);
-  return { contents: [{ uri, mimeType: 'text/plain', text: sanitizeBody(text, `untrusted pod content — original type ${mimeFor(path)}`) }] };
+  const r = await readBounded(path);
+  requireExists(r, uri);
+  const type = getContentType(path);
+  let label = `untrusted pod content — original type ${type}`;
+  if (r.truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
+  return { contents: [{ uri, mimeType: 'text/plain', text: sanitizeBody(r.text, label) }] };
 }
 
 async function readContainer(path, ctx, uri) {
@@ -134,8 +123,10 @@ async function readLinkset(path, ctx, uri) {
   await requireRead(ctx, path, uri);
   requireExists(await storage.exists(path), uri);
   const isContainer = path.endsWith('/');
-  const declared = await readDeclaredTypes(storage, path);
-  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
+  // Types + shape targets are client-controlled — sanitize before they enter
+  // the model's context (review #2).
+  const declared = sanitizeTypes(await readDeclaredTypes(storage, path));
+  const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   const ls = generateLinkset(buildUrl(ctx, path), {
     parentUrl: buildUrl(ctx, parentPath(path)),
     isContainer, describedByShapes: shapes, declaredTypes: declared,
@@ -154,11 +145,19 @@ async function readMeta(path, ctx, uri) {
 }
 
 async function readAcl(path, ctx, uri) {
+  // A container's own ACL lives INSIDE it (<dir>/.acl), a resource's beside it
+  // (<file>.acl) — the same rule as src/wac/checker.js. Detect container-ness
+  // from storage (not just a trailing slash) so lws://acl/dir and
+  // lws://acl/dir/ both resolve /dir/.acl, and normalize the path so the
+  // Control check runs against the right target (review #3).
+  const s = await storage.stat(path);
+  const isContainer = path.endsWith('/') || !!(s && s.isDirectory);
+  const target = isContainer && !path.endsWith('/') ? path + '/' : path;
   // Reading the ACL document itself requires Control on the resource.
-  if (!(await wac(ctx, path, AccessMode.CONTROL))) {
+  if (!(await wac(ctx, target, AccessMode.CONTROL))) {
     throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `access denied: control ${uri}`);
   }
-  const aclPath = path.endsWith('/') ? path + '.acl' : path + '.acl';
+  const aclPath = target + '.acl';
   if (!(await storage.exists(aclPath))) {
     return jsonContents(uri, { path, aclPath, exists: false, authorizations: [] });
   }
@@ -179,7 +178,12 @@ async function readSkillResource(path, ctx, uri) {
   await requireRead(ctx, path, uri);
   let skill;
   try { skill = await readSkill(path); }
-  catch (e) { throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`); }
+  catch (e) {
+    // Only a genuinely missing skill is not-found; a read/parse failure is a
+    // real error and must not be masked as absence (review #8).
+    if (/not found/i.test(e.message)) throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`);
+    throw new ResourceError(RPC_ERRORS.INTERNAL_ERROR, `skill read failed: ${uri}: ${e.message}`);
+  }
   return jsonContents(uri, { ...skill, body: sanitizeBody(skill.body, 'untrusted skill content') });
 }
 
@@ -191,6 +195,11 @@ const KIND = {
   acl: readAcl,
   skill: readSkillResource,
 };
+
+// Exposed so a guard test can assert the resolver maps cover exactly the
+// surface registry (no advertise-without-resolver / resolver-without-parse
+// drift — review #11). The dispatch below reads from these same maps.
+export const RESOLVERS = { KIND, FIXED };
 
 // --- dispatch ---------------------------------------------------------------
 

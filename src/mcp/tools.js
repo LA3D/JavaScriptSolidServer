@@ -21,7 +21,8 @@ import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeBody } from './sanitize.js';
+import { sanitizeBody, sanitizeTypes, sanitizeDeep } from './sanitize.js';
+import { readBounded, MAX_BODY_BYTES } from './read.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -398,11 +399,16 @@ async function call_remote_pod({ pod_url, tool, arguments: remoteArgs, auth }, c
   if (payload.error) {
     return toolError(`remote MCP error ${payload.error.code}: ${payload.error.message}`);
   }
+  // A federated pod is the least-trusted content source. Deep-strip hidden/bidi
+  // chars from its result before it enters the model's context — the
+  // cross-agent injection vector (review #7). NOTE: this is a generic proxy
+  // ({tool,arguments}); the governance is the federation gate + depth cap +
+  // this sanitize, not per-remote-tool typing.
   return toolJson({
     pod_url,
     tool,
     depth,
-    remote_result: payload.result || null
+    remote_result: sanitizeDeep(payload.result ?? null)
   });
 }
 
@@ -446,17 +452,18 @@ async function put_typed_resource({ path, content, contentType, types, described
   if (content == null) return toolError('content required');
   if (!(await wac(ctx, path, AccessMode.WRITE))) return toolError(`access denied: write ${path}`);
 
+  // Declaring the shape is transactional: snapshot the target .meta, merge the
+  // describedby in (so admission validates against it), then roll the .meta
+  // back if the write is rejected — a rejected write must leave no durable
+  // side effect and must not clobber pre-existing metadata (review #1).
+  const metaPath = path + '.meta';
+  let metaSnapshot;   // undefined = not touched; null = didn't exist; Buffer = prior bytes
   if (describedby) {
-    const metaPath = path + '.meta';
     if (!(await wac(ctx, metaPath, AccessMode.WRITE))) {
       return toolError(`access denied: write ${metaPath} (needed to declare describedby)`);
     }
-    const meta = {
-      '@context': { describedby: { '@id': DESCRIBEDBY, '@type': '@id' } },
-      '@id': buildUrl(ctx, path),
-      describedby: describedby,
-    };
-    await storage.write(metaPath, Buffer.from(JSON.stringify(meta), 'utf8'), {
+    metaSnapshot = (await storage.exists(metaPath)) ? await storage.read(metaPath) : null;
+    await storage.write(metaPath, Buffer.from(JSON.stringify(mergeDescribedby(metaSnapshot, buildUrl(ctx, path), describedby)), 'utf8'), {
       contentType: 'application/ld+json',
     });
   }
@@ -466,10 +473,29 @@ async function put_typed_resource({ path, content, contentType, types, described
     content: Buffer.from(content, 'utf8'), contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [], lwsEnabled: ctx.lwsEnabled,
   });
-  if (!w.ok) return admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
-  if (!w.wrote) return toolError(`write failed: ${path}`);
+  if (!w.ok || !w.wrote) {
+    if (metaSnapshot !== undefined) {                       // roll the .meta back
+      if (metaSnapshot === null) await storage.remove(metaPath);
+      else await storage.write(metaPath, metaSnapshot, { contentType: 'application/ld+json' });
+    }
+    return w.ok ? toolError(`write failed: ${path}`) : admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
+  }
   emitChange(buildUrl(ctx, path));
   return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes${types?.length ? `, types: ${types.join(', ')}` : ''})`);
+}
+
+// Merge a describedby declaration into any existing .meta JSON-LD (preserve
+// other keys + @context), rather than overwriting the whole document.
+function mergeDescribedby(priorBytes, id, describedby) {
+  let base = {};
+  if (priorBytes) { try { base = JSON.parse(priorBytes.toString('utf8')) || {}; } catch { base = {}; } }
+  const dbCtx = { describedby: { '@id': DESCRIBEDBY, '@type': '@id' } };
+  let context;
+  if (base['@context'] == null) context = dbCtx;
+  else if (Array.isArray(base['@context'])) context = [...base['@context'], dbCtx];
+  else if (typeof base['@context'] === 'object') context = { ...base['@context'], ...dbCtx };
+  else context = [base['@context'], dbCtx];
+  return { ...base, '@context': context, '@id': base['@id'] || id, describedby };
 }
 
 // Convenience: one read returning body + linkset + declared types together,
@@ -479,21 +505,23 @@ async function describe_resource({ path }, ctx) {
   if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
   if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
   const isContainer = path.endsWith('/');
-  let body = null;
+  let body = null, truncated = false;
   if (!isContainer) {
-    const content = await storage.read(path);
-    let raw = content.toString('utf8');
-    const MAX = 200_000;
-    if (raw.length > MAX) raw = raw.slice(0, MAX);
-    body = sanitizeBody(raw, 'untrusted pod content');
+    const r = await readBounded(path);              // bounded read, shared limit (#5/#6/#12)
+    if (r) {
+      truncated = r.truncated;
+      let label = 'untrusted pod content';
+      if (truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
+      body = sanitizeBody(r.text, label);
+    }
   }
-  const declared = await readDeclaredTypes(storage, path);
-  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
+  const declared = sanitizeTypes(await readDeclaredTypes(storage, path));
+  const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   const linkset = generateLinkset(buildUrl(ctx, path), {
     parentUrl: buildUrl(ctx, parentPath(path)),
     isContainer, describedByShapes: shapes, declaredTypes: declared,
   });
-  return toolJson({ path, isContainer, body, types: declared, linkset });
+  return toolJson({ path, isContainer, body, truncated, types: declared, linkset });
 }
 
 // --- registry ---

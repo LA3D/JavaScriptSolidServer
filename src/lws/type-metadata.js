@@ -26,8 +26,14 @@ export function parseTypeLinks(linkHeader = '') {
 }
 
 export async function captureDeclaredTypes(storage, storagePath, typeUris) {
-  if (!typeUris || !typeUris.length) return;                 // nothing to persist
-  await storage.write(typeStorePath(storagePath), Buffer.from(JSON.stringify(typeUris)));
+  // Persist only absolute-URI types. The HTTP Link path already filtered via
+  // parseTypeLinks; the MCP `types` param reaches here unfiltered, so validate
+  // here too — the sole choke point — so no free-text/relative value is ever
+  // stored (review #2). Dedupe, order-preserved.
+  const clean = [];
+  for (const t of (typeUris || [])) if (isAbsoluteUri(t) && !clean.includes(t)) clean.push(t);
+  if (!clean.length) return;                                 // nothing to persist
+  await storage.write(typeStorePath(storagePath), Buffer.from(JSON.stringify(clean)));
 }
 
 export async function readDeclaredTypes(storage, storagePath) {

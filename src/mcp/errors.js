@@ -1,21 +1,28 @@
 // src/mcp/errors.js
-// Structured error/teaching model for the MCP surface. The full teaching
-// builder (admissionError) lands in Task 7; Task 3 only needs ResourceError,
-// which the transport converts into a JSON-RPC error on resources/read.
+// Structured error/teaching model for the MCP surface. A ResourceError becomes
+// a JSON-RPC error on resources/read; admissionError/structuredError build the
+// tool-side teaching content.
+import { toolText } from './protocol.js';
 
 export class ResourceError extends Error {
   constructor(code, message, data) {
     super(message);
     this.name = 'ResourceError';
     this.code = code;
-    this.data = data;
+    // §5: resource-read failures carry the SAME model-readable content[] shape
+    // as tool errors, so a client renders both consistently instead of the
+    // resource path exposing only a bare message (review #9).
+    this.data = {
+      content: [{ type: 'text', text: message }], isError: true,
+      ...(data && typeof data === 'object' ? data : {}),
+    };
   }
 }
 
 // Tool-side error whose CONTENT carries the readable text (the model reads
-// content, not `data`). Keeps structured `data` too for programmatic use.
+// content, not `data`). Reuses the toolText envelope; keeps structured `data`.
 export function structuredError(text, data) {
-  const r = { content: [{ type: 'text', text }], isError: true };
+  const r = { ...toolText(text), isError: true };
   if (data && typeof data === 'object') r.data = data;
   return r;
 }
