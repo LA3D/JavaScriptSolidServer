@@ -178,7 +178,7 @@ export function extractJsonLdFromHtml(html) {
  * must include the podName prefix (storage paths always do, non-subdomain).
  */
 export async function startLwsPod(t, name = 'lwsmcp') {
-  await startTestServer({ lws: true });
+  await startTestServer({ lws: true, mcp: true });
   const pod = await createTestPod(name);
   const token = getPodToken(name);
   const base = getBaseUrl();

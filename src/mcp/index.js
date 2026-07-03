@@ -24,6 +24,8 @@ import {
   rpcError
 } from './protocol.js';
 import { listToolsForRpc, callTool, TOOLS } from './tools.js';
+import { listResourceTemplates, listFixedResources, readResource } from './resources.js';
+import { ResourceError } from './errors.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { hasLwsCidAuth } from '../auth/lws-cid.js';
 import { hasSolidOidcAuth } from '../auth/solid-oidc.js';
@@ -34,6 +36,9 @@ const ALLOWED_METHODS = new Set([
   'notifications/initialized',
   'tools/list',
   'tools/call',
+  'resources/list',
+  'resources/templates/list',
+  'resources/read',
   'ping'
 ]);
 
@@ -59,7 +64,8 @@ async function dispatch(msg, ctx) {
       protocolVersion: PROTOCOL_VERSION,
       serverInfo: SERVER_INFO,
       capabilities: {
-        tools: { listChanged: false }
+        tools: { listChanged: false },
+        resources: { subscribe: false, listChanged: false }
       }
     });
   }
@@ -71,6 +77,26 @@ async function dispatch(msg, ctx) {
 
   if (method === 'tools/list') {
     return rpcResult(id, { tools: listToolsForRpc() });
+  }
+
+  if (method === 'resources/templates/list') {
+    return rpcResult(id, { resourceTemplates: listResourceTemplates() });
+  }
+
+  if (method === 'resources/list') {
+    return rpcResult(id, { resources: listFixedResources() });
+  }
+
+  if (method === 'resources/read') {
+    const uri = params?.uri;
+    if (!uri) return rpcError(id, RPC_ERRORS.INVALID_PARAMS, 'resource uri required');
+    try {
+      const out = await readResource(uri, ctx);
+      return rpcResult(id, out);
+    } catch (e) {
+      if (e instanceof ResourceError) return rpcError(id, e.code, e.message, e.data);
+      return rpcError(id, RPC_ERRORS.INTERNAL_ERROR, `resources/read failed: ${e.message}`);
+    }
   }
 
   if (method === 'tools/call') {
