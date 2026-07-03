@@ -23,6 +23,21 @@ function decodable(path) {
   catch { return false; }
 }
 
+// MCP Resources are addressed by the pod's REAL https:// URLs (LWS: a resource
+// is identified by its URI; structure lives in rel-links/items, not a scheme).
+// uriToPath maps a local resource URL back to its pod path; a foreign origin is
+// a federation target, not a local read.
+export function isLocalUri(origin, uri) {
+  return typeof uri === 'string' && typeof origin === 'string' && uri.startsWith(origin + '/');
+}
+
+export function uriToPath(origin, uri) {
+  if (!isLocalUri(origin, uri)) return null;
+  const path = uri.slice(origin.length);          // keeps the leading '/'
+  if (!path.startsWith('/') || !decodable(path)) return null;
+  return path;
+}
+
 export function parseUri(uri) {
   if (typeof uri !== 'string' || !uri.startsWith(SCHEME)) return null;
   const rest = uri.slice(SCHEME.length);
