@@ -4,9 +4,12 @@
  * Covers:
  *   - handshake (initialize / tools/list)
  *   - CRUD tools (list, read, write, create, delete, head)
- *   - skill discovery (list_skills, get_skill, get_pod_skill)
- *   - docs (list_docs, read_docs)
  *   - WAC enforcement (anonymous denied write, owner allowed)
+ *
+ * Skill discovery (list_skills/get_skill/get_pod_skill -> lws://skill(s)),
+ * pod_info (-> lws://pod-info), and docs (list_docs/read_docs, dropped
+ * entirely) moved out of tools.js in Task 5 — see test/mcp-v2-resources-
+ * skill.test.js and test/mcp-skill-wac.test.js.
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -37,6 +40,14 @@ async function rpc(body, opts = {}) {
   return { status: res.status, body: data };
 }
 
+// Read logic moved from tools (read_resource/list_resources/head_resource/
+// lws_linkset/read_acl) to the Resources primitive (Task 4, hard break).
+// This helper drives resources/read the same way the removed tool tests did.
+async function readResource(uri, opts = {}) {
+  const { body } = await rpc({ jsonrpc: '2.0', id: 500, method: 'resources/read', params: { uri } }, opts);
+  return body;
+}
+
 describe('MCP server (--mcp enabled)', () => {
   before(async () => {
     await startTestServer({ mcp: true });
@@ -64,12 +75,17 @@ describe('MCP server (--mcp enabled)', () => {
     const { body } = await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const names = body.result.tools.map(t => t.name);
     for (const expected of [
-      'list_resources', 'read_resource', 'write_resource',
-      'create_resource', 'delete_resource', 'head_resource',
-      'list_skills', 'get_skill', 'get_pod_skill',
-      'list_docs', 'read_docs', 'pod_info'
+      'write_resource', 'create_resource', 'delete_resource',
+      'write_acl', 'subscribe', 'lws_type_search', 'call_remote_pod'
     ]) {
       assert.ok(names.includes(expected), `missing tool: ${expected}`);
+    }
+    for (const removed of [
+      'list_resources', 'read_resource', 'head_resource', 'lws_linkset', 'read_acl',
+      'list_skills', 'get_skill', 'get_pod_skill', 'pod_info', 'lws_storage_description',
+      'list_docs', 'read_docs'
+    ]) {
+      assert.ok(!names.includes(removed), `tool should have been removed: ${removed}`);
     }
   });
 
@@ -94,23 +110,16 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(body.result.content[0].text, /wrote/);
   });
 
-  it('read_resource returns the written content', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 5, method: 'tools/call',
-      params: { name: 'read_resource', arguments: { path: '/mcptest/public/hello.txt' } }
-    }, { token });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
-    assert.strictEqual(payload.body, 'hi');
+  it('lws://resource returns the written content', async () => {
+    const body = await readResource('lws://resource/mcptest/public/hello.txt', { token });
+    assert.ok(!body.error, body.error?.message);
+    assert.strictEqual(body.result.contents[0].text, 'hi');
   });
 
-  it('list_resources lists the container', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 6, method: 'tools/call',
-      params: { name: 'list_resources', arguments: { path: '/mcptest/public/' } }
-    }, { token });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
+  it('lws://container lists the container', async () => {
+    const body = await readResource('lws://container/mcptest/public/', { token });
+    assert.ok(!body.error, body.error?.message);
+    const payload = JSON.parse(body.result.contents[0].text);
     assert.ok(payload.items.some(i => i.name === 'hello.txt'));
   });
 
@@ -135,26 +144,20 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(body.result.content[0].text, /deleted/);
   });
 
-  it('head_resource returns 404 on missing path', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 9, method: 'tools/call',
-      params: { name: 'head_resource', arguments: { path: '/mcptest/public/does-not-exist' } }
-    }, { token });
-    assert.ok(body.result.isError);
+  it('lws://meta denies (no-oracle) on missing path', async () => {
+    const body = await readResource('lws://meta/mcptest/public/does-not-exist', { token });
+    assert.ok(body.error, 'expected an RPC error for a missing resource');
   });
 
-  it('list_skills returns the index shape', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 10, method: 'tools/call',
-      params: { name: 'list_skills', arguments: {} }
-    }, { token });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
+  it('lws://skills returns the index shape', async () => {
+    const body = await readResource('lws://skills', { token });
+    assert.ok(!body.error, body.error?.message);
+    const payload = JSON.parse(body.result.contents[0].text);
     assert.strictEqual(payload['@type'], 'skill:SkillIndex');
     assert.ok(Array.isArray(payload['skill:items']));
   });
 
-  it('list_skills discovers per-app SKILL.md', async () => {
+  it('lws://skills discovers per-app SKILL.md', async () => {
     // Seed a per-app skill
     await rpc({
       jsonrpc: '2.0', id: 1010, method: 'tools/call',
@@ -182,57 +185,14 @@ describe('MCP server (--mcp enabled)', () => {
     // Now list against the pod root — but list_skills walks /public/apps/
     // and /private/bots/ at the pod root, not inside a named pod. For this
     // test, we just verify the per-app discovery walks containers correctly
-    // by listing /mcptest/public/apps/ directly via list_resources and
+    // by reading lws://container/mcptest/public/apps/ directly and
     // confirming "demo" comes back as a container (isContainer=true).
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 1012, method: 'tools/call',
-      params: { name: 'list_resources', arguments: { path: '/mcptest/public/apps/' } }
-    }, { token });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
+    const body = await readResource('lws://container/mcptest/public/apps/', { token });
+    assert.ok(!body.error, body.error?.message);
+    const payload = JSON.parse(body.result.contents[0].text);
     const demo = payload.items.find(i => i.name === 'demo');
     assert.ok(demo, 'demo container should be listed');
     assert.strictEqual(demo.isContainer, true, 'isContainer must be true for directories');
-  });
-
-  it('list_docs returns the JSS-builtin doc set', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 11, method: 'tools/call',
-      params: { name: 'list_docs', arguments: {} }
-    });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
-    assert.strictEqual(payload.source, 'jss-builtin');
-    assert.ok(payload.docs.some(d => d.name.endsWith('.md')));
-  });
-
-  it('read_docs fetches a known doc', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 12, method: 'tools/call',
-      params: { name: 'read_docs', arguments: { name: 'git-support.md' } }
-    });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
-    assert.match(payload.body, /git/i);
-  });
-
-  it('read_docs rejects path traversal', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 13, method: 'tools/call',
-      params: { name: 'read_docs', arguments: { name: '../package.json' } }
-    });
-    assert.ok(body.result.isError);
-  });
-
-  it('pod_info returns identity info', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 14, method: 'tools/call',
-      params: { name: 'pod_info', arguments: {} }
-    }, { token });
-    assert.strictEqual(body.result.isError, false);
-    const payload = JSON.parse(body.result.content[0].text);
-    assert.strictEqual(payload.server, 'jss');
-    assert.ok(payload.identity);
   });
 
   it('rejects unknown method', async () => {
@@ -240,15 +200,14 @@ describe('MCP server (--mcp enabled)', () => {
     assert.strictEqual(body.error?.code, -32601);
   });
 
-  // --- read_acl / write_acl (#496) ---
+  // --- lws://acl / write_acl (#496) ---
+  // read_acl (tool) was removed in Task 4; its coverage moves to
+  // resources/read of lws://acl/<path> (src/mcp/resources.js:readAcl).
 
-  it('read_acl returns existing authorizations for /mcptest/public/', async () => {
-    const { body } = await rpc({
-      jsonrpc: '2.0', id: 200, method: 'tools/call',
-      params: { name: 'read_acl', arguments: { path: '/mcptest/public/' } }
-    }, { token });
-    assert.strictEqual(body.result.isError, false, body.result.content?.[0]?.text);
-    const payload = JSON.parse(body.result.content[0].text);
+  it('lws://acl returns existing authorizations for /mcptest/public/', async () => {
+    const body = await readResource('lws://acl/mcptest/public/', { token });
+    assert.ok(!body.error, body.error?.message);
+    const payload = JSON.parse(body.result.contents[0].text);
     assert.strictEqual(payload.exists, true);
     assert.ok(Array.isArray(payload.authorizations));
     assert.ok(payload.authorizations.length > 0, 'should have at least owner auth');
@@ -257,7 +216,7 @@ describe('MCP server (--mcp enabled)', () => {
     assert.ok(ownerAuth, 'owner auth with Control should exist');
   });
 
-  it('write_acl + read_acl round-trip', async () => {
+  it('write_acl + lws://acl round-trip', async () => {
     const auths = [
       {
         agents: ['/mcptest/profile/card.jsonld#me'],
@@ -281,15 +240,15 @@ describe('MCP server (--mcp enabled)', () => {
     }, { token });
     assert.strictEqual(wr.body.result.isError, false, wr.body.result.content?.[0]?.text);
 
-    const rd = await rpc({
-      jsonrpc: '2.0', id: 202, method: 'tools/call',
-      params: { name: 'read_acl', arguments: { path: '/mcptest/public/' } }
-    }, { token });
-    const payload = JSON.parse(rd.body.result.content[0].text);
+    const rd = await readResource('lws://acl/mcptest/public/', { token });
+    assert.ok(!rd.error, rd.error?.message);
+    const payload = JSON.parse(rd.result.contents[0].text);
     assert.strictEqual(payload.authorizations.length, 3);
+    // lws://acl returns agentClasses as full URIs (not the tool's compact
+    // 'foaf:Agent'/'acl:AuthenticatedAgent' shorthand) — see resources.js.
     const classes = payload.authorizations.flatMap(a => a.agentClasses || []);
-    assert.ok(classes.includes('acl:AuthenticatedAgent'));
-    assert.ok(classes.includes('foaf:Agent'));
+    assert.ok(classes.includes('http://www.w3.org/ns/auth/acl#AuthenticatedAgent'));
+    assert.ok(classes.includes('http://xmlns.com/foaf/0.1/Agent'));
   });
 
   it('write_acl refuses to lock caller out (safety)', async () => {
@@ -346,15 +305,11 @@ describe('MCP server (--mcp enabled)', () => {
     }, { token });
     assert.strictEqual(wr.body.result.isError, false, wr.body.result.content?.[0]?.text);
 
-    // read_acl requires Control on the resource. Before the fix the owner
+    // lws://acl requires Control on the resource. Before the fix the owner
     // was locked out and this was denied; it must now succeed.
-    const rd = await rpc({
-      jsonrpc: '2.0', id: 222, method: 'tools/call',
-      params: { name: 'read_acl', arguments: { path: resPath } }
-    }, { token });
-    assert.strictEqual(rd.body.result.isError, false,
-      'owner locked out of resource ACL (#575): ' + rd.body.result.content?.[0]?.text);
-    const payload = JSON.parse(rd.body.result.content[0].text);
+    const rd = await readResource(`lws://acl${resPath}`, { token });
+    assert.ok(!rd.error, 'owner locked out of resource ACL (#575): ' + rd.error?.message);
+    const payload = JSON.parse(rd.result.contents[0].text);
     assert.ok(payload.authorizations.some(a => a.modes.includes('Control')),
       'resource ACL should grant the owner Control');
   });
@@ -368,7 +323,7 @@ describe('MCP server (--mcp enabled)', () => {
         name: 'call_remote_pod',
         arguments: {
           pod_url: 'http://example.invalid',
-          tool: 'pod_info',
+          tool: 'lws_type_search',
           arguments: {}
         }
       }
@@ -406,7 +361,7 @@ describe('MCP server (--mcp enabled)', () => {
       }
     }, { token });
 
-    // Now call our own MCP back at /mcp invoking pod_info
+    // Now call our own MCP back at /mcp invoking lws_type_search
     const base = getBaseUrl();
     const { body } = await rpc({
       jsonrpc: '2.0', id: 222, method: 'tools/call',
@@ -414,7 +369,7 @@ describe('MCP server (--mcp enabled)', () => {
         name: 'call_remote_pod',
         arguments: {
           pod_url: base,
-          tool: 'pod_info',
+          tool: 'lws_type_search',
           arguments: {}
         }
       }
@@ -440,7 +395,7 @@ describe('MCP server (--mcp enabled)', () => {
           name: 'call_remote_pod',
           arguments: {
             pod_url: getBaseUrl(),
-            tool: 'pod_info',
+            tool: 'lws_type_search',
             arguments: {}
           }
         }
