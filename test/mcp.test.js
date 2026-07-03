@@ -6,10 +6,10 @@
  *   - CRUD tools (list, read, write, create, delete, head)
  *   - WAC enforcement (anonymous denied write, owner allowed)
  *
- * Skill discovery (list_skills/get_skill/get_pod_skill -> lws://skill(s)),
- * pod_info (-> lws://pod-info), and docs (list_docs/read_docs, dropped
- * entirely) moved out of tools.js in Task 5 — see test/mcp-v2-resources-
- * skill.test.js and test/mcp-skill-wac.test.js.
+ * Skill discovery (list_skills/get_skill/get_pod_skill -> the skill file's
+ * real URL + /.well-known/mcp/skills), pod_info (-> /.well-known/mcp/pod-info),
+ * and docs (list_docs/read_docs, dropped entirely) moved out of tools.js in
+ * Task 5 — see test/mcp-v2-resources-skill.test.js and mcp-skill-wac.test.js.
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -41,8 +41,9 @@ async function rpc(body, opts = {}) {
 }
 
 // Read logic moved from tools (read_resource/list_resources/head_resource/
-// lws_linkset/read_acl) to the Resources primitive (Task 4, hard break).
-// This helper drives resources/read the same way the removed tool tests did.
+// lws_linkset/read_acl) to the Resources primitive (Task 4, hard break),
+// addressed by the pod's real https:// URLs (affordance redesign). This
+// helper drives resources/read the same way the removed tool tests did.
 async function readResource(uri, opts = {}) {
   const { body } = await rpc({ jsonrpc: '2.0', id: 500, method: 'resources/read', params: { uri } }, opts);
   return body;
@@ -76,14 +77,14 @@ describe('MCP server (--mcp enabled)', () => {
     const names = body.result.tools.map(t => t.name);
     for (const expected of [
       'write_resource', 'create_resource', 'delete_resource',
-      'write_acl', 'subscribe', 'lws_type_search', 'call_remote_pod'
+      'write_acl', 'subscribe', 'lws_type_search', 'read_remote_resource'
     ]) {
       assert.ok(names.includes(expected), `missing tool: ${expected}`);
     }
     for (const removed of [
       'list_resources', 'read_resource', 'head_resource', 'lws_linkset', 'read_acl',
       'list_skills', 'get_skill', 'get_pod_skill', 'pod_info', 'lws_storage_description',
-      'list_docs', 'read_docs'
+      'list_docs', 'read_docs', 'call_remote_pod'
     ]) {
       assert.ok(!names.includes(removed), `tool should have been removed: ${removed}`);
     }
@@ -110,8 +111,8 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(body.result.content[0].text, /wrote/);
   });
 
-  it('lws://resource returns the written content (enveloped as untrusted data)', async () => {
-    const body = await readResource('lws://resource/mcptest/public/hello.txt', { token });
+  it('a resource URL returns the written content (enveloped as untrusted data)', async () => {
+    const body = await readResource(`${getBaseUrl()}/mcptest/public/hello.txt`, { token });
     assert.ok(!body.error, body.error?.message);
     // v2 wraps resource bodies in the untrusted-content envelope (anti prompt-
     // injection) — the payload is inside the fence, not the raw string.
@@ -120,11 +121,11 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(text, /\nhi\n/);
   });
 
-  it('lws://container lists the container', async () => {
-    const body = await readResource('lws://container/mcptest/public/', { token });
+  it('a container URL lists the container (lws+json items[])', async () => {
+    const body = await readResource(`${getBaseUrl()}/mcptest/public/`, { token });
     assert.ok(!body.error, body.error?.message);
     const payload = JSON.parse(body.result.contents[0].text);
-    assert.ok(payload.items.some(i => i.name === 'hello.txt'));
+    assert.ok(payload.items.some(i => i.id.endsWith('/hello.txt')));
   });
 
   it('create_resource auto-mints filename', async () => {
@@ -148,20 +149,20 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(body.result.content[0].text, /deleted/);
   });
 
-  it('lws://meta denies (no-oracle) on missing path', async () => {
-    const body = await readResource('lws://meta/mcptest/public/does-not-exist', { token });
+  it('an X.meta URL denies (no-oracle) on missing target', async () => {
+    const body = await readResource(`${getBaseUrl()}/mcptest/public/does-not-exist.meta`, { token });
     assert.ok(body.error, 'expected an RPC error for a missing resource');
   });
 
-  it('lws://skills returns the index shape', async () => {
-    const body = await readResource('lws://skills', { token });
+  it('the skills index returns the index shape', async () => {
+    const body = await readResource(`${getBaseUrl()}/.well-known/mcp/skills`, { token });
     assert.ok(!body.error, body.error?.message);
     const payload = JSON.parse(body.result.contents[0].text);
     assert.strictEqual(payload['@type'], 'skill:SkillIndex');
     assert.ok(Array.isArray(payload['skill:items']));
   });
 
-  it('lws://skills discovers per-app SKILL.md', async () => {
+  it('skill discovery walks per-app SKILL.md containers', async () => {
     // Seed a per-app skill
     await rpc({
       jsonrpc: '2.0', id: 1010, method: 'tools/call',
@@ -189,14 +190,14 @@ describe('MCP server (--mcp enabled)', () => {
     // Now list against the pod root — but list_skills walks /public/apps/
     // and /private/bots/ at the pod root, not inside a named pod. For this
     // test, we just verify the per-app discovery walks containers correctly
-    // by reading lws://container/mcptest/public/apps/ directly and
-    // confirming "demo" comes back as a container (isContainer=true).
-    const body = await readResource('lws://container/mcptest/public/apps/', { token });
+    // by reading the /mcptest/public/apps/ container URL directly and
+    // confirming "demo" comes back as a Container.
+    const body = await readResource(`${getBaseUrl()}/mcptest/public/apps/`, { token });
     assert.ok(!body.error, body.error?.message);
     const payload = JSON.parse(body.result.contents[0].text);
-    const demo = payload.items.find(i => i.name === 'demo');
+    const demo = payload.items.find(i => i.id.endsWith('/demo/'));
     assert.ok(demo, 'demo container should be listed');
-    assert.strictEqual(demo.isContainer, true, 'isContainer must be true for directories');
+    assert.strictEqual(demo.type, 'Container', 'directories must list as type Container');
   });
 
   it('rejects unknown method', async () => {
@@ -204,12 +205,12 @@ describe('MCP server (--mcp enabled)', () => {
     assert.strictEqual(body.error?.code, -32601);
   });
 
-  // --- lws://acl / write_acl (#496) ---
+  // --- ACL view / write_acl (#496) ---
   // read_acl (tool) was removed in Task 4; its coverage moves to
-  // resources/read of lws://acl/<path> (src/mcp/resources.js:readAcl).
+  // resources/read of the X.acl URL (src/mcp/resources.js:readAclView).
 
-  it('lws://acl returns existing authorizations for /mcptest/public/', async () => {
-    const body = await readResource('lws://acl/mcptest/public/', { token });
+  it('the .acl view returns existing authorizations for /mcptest/public/', async () => {
+    const body = await readResource(`${getBaseUrl()}/mcptest/public/.acl`, { token });
     assert.ok(!body.error, body.error?.message);
     const payload = JSON.parse(body.result.contents[0].text);
     assert.strictEqual(payload.exists, true);
@@ -220,7 +221,7 @@ describe('MCP server (--mcp enabled)', () => {
     assert.ok(ownerAuth, 'owner auth with Control should exist');
   });
 
-  it('write_acl + lws://acl round-trip', async () => {
+  it('write_acl + .acl view round-trip', async () => {
     const auths = [
       {
         agents: ['/mcptest/profile/card.jsonld#me'],
@@ -244,11 +245,11 @@ describe('MCP server (--mcp enabled)', () => {
     }, { token });
     assert.strictEqual(wr.body.result.isError, false, wr.body.result.content?.[0]?.text);
 
-    const rd = await readResource('lws://acl/mcptest/public/', { token });
+    const rd = await readResource(`${getBaseUrl()}/mcptest/public/.acl`, { token });
     assert.ok(!rd.error, rd.error?.message);
     const payload = JSON.parse(rd.result.contents[0].text);
     assert.strictEqual(payload.authorizations.length, 3);
-    // lws://acl returns agentClasses as full URIs (not the tool's compact
+    // The ACL view returns agentClasses as full URIs (not the tool's compact
     // 'foaf:Agent'/'acl:AuthenticatedAgent' shorthand) — see resources.js.
     const classes = payload.authorizations.flatMap(a => a.agentClasses || []);
     assert.ok(classes.includes('http://www.w3.org/ns/auth/acl#AuthenticatedAgent'));
@@ -309,27 +310,25 @@ describe('MCP server (--mcp enabled)', () => {
     }, { token });
     assert.strictEqual(wr.body.result.isError, false, wr.body.result.content?.[0]?.text);
 
-    // lws://acl requires Control on the resource. Before the fix the owner
+    // The ACL view requires Control on the resource. Before the fix the owner
     // was locked out and this was denied; it must now succeed.
-    const rd = await readResource(`lws://acl${resPath}`, { token });
+    const rd = await readResource(`${getBaseUrl()}${resPath}.acl`, { token });
     assert.ok(!rd.error, 'owner locked out of resource ACL (#575): ' + rd.error?.message);
     const payload = JSON.parse(rd.result.contents[0].text);
     assert.ok(payload.authorizations.some(a => a.modes.includes('Control')),
       'resource ACL should grant the owner Control');
   });
 
-  // --- call_remote_pod (#495) ---
+  // --- read_remote_resource (#495, retired call_remote_pod's RPC proxy in
+  // Task 6 — federation is now a thin affordance-driven GET of a remote
+  // real-URI resource, not an arbitrary {tool,arguments} invocation) ---
 
-  it('call_remote_pod denied without federation gate access', async () => {
+  it('read_remote_resource denied without federation gate access', async () => {
     const { body } = await rpc({
       jsonrpc: '2.0', id: 210, method: 'tools/call',
       params: {
-        name: 'call_remote_pod',
-        arguments: {
-          pod_url: 'http://example.invalid',
-          tool: 'lws_type_search',
-          arguments: {}
-        }
+        name: 'read_remote_resource',
+        arguments: { url: 'http://example.invalid/x' }
       }
     });  // no token
     assert.ok(body.result.isError);
@@ -337,7 +336,7 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(body.result.content[0].text, /federation/i);
   });
 
-  it('call_remote_pod hits its own /mcp when gated open', async () => {
+  it('read_remote_resource fetches its own public resource when gated open', async () => {
     // Federation gate lives at <agent-pod>/private/federation/. For the
     // mcptest pod owner that's /mcptest/private/federation/. Create the
     // container, then grant AuthenticatedAgent Write there.
@@ -365,26 +364,33 @@ describe('MCP server (--mcp enabled)', () => {
       }
     }, { token });
 
-    // Now call our own MCP back at /mcp invoking lws_type_search
+    // Publish a resource under /mcptest/public/ (foaf:Agent Read by default,
+    // per the earlier write_acl round-trip test), then federate-read it by
+    // its own real URL — self-federation, no remote server needed.
+    const wr = await rpc({
+      jsonrpc: '2.0', id: 223, method: 'tools/call',
+      params: {
+        name: 'write_resource',
+        arguments: { path: '/mcptest/public/federated.txt', content: 'federated-hello', contentType: 'text/plain' }
+      }
+    }, { token });
+    assert.strictEqual(wr.body.result.isError, false, wr.body.result.content?.[0]?.text);
+
     const base = getBaseUrl();
     const { body } = await rpc({
       jsonrpc: '2.0', id: 222, method: 'tools/call',
       params: {
-        name: 'call_remote_pod',
-        arguments: {
-          pod_url: base,
-          tool: 'lws_type_search',
-          arguments: {}
-        }
+        name: 'read_remote_resource',
+        arguments: { url: `${base}/mcptest/public/federated.txt` }
       }
     }, { token });
     assert.strictEqual(body.result.isError, false, body.result.content?.[0]?.text);
     const payload = JSON.parse(body.result.content[0].text);
-    assert.strictEqual(payload.depth, 1);
-    assert.ok(payload.remote_result);
+    assert.strictEqual(payload.status, 200);
+    assert.match(payload.body, /federated-hello/);
   });
 
-  it('call_remote_pod enforces depth cap', async () => {
+  it('read_remote_resource enforces depth cap', async () => {
     // Force an inbound MCP-Federation-Depth header so the next hop trips MAX
     const res = await request('/mcp', {
       method: 'POST',
@@ -396,12 +402,8 @@ describe('MCP server (--mcp enabled)', () => {
       body: JSON.stringify({
         jsonrpc: '2.0', id: 230, method: 'tools/call',
         params: {
-          name: 'call_remote_pod',
-          arguments: {
-            pod_url: getBaseUrl(),
-            tool: 'lws_type_search',
-            arguments: {}
-          }
+          name: 'read_remote_resource',
+          arguments: { url: `${getBaseUrl()}/mcptest/public/federated.txt` }
         }
       })
     });

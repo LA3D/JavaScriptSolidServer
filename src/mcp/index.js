@@ -24,7 +24,8 @@ import {
   rpcError
 } from './protocol.js';
 import { listToolsForRpc, callTool, TOOLS } from './tools.js';
-import { listResourceTemplates, listFixedResources, readResource } from './resources.js';
+import { readResource } from './resources.js';
+import { listFixed, RESOURCE_TEMPLATE } from './surface.js';
 import { ResourceError } from './errors.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { hasLwsCidAuth } from '../auth/lws-cid.js';
@@ -80,11 +81,11 @@ async function dispatch(msg, ctx) {
   }
 
   if (method === 'resources/templates/list') {
-    return rpcResult(id, { resourceTemplates: listResourceTemplates() });
+    return rpcResult(id, { resourceTemplates: [RESOURCE_TEMPLATE] });
   }
 
   if (method === 'resources/list') {
-    return rpcResult(id, { resources: listFixedResources() });
+    return rpcResult(id, { resources: listFixed(ctx.origin) });
   }
 
   if (method === 'resources/read') {
@@ -224,7 +225,7 @@ export async function mcpPlugin(fastify, options = {}) {
         'this endpoint requires an audience-bound credential (LWS-CID or Solid-OIDC DPoP)');
     }
 
-    // Federation depth (used by call_remote_pod to enforce the cap)
+    // Federation depth (used by read_remote_resource to enforce the cap)
     const depthHdr = request.headers['mcp-federation-depth'];
     const federationDepth = depthHdr ? parseInt(depthHdr, 10) || 0 : 0;
 

@@ -4,7 +4,7 @@ JSS speaks the [Model Context Protocol](https://modelcontextprotocol.io). Once `
 
 > **Thesis**: MCP needs a backend. Solid is the backend.
 
-> **v2 (Resource Gateway).** The MCP surface follows the Resource-Gateway pattern: **reads are MCP Resources** (URI-addressed, under an `lws://` scheme), **mutations and parameterized queries are Tools** (9 total). This keeps the tool count under the selection-accuracy budget (~10–15 tools), lets the client browse the read surface as resources, and routes SHACL admission failures back as teaching content the model can read and act on. This is a hard break from the earlier flat tool dump — the old read tools (`read_resource`, `list_resources`, `head_resource`, `read_acl`, `get_skill`, `list_skills`, `get_pod_skill`, `pod_info`, `lws_linkset`, `lws_storage_description`, `list_docs`, `read_docs`) no longer exist; their capability re-appears as Resources.
+> **v2 (Resource Gateway).** The MCP surface follows the Resource-Gateway pattern: **reads are MCP Resources** (addressed by the pod's real `https://` URLs, dispatched on the resource itself), **mutations and parameterized queries are Tools** (9 total). This keeps the tool count under the selection-accuracy budget (~10–15 tools), lets the client browse the read surface as resources, and routes SHACL admission failures back as teaching content the model can read and act on. This is a hard break from the earlier flat tool dump — the old read tools (`read_resource`, `list_resources`, `head_resource`, `read_acl`, `get_skill`, `list_skills`, `get_pod_skill`, `pod_info`, `lws_linkset`, `lws_storage_description`, `list_docs`, `read_docs`) no longer exist; their capability re-appears as Resources.
 
 ## Quick start
 
@@ -28,9 +28,10 @@ curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
 curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":3,"method":"resources/templates/list"}' | jq '.result.resourceTemplates[].uriTemplate'
 
-# Read a resource (anonymous read of a public container listing)
+# Read a resource (anonymous read of a public container listing) — the real
+# https:// URL, not a synthetic scheme
 curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"lws://container/public/"}}' | jq
+  -d '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"https://localhost:4443/public/"}}' | jq
 ```
 
 ## Auth
@@ -50,28 +51,42 @@ Anonymous requests get the same WAC treatment as any other anonymous request —
 
 ## Resources (the read surface)
 
-Reads are addressed by an `lws://` URI and fetched with the MCP Resources methods: `resources/list` (fixed resources), `resources/templates/list` (the templated families), `resources/read` (`{ "uri": "lws://…" }`). Every read WAC-checks the target path and **sanitizes** externally-sourced content before returning it (see [Security](#security-content-sanitization)).
+Reads are addressed by the pod's **real `https://` URLs** — there is no synthetic scheme. Fetch them with the MCP Resources methods: `resources/list` (the fixed `.well-known` resources), `resources/templates/list` (the one real-URI template), `resources/read` (`{ "uri": "https://<pod>/alice/notes/a" }`). Every read WAC-checks the target path and **sanitizes** externally-sourced content before returning it (see [Security](#security-content-sanitization)).
 
-**Templated** (`{+path}` = an LDP pod path):
+### Dispatch on the resource
 
-| URI | Returns | WAC |
+There's no per-kind scheme to pick from — the resource's own shape decides what comes back:
+
+| Resource | Returns | WAC |
 |---|---|---|
-| `lws://resource/{+path}` | resource body (enveloped as untrusted data) | Read |
-| `lws://container/{+path}` | container listing (`ldp:contains` children) | Read |
-| `lws://linkset/{+path}` | RFC 9264 linkset (`anchor`/`up`/`type`/`describedby`) | Read |
-| `lws://meta/{+path}` | resource metadata (size/modified) | Read |
-| `lws://acl/{+path}` | structured ACL (agents, agentClasses, modes, isDefault) | Control |
-| `lws://skill/{+path}` | a skill file body | Read |
+| A container URL (trailing `/`) | `application/lws+json` container listing (`items[]`) | Read |
+| `<X>.acl` | structured ACL view (agents, agentClasses, modes, isDefault) | **Control** |
+| `<X>.meta` | resource metadata (size/modified) | Read |
+| Any other resource | its body | Read |
 
-**Fixed:**
+Bodies preserve trust by content: JSON-LD/RDF-JSON comes back structured with its `@context` intact (leaf values sanitized, structure kept); anything else — opaque or free-text — is enveloped as untrusted data (see [Security](#security-content-sanitization)).
+
+### Fixed resources
+
+`resources/list` advertises these real `.well-known` URLs:
 
 | URI | Returns |
 |---|---|
-| `lws://storage-description` | the LWS storage description (`type:Storage` + advertised services) |
-| `lws://pod-info` | pod identity, MCP protocol version, authenticated identity, capability flags |
-| `lws://skills` | skill index (WAC-filtered, no-oracle) |
+| `https://<pod>/.well-known/lws-storage` | the LWS storage description (`type:Storage` + advertised services + storage root) |
+| `https://<pod>/.well-known/mcp/pod-info` | pod identity + MCP capabilities + vocab/context locations + a steering hint |
+| `https://<pod>/.well-known/mcp/skills` | skill index (WAC-filtered, no-oracle) |
+| `https://<pod>/.well-known/lws/context` | the resolvable LWS JSON-LD `@context` mirror |
+| `https://<pod>/.well-known/lws/vocab` | the LWS vocabulary |
+
+**Templated:**
+
+| URI template | Returns |
+|---|---|
+| `https://{+authority}/{+path}` | any pod resource, addressed by its real URL and dispatched per the table above |
 
 Skills live at conventional paths the server walks: `<pod>/SKILL.md` (pod-wide), `<pod>/public/apps/<name>/SKILL.md` (per-app), `<pod>/private/bots/<name>/SKILL.md` (per-bot). Both `SKILL.md` (Anthropic markdown) and `SKILL.jsonld` (typed descriptor) are first-class via the `skill:format` declaration.
+
+The RFC 9264 linkset is **not** a resource kind — it's returned by the `describe_resource` tool (one read: body + declared types + linkset together).
 
 ## Tools (mutations + queries)
 
@@ -87,7 +102,7 @@ Nine tools: seven core + two convenience.
 | `write_acl` | persist a structured ACL to the resource's `.acl` | Control + anti-lockout |
 | `lws_type_search` | CNF `type` (+ `describedby`) query, WAC-filtered, no-oracle | reuses the authorized-resources walk |
 | `subscribe` | SSE stream of `resource_changed` events, WAC-filtered per event | Read per event |
-| `call_remote_pod` | forward an MCP `tools/call` to another pod | caller needs `acl:Write` on `<pod>/private/federation/`; depth-capped at 3 |
+| `read_remote_resource` | GET a resource on another pod by its real URL (incl. that pod's storage description) | caller needs `acl:Write` on `<pod>/private/federation/`; depth-capped at 3 |
 
 Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) route through the shared LWS admission core (SHACL validation → write → type-capture) — the same enforcement path as HTTP PUT/POST. Pass a `types` array (the `Link: rel="type"` equivalent) to declare server-managed types.
 
@@ -100,7 +115,7 @@ Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) rout
 
 ### ACL editing
 
-`write_acl` takes the structured form (bots don't hand-roll JSON-LD); read the current ACL via the `lws://acl/{+path}` resource.
+`write_acl` takes the structured form (bots don't hand-roll JSON-LD); read the current ACL via the resource's real `<path>.acl` URL (which returns the structured ACL view, gated on `Control`).
 
 ```json
 // write_acl arguments
@@ -124,7 +139,9 @@ curl -N http://localhost:4443/mcp -H "Content-Type: application/json" -H "Author
 
 ### Federation
 
-`call_remote_pod` forwards a `tools/call` to another pod; WAC-gated on both ends, depth-capped at 3. Foreign WebIDs cannot initiate federation from this pod (no local gate path). Grant an agent `acl:Write` on `/private/federation/` to delegate outbound calls.
+Federation is a thin, affordance-driven read, not an RPC proxy: `read_remote_resource({ url })` GETs a resource on another pod by its real URL — including that pod's `/.well-known/lws-storage` description — and returns the (deep-sanitized) representation. The agent then follows *that* pod's own typed links and `@context` to keep operating it, the same way it operates this one; there's no `{tool, arguments}` pair to forward.
+
+Outbound calls are WAC-gated at the caller's own pod: the caller needs `acl:Write` on `<pod>/private/federation/`, and the call is depth-capped at 3 via the `MCP-Federation-Depth` header. Foreign WebIDs cannot initiate federation from this pod (no local gate path). A remote pod is the least-trusted content source, so the fetched body is deep-sanitized (`sanitizeDeep`) before it reaches the model.
 
 ## Error / teaching model
 
@@ -165,13 +182,13 @@ If the proposed ACL doesn't grant `Control` to the caller, `write_acl` refuses. 
 
 - **`update_resource` (PATCH)** — SPARQL Update / N3 patches. Read-modify-write through the tools is the workaround.
 - **`resources/list` child enumeration** — v1 lists fixed resources + templates only, not WAC-readable container children (deferred behind a page-bound).
-- **Skills over the MCP Resources *primitive* (SEP-2640)** — skills are exposed as `lws://skill` resources today; aligning to the experimental SEP is deferred until it stabilizes.
-- **Pod-resident federation credentials** — every `call_remote_pod` carries its own auth.
+- **Skills over the MCP Resources *primitive* (SEP-2640)** — skills are exposed as ordinary pod resources today (a skill file is read by its real `https://` URL); aligning to the experimental SEP is deferred until it stabilizes.
+- **Authenticated federation reads** — `read_remote_resource` fetches anonymously; it carries no per-call auth, so it can only see what the remote pod exposes to `foaf:Agent`/anonymous. Reading a remote agent-scoped resource is not yet supported.
 
 ## Why this exists
 
 The agent ecosystem has no shared answer for sovereign, ACL-gated storage. Solid's pitch — user-owned data, queryable, access-controlled — is exactly what agents need; MCP is the wire. When JSS exposes `/mcp`:
 
 - **Agent identity is a first-class WAC subject.** `acl:agent <did:nostr:...>` for a bot is the same operation as for a human.
-- **The pod is the bot's world.** A bot reads its instructions from `SKILL.md`, browses the read surface as `lws://` resources, and (with permission) writes back through the governed tools. No backend, no API key store — just the pod.
+- **The pod is the bot's world.** A bot reads its instructions from `SKILL.md`, browses the read surface as real-URL resources (following typed links + `@context`), and (with permission) writes back through the governed tools. No backend, no API key store — just the pod.
 - **Bot-to-bot falls out of the protocol.** Two JSS pods can have their bots call each other's `/mcp`, gated by WAC on both ends.

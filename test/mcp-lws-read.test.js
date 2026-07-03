@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectAuthorizedResources } from '../src/lws/authorized-resources.js';
 import { callTool } from '../src/mcp/tools.js';
-import { readResource } from '../src/mcp/resources.js';
 import { startLwsPod, ownerCtx, seedTyped, startTestServer, stopTestServer, getBaseUrl } from './helpers.js';
 
 test('collectAuthorizedResources drops resources the agent cannot read (no oracle)', async (t) => {
@@ -35,34 +34,30 @@ test('lws_type_search owner sees both public and private matches', async (t) => 
   assert.equal(body.items.length, 2);
 });
 
-// lws_linkset (tool) was removed in Task 4; its coverage moves to
-// resources/read of lws://linkset/<path> (src/mcp/resources.js:readLinkset).
-test('lws://linkset returns anchor/type for a resource, WAC-gated', async (t) => {
+// linkset is no longer a resource kind (the lws:// scheme is retired);
+// describe_resource is its carrier (src/mcp/tools.js:describe_resource).
+test('describe_resource returns anchor/type in its linkset, WAC-gated', async (t) => {
   const pod = await startLwsPod(t);
   await seedTyped(pod, '/lwsmcp/pub/a', 'https://ex/Note', { publicRead: true });
 
-  const body = await readResource('lws://linkset/lwsmcp/pub/a', { webId: null, origin: pod.origin });
-  const link = body.contents[0];
-  const parsed = JSON.parse(link.text);
-  const anchorLink = parsed.linkset[0];
+  const res = await callTool('describe_resource', { path: '/lwsmcp/pub/a' }, { webId: null, origin: pod.origin });
+  assert.equal(res.isError, false, res.content?.[0]?.text);
+  const parsed = JSON.parse(res.content[0].text);
+  const anchorLink = parsed.linkset.linkset[0];
   assert.equal(anchorLink.anchor, `${pod.origin}/lwsmcp/pub/a`);
   assert.ok(anchorLink.type.some((t) => t.href === 'https://ex/Note'));
 
   await seedTyped(pod, '/lwsmcp/priv/b', 'https://ex/Note', { publicRead: false });
-  await assert.rejects(
-    () => readResource('lws://linkset/lwsmcp/priv/b', { webId: null, origin: pod.origin }),
-    /access denied/i,
-    'anonymous must be denied linkset for a private resource'
-  );
+  const denied = await callTool('describe_resource', { path: '/lwsmcp/priv/b' }, { webId: null, origin: pod.origin });
+  assert.equal(denied.isError, true, 'anonymous must be denied the linkset for a private resource');
+  assert.match(denied.content[0].text, /access denied/i);
 });
 
 // Round-trips through the real /mcp HTTP route (not a hand-built ctx) so
 // this actually exercises the typeIndexEnabled/notificationsEnabled wiring
 // from request -> ctx -> buildStorageDescription, proving the MCP Resource
 // and the HTTP /.well-known/lws-storage route can't drift apart.
-// lws_storage_description (tool) was removed in Task 5; its coverage moves
-// to resources/read of lws://storage-description (src/mcp/resources.js).
-test('lws://storage-description mirrors /.well-known/lws-storage', async (t) => {
+test('the storage-description resource mirrors /.well-known/lws-storage', async (t) => {
   await startTestServer({ lws: true, mcp: true });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
@@ -75,7 +70,7 @@ test('lws://storage-description mirrors /.well-known/lws-storage', async (t) => 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'resources/read',
-      params: { uri: 'lws://storage-description' },
+      params: { uri: `${base}/.well-known/lws-storage` },
     }),
   });
   const mcpJson = await mcpRes.json();
@@ -93,7 +88,7 @@ test('lws://storage-description mirrors /.well-known/lws-storage', async (t) => 
 // under-advertised NotificationService while the MCP ctx (which reads
 // request.notificationsEnabled) correctly advertised it — this proves both
 // surfaces now agree, matching actual service registration.
-test('lws://storage-description and HTTP route agree when liveReload is on but notifications is off', async (t) => {
+test('the storage-description resource and HTTP route agree when liveReload is on but notifications is off', async (t) => {
   await startTestServer({ lws: true, mcp: true, liveReload: true, notifications: false });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
@@ -106,7 +101,7 @@ test('lws://storage-description and HTTP route agree when liveReload is on but n
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'resources/read',
-      params: { uri: 'lws://storage-description' },
+      params: { uri: `${base}/.well-known/lws-storage` },
     }),
   });
   const mcpJson = await mcpRes.json();

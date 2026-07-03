@@ -1,40 +1,24 @@
 // src/mcp/resources.js
-// Declarative resource registry for the MCP Resources primitive. Read-only,
-// URI-addressed, WAC-checked, sanitized (externally-sourced bodies/fields go
-// through sanitize.js before leaving this module). Every resolver reuses the
-// same read logic + wac() as the former read tools, so the no-oracle
-// property is inherited, not reimplemented.
-import { parseUri, fixedUri } from './uri.js';
-import { SURFACE_TEMPLATES, SURFACE_FIXED } from './surface.js';
-import { wac, buildUrl, parentPath } from './wac.js';
+// The MCP Resources read surface. Resources are addressed by their REAL
+// https:// URLs and dispatch happens on the resource itself: a container path
+// reads as the LWS container listing, an .acl/.meta sidecar as its structured
+// view, anything else as the (bounded, enveloped) body. Read-only, WAC-checked,
+// sanitized (externally-sourced bodies/fields go through sanitize.js before
+// leaving this module). Every resolver reuses the same read logic + wac() as
+// the HTTP layer, so the no-oracle property is inherited, not reimplemented.
+import { uriToPath, isLocalUri } from './uri.js';
+import { wac, buildUrl } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
 import { AccessMode, parseAcl } from '../wac/parser.js';
-import { sanitizeBody, sanitizeField, sanitizeTypes } from './sanitize.js';
-import { readPodSkill, readSkill, discoverSkills } from './skills.js';
+import { sanitizeBody, sanitizeField, sanitizeJsonLeaves } from './sanitize.js';
+import { readPodSkill, discoverSkills } from './skills.js';
 import * as storage from '../storage/filesystem.js';
-import { generateLinkset } from '../lws/linkset.js';
-import { readDeclaredTypes } from '../lws/type-metadata.js';
-import { describedbyTargets } from '../lws/constraint.js';
+import { generateLwsContainer } from '../ldp/container.js';
 import { buildStorageDescription } from '../lws/storage-description.js';
-import { getContentType } from '../utils/url.js';
+import { LWS_CONTEXT_OBJECT, LWS_VOCAB, withInlineContext } from '../lws/context.js';
+import { getContentType, isRdfContentType } from '../utils/url.js';
 import { readBounded, MAX_BODY_BYTES } from './read.js';
-
-// --- template + fixed advertisement (derived from the surface registry) ------
-
-export function listResourceTemplates() {
-  return SURFACE_TEMPLATES.map(t => ({
-    uriTemplate: `lws://${t.kind}/{+path}`, name: t.kind,
-    description: t.description, mimeType: t.mimeType,
-  }));
-}
-
-export function listFixedResources() {
-  return SURFACE_FIXED.map(f => ({
-    uri: `lws://${f.name}`, name: f.name,
-    description: f.description, mimeType: f.mimeType,
-  }));
-}
 
 // --- helpers ----------------------------------------------------------------
 
@@ -42,17 +26,33 @@ function jsonContents(uri, obj, mimeType = 'application/json') {
   return { contents: [{ uri, mimeType, text: JSON.stringify(obj, null, 2) }] };
 }
 
-// --- fixed resolvers --------------------------------------------------------
+// WAC-check BEFORE storage.exists so a denied read is indistinguishable from
+// not-found where existence is privileged (spec §4, mirrors the HTTP layer).
+async function requireRead(ctx, path, uri) {
+  if (!(await wac(ctx, path, AccessMode.READ))) {
+    throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `access denied: read ${uri}`);
+  }
+}
+function requireExists(exists, uri) {
+  if (!exists) throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`);
+}
 
-async function readPodInfo(ctx) {
+// --- fixed resolvers (real .well-known URLs) ---------------------------------
+
+async function readPodInfo(ctx, uri) {
   const skill = await readPodSkill().catch(() => null);
   const skillVisible = skill && (await wac(ctx, skill.path, AccessMode.READ));
-  return jsonContents(fixedUri('pod-info'), {
+  return jsonContents(uri, {
     pod: ctx.origin,
     server: 'jss',
     protocolVersion: '2025-03-26',
     identity: ctx.webId || null,
-    capabilities: { crud: true, acl: true, skills: true, resources: true },
+    storageRoot: `${ctx.origin}/`,
+    storageDescription: `${ctx.origin}/.well-known/lws-storage`,
+    context: `${ctx.origin}/.well-known/lws/context`,
+    vocabulary: `${ctx.origin}/.well-known/lws/vocab`,
+    capabilities: { crud: true, acl: true, skills: true, resources: true, federation: true },
+    hint: 'Resources are real https:// URLs returning JSON-LD. Read one, then follow its typed links (rel="up", describedby, and edges in the body) and resolve terms via @context (see `context`/`vocabulary`). Start at `storageDescription`.',
     skill: skillVisible ? { path: skill.path, format: skill.format } : null,
   });
 }
@@ -67,104 +67,69 @@ async function readSkills(ctx, uri) {
 }
 
 async function readStorageDescription(ctx, uri) {
-  return jsonContents(uri, buildStorageDescription(ctx.origin, {
+  const sd = buildStorageDescription(ctx.origin, {
     typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
-  }));
+  });
+  return jsonContents(uri, withInlineContext(sd), 'application/lws+json');
 }
 
-const FIXED = {
-  'pod-info': readPodInfo,
-  'skills': readSkills,
-  'storage-description': readStorageDescription,
+async function readLwsContext(_ctx, uri) {
+  return jsonContents(uri, { '@context': LWS_CONTEXT_OBJECT }, 'application/ld+json');
+}
+
+async function readLwsVocab(_ctx, uri) {
+  return jsonContents(uri, LWS_VOCAB, 'application/ld+json');
+}
+
+// Fixed resources are origin-relative, so they resolve by path suffix here;
+// the advertisement (surface.js listFixed) fills the origin in at list time.
+const FIXED_SUFFIX = {
+  '/.well-known/lws-storage': readStorageDescription,
+  '/.well-known/mcp/pod-info': readPodInfo,
+  '/.well-known/mcp/skills': readSkills,
+  '/.well-known/lws/context': readLwsContext,
+  '/.well-known/lws/vocab': readLwsVocab,
 };
 
-// --- templated resolvers (added in Tasks 4-5) -------------------------------
+// --- per-resource views -------------------------------------------------------
 
-// WAC-check BEFORE storage.exists so a denied read is indistinguishable from
-// not-found where existence is privileged (spec §4, mirrors lws_linkset).
-async function requireRead(ctx, path, uri) {
-  if (!(await wac(ctx, path, AccessMode.READ))) {
-    throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `access denied: read ${uri}`);
-  }
-}
-function requireExists(exists, uri) {
-  if (!exists) throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`);
-}
-
-async function readResourceBody(path, ctx, uri) {
-  await requireRead(ctx, path, uri);
-  if (path.endsWith('/')) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `use lws://container for containers: ${uri}`);
-  const r = await readBounded(path);
-  requireExists(r, uri);
-  const type = getContentType(path);
-  let label = `untrusted pod content — original type ${type}`;
-  if (r.truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
-  return { contents: [{ uri, mimeType: 'text/plain', text: sanitizeBody(r.text, label) }] };
-}
-
-async function readContainer(path, ctx, uri) {
-  const p = path.endsWith('/') ? path : path + '/';
-  await requireRead(ctx, p, uri);
-  requireExists(await storage.exists(p), uri);
-  const entries = await storage.listContainer(p);
-  return jsonContents(uri, {
-    container: p,
-    items: (entries || []).map(e => ({
-      name: sanitizeField(e.name),
-      path: `${p}${sanitizeField(e.name)}${e.isDirectory ? '/' : ''}`,
-      isContainer: e.isDirectory,
-      size: e.size ?? null,
-      modified: e.modified ?? null,
-    })),
-  });
-}
-
-async function readLinkset(path, ctx, uri) {
+async function readContainerView(path, ctx, uri) {
   await requireRead(ctx, path, uri);
   requireExists(await storage.exists(path), uri);
-  const isContainer = path.endsWith('/');
-  // Types + shape targets are client-controlled — sanitize before they enter
-  // the model's context (review #2).
-  const declared = sanitizeTypes(await readDeclaredTypes(storage, path));
-  const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
-  const ls = generateLinkset(buildUrl(ctx, path), {
-    parentUrl: buildUrl(ctx, parentPath(path)),
-    isContainer, describedByShapes: shapes, declaredTypes: declared,
-  });
-  return jsonContents(uri, ls, 'application/linkset+json');
+  const entries = await storage.listContainer(path);
+  // Entry names are client-controlled — neutralize hidden chars before they
+  // enter the model's context, then build via the shared HTTP builder.
+  const clean = (entries || []).map(e => ({ ...e, name: sanitizeField(e.name) }));
+  const rep = generateLwsContainer(buildUrl(ctx, path), clean);
+  return jsonContents(uri, withInlineContext(rep), 'application/lws+json');
 }
 
-async function readMeta(path, ctx, uri) {
-  await requireRead(ctx, path, uri);
-  requireExists(await storage.exists(path), uri);
-  const s = await storage.stat(path);
-  return jsonContents(uri, {
-    path, isContainer: path.endsWith('/'),
-    size: s?.size ?? null, modified: s?.mtime ?? null,
-  });
-}
-
-async function readAcl(path, ctx, uri) {
-  // A container's own ACL lives INSIDE it (<dir>/.acl), a resource's beside it
-  // (<file>.acl) — the same rule as src/wac/checker.js. Detect container-ness
-  // from storage (not just a trailing slash) so lws://acl/dir and
-  // lws://acl/dir/ both resolve /dir/.acl, and normalize the path so the
-  // Control check runs against the right target (review #3).
-  const s = await storage.stat(path);
-  const isContainer = path.endsWith('/') || !!(s && s.isDirectory);
-  const target = isContainer && !path.endsWith('/') ? path + '/' : path;
+async function readAclView(path, ctx, uri) {
+  // The URI addresses the ACL document (X.acl); authorization is judged on the
+  // TARGET X. A container's own ACL lives INSIDE it (<dir>/.acl), a resource's
+  // beside it (<file>.acl) — the same rule as src/wac/checker.js. Detect
+  // container-ness from storage (not just a trailing slash) so /dir.acl and
+  // /dir/.acl both resolve /dir/.acl, and the Control check runs against the
+  // right target (review #3).
+  const stripped = path.slice(0, -'.acl'.length);   // '/dir/.acl' -> '/dir/'
+  // stat only resolves the WAC target's container-ness (trailing-slash vs not),
+  // not an existence answer — the CONTROL check below denies uniformly either
+  // way, so probing stat pre-WAC is not a no-oracle violation.
+  const s = await storage.stat(stripped);
+  const isContainer = stripped.endsWith('/') || !!(s && s.isDirectory);
+  const target = isContainer && !stripped.endsWith('/') ? stripped + '/' : stripped;
   // Reading the ACL document itself requires Control on the resource.
   if (!(await wac(ctx, target, AccessMode.CONTROL))) {
     throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `access denied: control ${uri}`);
   }
   const aclPath = target + '.acl';
   if (!(await storage.exists(aclPath))) {
-    return jsonContents(uri, { path, aclPath, exists: false, authorizations: [] });
+    return jsonContents(uri, { path: stripped, aclPath, exists: false, authorizations: [] });
   }
   const content = await storage.read(aclPath);
   const auths = await parseAcl(content.toString('utf8'), buildUrl(ctx, aclPath));
   return jsonContents(uri, {
-    path, aclPath, exists: true,
+    path: stripped, aclPath, exists: true,
     authorizations: auths.map(a => ({
       agents: (a.agents || []).map(sanitizeField),
       agentClasses: a.agentClasses || [],
@@ -174,44 +139,60 @@ async function readAcl(path, ctx, uri) {
   });
 }
 
-async function readSkillResource(path, ctx, uri) {
-  await requireRead(ctx, path, uri);
-  let skill;
-  try { skill = await readSkill(path); }
-  catch (e) {
-    // Only a genuinely missing skill is not-found; a read/parse failure is a
-    // real error and must not be masked as absence (review #8).
-    if (/not found/i.test(e.message)) throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`);
-    throw new ResourceError(RPC_ERRORS.INTERNAL_ERROR, `skill read failed: ${uri}: ${e.message}`);
-  }
-  return jsonContents(uri, { ...skill, body: sanitizeBody(skill.body, 'untrusted skill content') });
+async function readMetaView(path, ctx, uri) {
+  const target = path.slice(0, -'.meta'.length);    // '/dir/.meta' -> '/dir/'
+  await requireRead(ctx, target, uri);
+  requireExists(await storage.exists(target), uri);
+  const s = await storage.stat(target);
+  return jsonContents(uri, {
+    path: target, isContainer: target.endsWith('/'),
+    size: s?.size ?? null, modified: s?.mtime ?? null,
+  });
 }
 
-const KIND = {
-  resource: readResourceBody,
-  container: readContainer,
-  linkset: readLinkset,
-  meta: readMeta,
-  acl: readAcl,
-  skill: readSkillResource,
-};
+async function readBody(path, ctx, uri) {
+  await requireRead(ctx, path, uri);
+  const r = await readBounded(path);
+  requireExists(r, uri);
+  const type = getContentType(path);
+  // Trust rule: the pod's own RDF/JSON-LD is affordance — preserve structure +
+  // @context; strip only leaf values. Opaque/free-text is untrusted — envelope.
+  if (isRdfContentType(type) && !r.truncated) {
+    try {
+      const obj = JSON.parse(r.text);
+      const safe = withInlineContext(sanitizeJsonLeaves(obj));   // field-level strip, structure kept
+      return { contents: [{ uri, mimeType: type, text: JSON.stringify(safe, null, 2) }] };
+    } catch { /* not JSON (e.g. Turtle) or malformed — fall through to envelope */ }
+  }
+  let label = `untrusted pod content — original type ${type}`;
+  if (r.truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
+  return { contents: [{ uri, mimeType: 'text/plain', text: sanitizeBody(r.text, label) }] };
+}
 
-// Exposed so a guard test can assert the resolver maps cover exactly the
-// surface registry (no advertise-without-resolver / resolver-without-parse
-// drift — review #11). The dispatch below reads from these same maps.
-export const RESOLVERS = { KIND, FIXED };
+// Dispatch on the resource itself — no synthetic kind. Each view carries its
+// own WAC gate (Read for container/meta/body, Control for the ACL document)
+// so the no-oracle order (WAC before exists) is preserved per branch.
+async function readByResource(path, ctx, uri) {
+  if (path.endsWith('/')) return readContainerView(path, ctx, uri);
+  if (path.endsWith('.acl')) return readAclView(path, ctx, uri);
+  if (path.endsWith('.meta')) return readMetaView(path, ctx, uri);
+  return readBody(path, ctx, uri);
+}
 
 // --- dispatch ---------------------------------------------------------------
 
 export async function readResource(uri, ctx) {
-  const parsed = parseUri(uri);
-  if (!parsed) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `unknown resource URI: ${uri}`);
-  if (parsed.fixed) {
-    const f = FIXED[parsed.fixed];
-    if (!f) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `unknown resource URI: ${uri}`);
-    return f(ctx, uri);
+  // Normalize a trailing-slash origin at the resolver boundary so the
+  // `origin + '/'` locality match (uri.js) can't be broken by wiring.
+  const origin = typeof ctx?.origin === 'string' ? ctx.origin.replace(/\/+$/, '') : ctx?.origin;
+  if (origin !== ctx?.origin) ctx = { ...ctx, origin };
+  if (!isLocalUri(ctx.origin, uri)) {
+    throw new ResourceError(RPC_ERRORS.INVALID_PARAMS,
+      `not a local resource: ${uri}. Use the read_remote_resource tool for another pod.`);
   }
-  const resolver = KIND[parsed.kind];
-  if (!resolver) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `unknown resource URI: ${uri}`);
-  return resolver(parsed.path, ctx, uri);
+  const path = uriToPath(ctx.origin, uri);
+  if (path === null) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `bad resource URI: ${uri}`);
+  const fixed = FIXED_SUFFIX[path];
+  if (fixed) return fixed(ctx, uri);
+  return readByResource(path, ctx, uri);
 }

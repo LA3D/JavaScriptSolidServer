@@ -1,25 +1,25 @@
 // src/mcp/surface.js
-// The single declarative registry for the MCP Resources surface. One entry per
-// lws:// surface; the parse set (uri.js), the dispatch map + advertisement
-// (resources.js) all DERIVE from these arrays, so adding a surface is one entry
-// here + one resolver binding — never three hand-synced tables (review #11).
+// The declarative registry for the MCP Resources surface. Resources are
+// addressed by the pod's REAL https:// URLs (LWS: a resource is identified by
+// its URI; structure lives in rel-links/items, not a synthetic scheme). The
+// fixed .well-known resources are advertised here; everything else is one
+// template — dispatch happens on the resource itself (resources.js).
 
-// Templated, path-addressed resources: lws://<kind>/<path>.
-export const SURFACE_TEMPLATES = [
-  { kind: 'resource', description: 'A resource body (any content type), enveloped as untrusted data.', mimeType: 'text/plain' },
-  { kind: 'container', description: 'A container listing (ldp:contains children).', mimeType: 'application/json' },
-  { kind: 'linkset', description: 'RFC 9264 linkset: anchor/up/type/describedby.', mimeType: 'application/linkset+json' },
-  { kind: 'meta', description: 'Resource metadata (size/modified).', mimeType: 'application/json' },
-  { kind: 'acl', description: 'Structured ACL (requires acl:Control).', mimeType: 'application/json' },
-  { kind: 'skill', description: 'A skill file body.', mimeType: 'application/json' },
+export const FIXED_SUFFIXES = [
+  { suffix: '/.well-known/lws-storage', name: 'storage-description', description: 'START HERE — the LWS storage description: type:Storage + advertised services + storage root. Vocab/context locations are in pod-info.', mimeType: 'application/lws+json' },
+  { suffix: '/.well-known/mcp/pod-info', name: 'pod-info', description: 'Pod identity + MCP capabilities + where the vocabulary lives.', mimeType: 'application/json' },
+  { suffix: '/.well-known/mcp/skills', name: 'skills', description: 'Skill index (WAC-filtered).', mimeType: 'application/json' },
+  { suffix: '/.well-known/lws/context', name: 'lws-context', description: 'The LWS JSON-LD @context (resolvable mirror of www.w3.org/ns/lws/v1).', mimeType: 'application/ld+json' },
+  { suffix: '/.well-known/lws/vocab', name: 'lws-vocab', description: 'The LWS system vocabulary (term meanings).', mimeType: 'application/ld+json' },
 ];
 
-// Fixed, singleton resources: lws://<name>.
-export const SURFACE_FIXED = [
-  { name: 'storage-description', description: 'The LWS storage description (type:Storage + services).', mimeType: 'application/json' },
-  { name: 'pod-info', description: 'Pod identity + MCP capabilities.', mimeType: 'application/json' },
-  { name: 'skills', description: 'Skill index (WAC-filtered, no-oracle).', mimeType: 'application/json' },
-];
+export function listFixed(origin) {
+  return FIXED_SUFFIXES.map(f => ({ uri: `${origin}${f.suffix}`, name: f.name, description: f.description, mimeType: f.mimeType }));
+}
 
-export const PATH_KINDS = new Set(SURFACE_TEMPLATES.map(t => t.kind));
-export const FIXED_NAMES = new Set(SURFACE_FIXED.map(f => f.name));
+export const RESOURCE_TEMPLATE = {
+  uriTemplate: 'https://{+authority}/{+path}',
+  name: 'resource',
+  description: 'Any pod resource, addressed by its real https:// URL. Read it, then follow the typed links (rel="up", describedby, and edges in the body) and consult its @context.',
+  mimeType: 'application/ld+json',
+};

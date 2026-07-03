@@ -326,21 +326,20 @@ function federationGatePathFor(webId, origin) {
   return podPath + 'private/federation/';
 }
 
-async function call_remote_pod({ pod_url, tool, arguments: remoteArgs, auth }, ctx) {
-  if (!pod_url || typeof pod_url !== 'string') {
-    return toolError('pod_url required');
-  }
-  if (!tool || typeof tool !== 'string') {
-    return toolError('tool required');
-  }
-  try {
-    new URL(pod_url);
-  } catch {
-    return toolError(`pod_url is not a valid URL: ${pod_url}`);
+// read_remote_resource replaces the call_remote_pod RPC proxy (task 6): a
+// remote pod is read by its own real URL — including its storage
+// description — not invoked via an arbitrary {tool, arguments} pair. The
+// agent then follows the returned representation's own typed links +
+// @context to operate the remote pod from ITS OWN affordances, the same way
+// it operates this one.
+async function read_remote_resource({ url }, ctx) {
+  if (!url || typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+    return toolError('absolute http(s) url required');
   }
 
   // Local WAC gate — derived from the agent's WebID. Foreign or
-  // anonymous identities can't federate.
+  // anonymous identities can't federate. (Carried verbatim from the retired
+  // call_remote_pod handler.)
   const gatePath = federationGatePathFor(ctx.webId, ctx.origin);
   if (!gatePath) {
     return toolError(
@@ -359,56 +358,27 @@ async function call_remote_pod({ pod_url, tool, arguments: remoteArgs, auth }, c
     return toolError(`federation depth exceeded (max ${MAX_FEDERATION_DEPTH})`);
   }
 
-  // Build remote MCP request
-  const remoteEndpoint = pod_url.replace(/\/+$/, '') + '/mcp';
-  const body = {
-    jsonrpc: '2.0',
-    id: 1,
-    method: 'tools/call',
-    params: { name: tool, arguments: remoteArgs || {} }
-  };
-
-  const headers = {
-    'Content-Type': 'application/json',
-    'MCP-Federation-Depth': String(depth)
-  };
-  if (auth && typeof auth === 'object') {
-    if (auth.type === 'bearer' && auth.token) {
-      headers.Authorization = `Bearer ${auth.token}`;
-    } else if (auth.type === 'header' && auth.name && auth.value) {
-      headers[auth.name] = auth.value;
-    }
-  }
-
-  let response, payload;
+  let r;
   try {
-    response = await fetch(remoteEndpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
+    r = await fetch(url, {
+      headers: {
+        Accept: 'application/ld+json, application/lws+json, text/turtle, */*',
+        'MCP-Federation-Depth': String(depth)
+      },
       signal: AbortSignal.timeout(30_000)
     });
   } catch (e) {
-    return toolError(`remote pod unreachable: ${e.message}`);
+    return toolError(`remote unreachable: ${e.message}`);
   }
-  try {
-    payload = await response.json();
-  } catch (e) {
-    return toolError(`remote response not JSON (${response.status}): ${e.message}`);
-  }
-  if (payload.error) {
-    return toolError(`remote MCP error ${payload.error.code}: ${payload.error.message}`);
-  }
-  // A federated pod is the least-trusted content source. Deep-strip hidden/bidi
-  // chars from its result before it enters the model's context — the
-  // cross-agent injection vector (review #7). NOTE: this is a generic proxy
-  // ({tool,arguments}); the governance is the federation gate + depth cap +
-  // this sanitize, not per-remote-tool typing.
+  const body = await r.text();
+  // A remote pod is the least-trusted content source. Deep-strip hidden/bidi
+  // chars before its representation enters the model's context — the
+  // cross-agent injection vector (review #7).
   return toolJson({
-    pod_url,
-    tool,
-    depth,
-    remote_result: sanitizeDeep(payload.result ?? null)
+    url,
+    status: r.status,
+    contentType: r.headers.get('content-type') || null,
+    body: sanitizeDeep(body)
   });
 }
 
@@ -610,28 +580,16 @@ export const TOOLS = {
     } },
     handler: lws_type_search,
   },
-  call_remote_pod: {
-    description: 'Invoke an MCP tool on another pod. Caller must have acl:Write on /private/federation/ on this pod. Depth-capped at 3.',
+  read_remote_resource: {
+    description: 'Read a resource on ANOTHER pod by its real URL (including that pod\'s storage description). Then follow its typed links + @context — you operate a remote pod from its own affordances.',
     inputSchema: {
       type: 'object',
       properties: {
-        pod_url: { type: 'string', description: 'Origin of the remote pod (e.g. https://alice.example.com)' },
-        tool: { type: 'string', description: 'Tool name to invoke on the remote' },
-        arguments: { type: 'object', description: 'Arguments to pass to the remote tool' },
-        auth: {
-          type: 'object',
-          description: 'Auth for the remote call. Currently { type: "bearer", token } or { type: "header", name, value }. Omit for anonymous.',
-          properties: {
-            type: { type: 'string', enum: ['bearer', 'header'] },
-            token: { type: 'string' },
-            name: { type: 'string' },
-            value: { type: 'string' }
-          }
-        }
+        url: { type: 'string' }
       },
-      required: ['pod_url', 'tool']
+      required: ['url']
     },
-    handler: call_remote_pod
+    handler: read_remote_resource
   },
   put_typed_resource: {
     description: 'Store a typed resource in one call: writes the body, captures LWS types (rel="type"), and optionally declares a describedby shape into the target .meta. Routes through SHACL admission.',
