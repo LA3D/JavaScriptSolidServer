@@ -4,7 +4,7 @@ JSS speaks the [Model Context Protocol](https://modelcontextprotocol.io). Once `
 
 > **Thesis**: MCP needs a backend. Solid is the backend.
 
-> **v2 (Resource Gateway).** The MCP surface follows the Resource-Gateway pattern: **reads are MCP Resources** (URI-addressed, under an `lws://` scheme), **mutations and parameterized queries are Tools** (9 total). This keeps the tool count under the selection-accuracy budget (~10–15 tools), lets the client browse the read surface as resources, and routes SHACL admission failures back as teaching content the model can read and act on. This is a hard break from the earlier flat tool dump — the old read tools (`read_resource`, `list_resources`, `head_resource`, `read_acl`, `get_skill`, `list_skills`, `get_pod_skill`, `pod_info`, `lws_linkset`, `lws_storage_description`, `list_docs`, `read_docs`) no longer exist; their capability re-appears as Resources.
+> **v2 (Resource Gateway).** The MCP surface follows the Resource-Gateway pattern: **reads are MCP Resources** (addressed by the pod's real `https://` URLs, dispatched on the resource itself), **mutations and parameterized queries are Tools** (9 total). This keeps the tool count under the selection-accuracy budget (~10–15 tools), lets the client browse the read surface as resources, and routes SHACL admission failures back as teaching content the model can read and act on. This is a hard break from the earlier flat tool dump — the old read tools (`read_resource`, `list_resources`, `head_resource`, `read_acl`, `get_skill`, `list_skills`, `get_pod_skill`, `pod_info`, `lws_linkset`, `lws_storage_description`, `list_docs`, `read_docs`) no longer exist; their capability re-appears as Resources.
 
 ## Quick start
 
@@ -115,7 +115,7 @@ Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) rout
 
 ### ACL editing
 
-`write_acl` takes the structured form (bots don't hand-roll JSON-LD); read the current ACL via the `lws://acl/{+path}` resource.
+`write_acl` takes the structured form (bots don't hand-roll JSON-LD); read the current ACL via the resource's real `<path>.acl` URL (which returns the structured ACL view, gated on `Control`).
 
 ```json
 // write_acl arguments
@@ -182,7 +182,7 @@ If the proposed ACL doesn't grant `Control` to the caller, `write_acl` refuses. 
 
 - **`update_resource` (PATCH)** — SPARQL Update / N3 patches. Read-modify-write through the tools is the workaround.
 - **`resources/list` child enumeration** — v1 lists fixed resources + templates only, not WAC-readable container children (deferred behind a page-bound).
-- **Skills over the MCP Resources *primitive* (SEP-2640)** — skills are exposed as `lws://skill` resources today; aligning to the experimental SEP is deferred until it stabilizes.
+- **Skills over the MCP Resources *primitive* (SEP-2640)** — skills are exposed as ordinary pod resources today (a skill file is read by its real `https://` URL); aligning to the experimental SEP is deferred until it stabilizes.
 - **Authenticated federation reads** — `read_remote_resource` fetches anonymously; it carries no per-call auth, so it can only see what the remote pod exposes to `foaf:Agent`/anonymous. Reading a remote agent-scoped resource is not yet supported.
 
 ## Why this exists
@@ -190,5 +190,5 @@ If the proposed ACL doesn't grant `Control` to the caller, `write_acl` refuses. 
 The agent ecosystem has no shared answer for sovereign, ACL-gated storage. Solid's pitch — user-owned data, queryable, access-controlled — is exactly what agents need; MCP is the wire. When JSS exposes `/mcp`:
 
 - **Agent identity is a first-class WAC subject.** `acl:agent <did:nostr:...>` for a bot is the same operation as for a human.
-- **The pod is the bot's world.** A bot reads its instructions from `SKILL.md`, browses the read surface as `lws://` resources, and (with permission) writes back through the governed tools. No backend, no API key store — just the pod.
+- **The pod is the bot's world.** A bot reads its instructions from `SKILL.md`, browses the read surface as real-URL resources (following typed links + `@context`), and (with permission) writes back through the governed tools. No backend, no API key store — just the pod.
 - **Bot-to-bot falls out of the protocol.** Two JSS pods can have their bots call each other's `/mcp`, gated by WAC on both ends.
