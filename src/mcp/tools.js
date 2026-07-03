@@ -13,6 +13,7 @@ import * as storage from '../storage/filesystem.js';
 import { AccessMode, parseAcl, serializeAcl } from '../wac/parser.js';
 import { resourceEvents, emitChange } from '../notifications/events.js';
 import { toolText, toolError, toolJson } from './protocol.js';
+import { admissionError } from './errors.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
@@ -53,11 +54,7 @@ async function write_resource({ path, content, contentType, types }, ctx) {
     declaredTypes: Array.isArray(types) ? types : [],
     lwsEnabled: ctx.lwsEnabled
   });
-  if (!w.ok) {
-    return toolError(`admission rejected ${path}`, {
-      violations: w.violations, describedby: w.shapeUrl
-    });
-  }
+  if (!w.ok) return admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${path}`);
   emitChange(buildUrl(ctx, path));
   return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes)`);
@@ -89,11 +86,7 @@ async function create_resource({ container, slug, content, contentType, isContai
     declaredTypes: Array.isArray(types) ? types : [],
     lwsEnabled: ctx.lwsEnabled
   });
-  if (!w.ok) {
-    return toolError(`admission rejected ${childPath}`, {
-      violations: w.violations, describedby: w.shapeUrl
-    });
-  }
+  if (!w.ok) return admissionError(childPath, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${childPath}`);
   emitChange(buildUrl(ctx, childPath));
   return toolText(`created ${childPath}`);
@@ -472,10 +465,7 @@ async function put_typed_resource({ path, content, contentType, types, described
     content: Buffer.from(content, 'utf8'), contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [], lwsEnabled: ctx.lwsEnabled,
   });
-  if (!w.ok) {
-    // Teaching content upgraded in Task 7; mirror the current shape for now.
-    return toolError(`admission rejected ${path}`, { violations: w.violations, describedby: w.shapeUrl });
-  }
+  if (!w.ok) return admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${path}`);
   emitChange(buildUrl(ctx, path));
   return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes${types?.length ? `, types: ${types.join(', ')}` : ''})`);
