@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import { readResource } from '../src/mcp/resources.js';
 import { startLwsPod, ownerCtx, putFile } from './helpers.js';
 import { ResourceError } from '../src/mcp/errors.js';
+import { generatePublicReadAcl, serializeAcl } from '../src/wac/parser.js';
+import * as storage from '../src/storage/filesystem.js';
 
 test('reads a local resource by its real https:// URL', async (t) => {
   const p = await startLwsPod(t);
@@ -94,4 +96,16 @@ test('an opaque free-text body is enveloped as untrusted data', async (t) => {
   const out = await readResource(`${p.origin}/${p.podName}/f.txt`, ctx);
   assert.equal(out.contents[0].mimeType, 'text/plain');
   assert.match(out.contents[0].text, /BEGIN untrusted/);
+});
+
+test('a caller with Read but not Control on X is denied reading X.acl', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/X`, 'body');
+  const url = `${p.origin}/${p.podName}/X`;
+  await storage.write(`/${p.podName}/X.acl`, serializeAcl(generatePublicReadAcl(url)));
+  const anonCtx = { origin: p.origin, webId: null };
+  await assert.rejects(
+    () => readResource(`${p.origin}/${p.podName}/X.acl`, anonCtx),
+    (e) => e instanceof ResourceError && /access denied|control/i.test(e.message),
+  );
 });

@@ -28,9 +28,10 @@ curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
 curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":3,"method":"resources/templates/list"}' | jq '.result.resourceTemplates[].uriTemplate'
 
-# Read a resource (anonymous read of a public container listing)
+# Read a resource (anonymous read of a public container listing) — the real
+# https:// URL, not a synthetic scheme
 curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"lws://container/public/"}}' | jq
+  -d '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"https://localhost:4443/public/"}}' | jq
 ```
 
 ## Auth
@@ -50,28 +51,42 @@ Anonymous requests get the same WAC treatment as any other anonymous request —
 
 ## Resources (the read surface)
 
-Reads are addressed by an `lws://` URI and fetched with the MCP Resources methods: `resources/list` (fixed resources), `resources/templates/list` (the templated families), `resources/read` (`{ "uri": "lws://…" }`). Every read WAC-checks the target path and **sanitizes** externally-sourced content before returning it (see [Security](#security-content-sanitization)).
+Reads are addressed by the pod's **real `https://` URLs** — there is no synthetic scheme. Fetch them with the MCP Resources methods: `resources/list` (the fixed `.well-known` resources), `resources/templates/list` (the one real-URI template), `resources/read` (`{ "uri": "https://<pod>/alice/notes/a" }`). Every read WAC-checks the target path and **sanitizes** externally-sourced content before returning it (see [Security](#security-content-sanitization)).
 
-**Templated** (`{+path}` = an LDP pod path):
+### Dispatch on the resource
 
-| URI | Returns | WAC |
+There's no per-kind scheme to pick from — the resource's own shape decides what comes back:
+
+| Resource | Returns | WAC |
 |---|---|---|
-| `lws://resource/{+path}` | resource body (enveloped as untrusted data) | Read |
-| `lws://container/{+path}` | container listing (`ldp:contains` children) | Read |
-| `lws://linkset/{+path}` | RFC 9264 linkset (`anchor`/`up`/`type`/`describedby`) | Read |
-| `lws://meta/{+path}` | resource metadata (size/modified) | Read |
-| `lws://acl/{+path}` | structured ACL (agents, agentClasses, modes, isDefault) | Control |
-| `lws://skill/{+path}` | a skill file body | Read |
+| A container URL (trailing `/`) | `application/lws+json` container listing (`items[]`) | Read |
+| `<X>.acl` | structured ACL view (agents, agentClasses, modes, isDefault) | **Control** |
+| `<X>.meta` | resource metadata (size/modified) | Read |
+| Any other resource | its body | Read |
 
-**Fixed:**
+Bodies preserve trust by content: JSON-LD/RDF-JSON comes back structured with its `@context` intact (leaf values sanitized, structure kept); anything else — opaque or free-text — is enveloped as untrusted data (see [Security](#security-content-sanitization)).
+
+### Fixed resources
+
+`resources/list` advertises these real `.well-known` URLs:
 
 | URI | Returns |
 |---|---|
-| `lws://storage-description` | the LWS storage description (`type:Storage` + advertised services) |
-| `lws://pod-info` | pod identity, MCP protocol version, authenticated identity, capability flags |
-| `lws://skills` | skill index (WAC-filtered, no-oracle) |
+| `https://<pod>/.well-known/lws-storage` | the LWS storage description (`type:Storage` + advertised services + storage root) |
+| `https://<pod>/.well-known/mcp/pod-info` | pod identity + MCP capabilities + vocab/context locations + a steering hint |
+| `https://<pod>/.well-known/mcp/skills` | skill index (WAC-filtered, no-oracle) |
+| `https://<pod>/.well-known/lws/context` | the resolvable LWS JSON-LD `@context` mirror |
+| `https://<pod>/.well-known/lws/vocab` | the LWS vocabulary |
+
+**Templated:**
+
+| URI template | Returns |
+|---|---|
+| `https://{+authority}/{+path}` | any pod resource, addressed by its real URL and dispatched per the table above |
 
 Skills live at conventional paths the server walks: `<pod>/SKILL.md` (pod-wide), `<pod>/public/apps/<name>/SKILL.md` (per-app), `<pod>/private/bots/<name>/SKILL.md` (per-bot). Both `SKILL.md` (Anthropic markdown) and `SKILL.jsonld` (typed descriptor) are first-class via the `skill:format` declaration.
+
+The RFC 9264 linkset is **not** a resource kind — it's returned by the `describe_resource` tool (one read: body + declared types + linkset together).
 
 ## Tools (mutations + queries)
 

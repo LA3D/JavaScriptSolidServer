@@ -112,6 +112,9 @@ async function readAclView(path, ctx, uri) {
   // /dir/.acl both resolve /dir/.acl, and the Control check runs against the
   // right target (review #3).
   const stripped = path.slice(0, -'.acl'.length);   // '/dir/.acl' -> '/dir/'
+  // stat only resolves the WAC target's container-ness (trailing-slash vs not),
+  // not an existence answer — the CONTROL check below denies uniformly either
+  // way, so probing stat pre-WAC is not a no-oracle violation.
   const s = await storage.stat(stripped);
   const isContainer = stripped.endsWith('/') || !!(s && s.isDirectory);
   const target = isContainer && !stripped.endsWith('/') ? stripped + '/' : stripped;

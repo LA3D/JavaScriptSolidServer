@@ -21,3 +21,7 @@ test('uriToPath rejects malformed percent-encoding (invalid-params, not a raw UR
   assert.equal(uriToPath(O, `${O}/dir/50%off`), null);
   assert.equal(uriToPath(O, 'not-a-url'), null);
 });
+
+test('uriToPath keeps a valid percent-sequence RAW for single storage-side decode', () => {
+  assert.equal(uriToPath(O, `${O}/a%20b`), '/a%20b');
+});

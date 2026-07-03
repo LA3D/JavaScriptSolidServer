@@ -6,7 +6,7 @@
 // template — dispatch happens on the resource itself (resources.js).
 
 export const FIXED_SUFFIXES = [
-  { suffix: '/.well-known/lws-storage', name: 'storage-description', description: 'START HERE — the LWS storage description: services, vocab locations, storage root.', mimeType: 'application/lws+json' },
+  { suffix: '/.well-known/lws-storage', name: 'storage-description', description: 'START HERE — the LWS storage description: type:Storage + advertised services + storage root. Vocab/context locations are in pod-info.', mimeType: 'application/lws+json' },
   { suffix: '/.well-known/mcp/pod-info', name: 'pod-info', description: 'Pod identity + MCP capabilities + where the vocabulary lives.', mimeType: 'application/json' },
   { suffix: '/.well-known/mcp/skills', name: 'skills', description: 'Skill index (WAC-filtered).', mimeType: 'application/json' },
   { suffix: '/.well-known/lws/context', name: 'lws-context', description: 'The LWS JSON-LD @context (resolvable mirror of www.w3.org/ns/lws/v1).', mimeType: 'application/ld+json' },
