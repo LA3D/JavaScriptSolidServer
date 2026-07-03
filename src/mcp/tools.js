@@ -25,6 +25,7 @@ import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { buildStorageDescription } from '../lws/storage-description.js';
+import { wac, buildUrl, parentPath } from './wac.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -52,39 +53,6 @@ const FULL_AGENT_CLASS = {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const JSS_DOCS_DIR = pathResolve(__dirname, '..', '..', 'docs');
-
-function buildUrl(ctx, path) {
-  if (!path.startsWith('/')) path = '/' + path;
-  return `${ctx.origin}${path}`;
-}
-
-function parentPath(p) {
-  if (p === '/' || p === '') return '/';
-  const trimmed = p.endsWith('/') ? p.slice(0, -1) : p;
-  const idx = trimmed.lastIndexOf('/');
-  return idx <= 0 ? '/' : trimmed.slice(0, idx + 1);
-}
-
-async function wac(ctx, path, mode) {
-  // For writes against a non-existent resource, fall back to checking
-  // the parent container — same pattern as src/auth/middleware.js so MCP
-  // tools have identical WAC semantics to the HTTP endpoints.
-  const isWrite = mode === AccessMode.WRITE || mode === AccessMode.APPEND;
-  let checkPath = path;
-  let checkIsContainer = path.endsWith('/');
-  if (isWrite && !path.endsWith('/') && !(await storage.exists(path))) {
-    checkPath = parentPath(path);
-    checkIsContainer = true;
-  }
-  const { allowed } = await checkAccess({
-    resourceUrl: buildUrl(ctx, checkPath),
-    resourcePath: checkPath,
-    isContainer: checkIsContainer,
-    agentWebId: ctx.webId,
-    requiredMode: mode
-  });
-  return allowed;
-}
 
 // --- CRUD tools ---
 
