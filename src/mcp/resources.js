@@ -5,6 +5,7 @@
 // same read logic + wac() as the former read tools, so the no-oracle
 // property is inherited, not reimplemented.
 import { parseUri, fixedUri } from './uri.js';
+import { SURFACE_TEMPLATES, SURFACE_FIXED } from './surface.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
@@ -17,25 +18,20 @@ import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { buildStorageDescription } from '../lws/storage-description.js';
 
-// --- template + fixed advertisement -----------------------------------------
+// --- template + fixed advertisement (derived from the surface registry) ------
 
 export function listResourceTemplates() {
-  return [
-    { uriTemplate: 'lws://resource/{+path}', name: 'resource', description: 'A resource body (any content type), enveloped as untrusted data.', mimeType: 'text/plain' },
-    { uriTemplate: 'lws://container/{+path}', name: 'container', description: 'A container listing (ldp:contains children).', mimeType: 'application/json' },
-    { uriTemplate: 'lws://linkset/{+path}', name: 'linkset', description: 'RFC 9264 linkset: anchor/up/type/describedby.', mimeType: 'application/linkset+json' },
-    { uriTemplate: 'lws://meta/{+path}', name: 'meta', description: 'Resource metadata (size/modified).', mimeType: 'application/json' },
-    { uriTemplate: 'lws://acl/{+path}', name: 'acl', description: 'Structured ACL (requires acl:Control).', mimeType: 'application/json' },
-    { uriTemplate: 'lws://skill/{+path}', name: 'skill', description: 'A skill file body.', mimeType: 'application/json' },
-  ];
+  return SURFACE_TEMPLATES.map(t => ({
+    uriTemplate: `lws://${t.kind}/{+path}`, name: t.kind,
+    description: t.description, mimeType: t.mimeType,
+  }));
 }
 
 export function listFixedResources() {
-  return [
-    { uri: 'lws://storage-description', name: 'storage-description', description: 'The LWS storage description (type:Storage + services).', mimeType: 'application/json' },
-    { uri: 'lws://pod-info', name: 'pod-info', description: 'Pod identity + MCP capabilities.', mimeType: 'application/json' },
-    { uri: 'lws://skills', name: 'skills', description: 'Skill index (WAC-filtered, no-oracle).', mimeType: 'application/json' },
-  ];
+  return SURFACE_FIXED.map(f => ({
+    uri: `lws://${f.name}`, name: f.name,
+    description: f.description, mimeType: f.mimeType,
+  }));
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -191,6 +187,11 @@ const KIND = {
   acl: readAcl,
   skill: readSkillResource,
 };
+
+// Exposed so a guard test can assert the resolver maps cover exactly the
+// surface registry (no advertise-without-resolver / resolver-without-parse
+// drift — review #11). The dispatch below reads from these same maps.
+export const RESOLVERS = { KIND, FIXED };
 
 // --- dispatch ---------------------------------------------------------------
 
