@@ -47,7 +47,12 @@ async function readPodInfo(ctx, uri) {
     server: 'jss',
     protocolVersion: '2025-03-26',
     identity: ctx.webId || null,
-    capabilities: { crud: true, acl: true, skills: true, resources: true },
+    storageRoot: `${ctx.origin}/`,
+    storageDescription: `${ctx.origin}/.well-known/lws-storage`,
+    context: `${ctx.origin}/.well-known/lws/context`,
+    vocabulary: `${ctx.origin}/.well-known/lws/vocab`,
+    capabilities: { crud: true, acl: true, skills: true, resources: true, federation: true },
+    hint: 'Resources are real https:// URLs returning JSON-LD. Read one, then follow its typed links (rel="up", describedby, and edges in the body) and resolve terms via @context (see `context`/`vocabulary`). Start at `storageDescription`.',
     skill: skillVisible ? { path: skill.path, format: skill.format } : null,
   });
 }
