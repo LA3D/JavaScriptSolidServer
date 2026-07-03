@@ -157,11 +157,19 @@ async function readBody(path, ctx, uri) {
   const type = getContentType(path);
   // Trust rule: the pod's own RDF/JSON-LD is affordance — preserve structure +
   // @context; strip only leaf values. Opaque/free-text is untrusted — envelope.
-  if (isRdfContentType(type) && !r.truncated) {
+  // Recognize JSON by content for a truly unknown (extensionless → octet-stream)
+  // type too, so an agent's JSON-LD written at a path without a `.jsonld`
+  // extension keeps its @context instead of being enveloped. An EXPLICIT
+  // text/* type is left as the writer declared it (still enveloped).
+  const unknown = type === 'application/octet-stream';
+  if ((isRdfContentType(type) || (unknown && /^\s*[{[]/.test(r.text))) && !r.truncated) {
     try {
       const obj = JSON.parse(r.text);
       const safe = withInlineContext(sanitizeJsonLeaves(obj));   // field-level strip, structure kept
-      return { contents: [{ uri, mimeType: type, text: JSON.stringify(safe, null, 2) }] };
+      // Keep a declared RDF type; else infer ld+json when an @context is present.
+      const mimeType = isRdfContentType(type) ? type
+        : (obj && typeof obj === 'object' && obj['@context']) ? 'application/ld+json' : 'application/json';
+      return { contents: [{ uri, mimeType, text: JSON.stringify(safe, null, 2) }] };
     } catch { /* not JSON (e.g. Turtle) or malformed — fall through to envelope */ }
   }
   let label = `untrusted pod content — original type ${type}`;
