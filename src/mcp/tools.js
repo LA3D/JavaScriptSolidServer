@@ -21,7 +21,8 @@ import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeBody } from './sanitize.js';
+import { sanitizeBody, sanitizeTypes } from './sanitize.js';
+import { readBounded, MAX_BODY_BYTES } from './read.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -479,21 +480,23 @@ async function describe_resource({ path }, ctx) {
   if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
   if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
   const isContainer = path.endsWith('/');
-  let body = null;
+  let body = null, truncated = false;
   if (!isContainer) {
-    const content = await storage.read(path);
-    let raw = content.toString('utf8');
-    const MAX = 200_000;
-    if (raw.length > MAX) raw = raw.slice(0, MAX);
-    body = sanitizeBody(raw, 'untrusted pod content');
+    const r = await readBounded(path);              // bounded read, shared limit (#5/#6/#12)
+    if (r) {
+      truncated = r.truncated;
+      let label = 'untrusted pod content';
+      if (truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
+      body = sanitizeBody(r.text, label);
+    }
   }
-  const declared = await readDeclaredTypes(storage, path);
-  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
+  const declared = sanitizeTypes(await readDeclaredTypes(storage, path));
+  const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   const linkset = generateLinkset(buildUrl(ctx, path), {
     parentUrl: buildUrl(ctx, parentPath(path)),
     isContainer, describedByShapes: shapes, declaredTypes: declared,
   });
-  return toolJson({ path, isContainer, body, types: declared, linkset });
+  return toolJson({ path, isContainer, body, truncated, types: declared, linkset });
 }
 
 // --- registry ---

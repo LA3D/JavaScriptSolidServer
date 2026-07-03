@@ -4,17 +4,18 @@
 import * as storage from '../storage/filesystem.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
+import { getParentContainer } from '../utils/url.js';
 
 export function buildUrl(ctx, path) {
   if (!path.startsWith('/')) path = '/' + path;
   return `${ctx.origin}${path}`;
 }
 
+// Parent container of a pod path. Reuses the shared util so the MCP linkset
+// `up` link and WAC parent-fallback stay identical to the HTTP layer (#12).
 export function parentPath(p) {
   if (p === '/' || p === '') return '/';
-  const trimmed = p.endsWith('/') ? p.slice(0, -1) : p;
-  const idx = trimmed.lastIndexOf('/');
-  return idx <= 0 ? '/' : trimmed.slice(0, idx + 1);
+  return getParentContainer(p);
 }
 
 export async function wac(ctx, path, mode) {

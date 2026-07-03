@@ -39,3 +39,11 @@ export function sanitizeBody(text, label) {
 export function sanitizeField(s) {
   return stripHidden(s);
 }
+
+// An array of client-controlled type / shape IRIs (declared types, describedby
+// targets) headed for a linkset/describe response. These are captured from
+// client input, so a hostile writer could smuggle bidi/zero-width chars in
+// them; strip each before it reaches the model (review #2).
+export function sanitizeTypes(arr) {
+  return Array.isArray(arr) ? arr.map(stripHidden) : [];
+}
