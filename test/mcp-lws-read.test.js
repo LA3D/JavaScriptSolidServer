@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectAuthorizedResources } from '../src/lws/authorized-resources.js';
 import { callTool } from '../src/mcp/tools.js';
+import { readResource } from '../src/mcp/resources.js';
 import { startLwsPod, ownerCtx, seedTyped, startTestServer, stopTestServer, getBaseUrl } from './helpers.js';
 
 test('collectAuthorizedResources drops resources the agent cannot read (no oracle)', async (t) => {
@@ -34,19 +35,25 @@ test('lws_type_search owner sees both public and private matches', async (t) => 
   assert.equal(body.items.length, 2);
 });
 
-test('lws_linkset returns anchor/type for a resource, WAC-gated', async (t) => {
+// lws_linkset (tool) was removed in Task 4; its coverage moves to
+// resources/read of lws://linkset/<path> (src/mcp/resources.js:readLinkset).
+test('lws://linkset returns anchor/type for a resource, WAC-gated', async (t) => {
   const pod = await startLwsPod(t);
   await seedTyped(pod, '/lwsmcp/pub/a', 'https://ex/Note', { publicRead: true });
 
-  const res = await callTool('lws_linkset', { path: '/lwsmcp/pub/a' }, { webId: null, origin: pod.origin });
-  const body = JSON.parse(res.content?.[0]?.text ?? res.text);
-  const link = body.linkset[0];
-  assert.equal(link.anchor, `${pod.origin}/lwsmcp/pub/a`);
-  assert.ok(link.type.some((t) => t.href === 'https://ex/Note'));
+  const body = await readResource('lws://linkset/lwsmcp/pub/a', { webId: null, origin: pod.origin });
+  const link = body.contents[0];
+  const parsed = JSON.parse(link.text);
+  const anchorLink = parsed.linkset[0];
+  assert.equal(anchorLink.anchor, `${pod.origin}/lwsmcp/pub/a`);
+  assert.ok(anchorLink.type.some((t) => t.href === 'https://ex/Note'));
 
   await seedTyped(pod, '/lwsmcp/priv/b', 'https://ex/Note', { publicRead: false });
-  const denied = await callTool('lws_linkset', { path: '/lwsmcp/priv/b' }, { webId: null, origin: pod.origin });
-  assert.ok(denied.isError, 'anonymous must be denied linkset for a private resource');
+  await assert.rejects(
+    () => readResource('lws://linkset/lwsmcp/priv/b', { webId: null, origin: pod.origin }),
+    /access denied/i,
+    'anonymous must be denied linkset for a private resource'
+  );
 });
 
 // Round-trips through the real /mcp HTTP route (not a hand-built ctx) so

@@ -10,7 +10,6 @@
  */
 
 import * as storage from '../storage/filesystem.js';
-import { checkAccess } from '../wac/checker.js';
 import { AccessMode, parseAcl, serializeAcl } from '../wac/parser.js';
 import { resourceEvents, emitChange } from '../notifications/events.js';
 import { toolText, toolError, toolJson } from './protocol.js';
@@ -21,25 +20,12 @@ import { join, dirname, resolve as pathResolve } from 'path';
 import { fileURLToPath } from 'url';
 import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
-import { generateLinkset } from '../lws/linkset.js';
-import { readDeclaredTypes } from '../lws/type-metadata.js';
-import { describedbyTargets } from '../lws/constraint.js';
 import { buildStorageDescription } from '../lws/storage-description.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
 const ACL_AUTH_AGENT = 'http://www.w3.org/ns/auth/acl#AuthenticatedAgent';
-const SHORT_MODE = {
-  [`${ACL_NS}Read`]: 'Read',
-  [`${ACL_NS}Write`]: 'Write',
-  [`${ACL_NS}Append`]: 'Append',
-  [`${ACL_NS}Control`]: 'Control'
-};
-const SHORT_AGENT_CLASS = {
-  [FOAF_AGENT]: 'foaf:Agent',
-  [ACL_AUTH_AGENT]: 'acl:AuthenticatedAgent'
-};
 const FULL_MODE = {
   Read: `${ACL_NS}Read`,
   Write: `${ACL_NS}Write`,
@@ -55,54 +41,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const JSS_DOCS_DIR = pathResolve(__dirname, '..', '..', 'docs');
 
 // --- CRUD tools ---
-
-async function list_resources({ path }, ctx) {
-  if (!path || !path.endsWith('/')) {
-    return toolError('path must be a container (ending in /)');
-  }
-  if (!(await wac(ctx, path, AccessMode.READ))) {
-    return toolError(`access denied: read ${path}`);
-  }
-  if (!(await storage.exists(path))) {
-    return toolError(`not found: ${path}`);
-  }
-  const entries = await storage.listContainer(path);
-  return toolJson({
-    container: path,
-    items: (entries || []).map(e => ({
-      name: e.name,
-      path: `${path}${e.name}${e.isDirectory ? '/' : ''}`,
-      isContainer: e.isDirectory,
-      size: e.size ?? null,
-      modified: e.modified ?? null
-    }))
-  });
-}
-
-async function read_resource({ path }, ctx) {
-  if (!path) return toolError('path required');
-  if (!(await wac(ctx, path, AccessMode.READ))) {
-    return toolError(`access denied: read ${path}`);
-  }
-  if (!(await storage.exists(path))) {
-    return toolError(`not found: ${path}`);
-  }
-  if (path.endsWith('/')) {
-    return toolError('use list_resources for containers');
-  }
-  const content = await storage.read(path);
-  let body = content.toString('utf8');
-  // Truncate very large reads
-  const MAX = 200_000;
-  let truncated = false;
-  if (body.length > MAX) {
-    body = body.slice(0, MAX);
-    truncated = true;
-  }
-  const result = { path, body };
-  if (truncated) result.truncated = true;
-  return toolJson(result);
-}
 
 async function write_resource({ path, content, contentType, types }, ctx) {
   if (!path) return toolError('path required');
@@ -179,23 +117,6 @@ async function delete_resource({ path }, ctx) {
   return toolText(`deleted ${path}`);
 }
 
-async function head_resource({ path }, ctx) {
-  if (!path) return toolError('path required');
-  if (!(await wac(ctx, path, AccessMode.READ))) {
-    return toolError(`access denied: read ${path}`);
-  }
-  if (!(await storage.exists(path))) {
-    return toolError(`not found: ${path}`);
-  }
-  const s = await storage.stat(path);
-  return toolJson({
-    path,
-    isContainer: path.endsWith('/'),
-    size: s?.size ?? null,
-    modified: s?.mtime ?? null
-  });
-}
-
 // --- skill tools ---
 
 async function list_skills(_args, ctx) {
@@ -264,46 +185,12 @@ function aclUrlFor(path) {
   return path + '.acl';
 }
 
-function shortMode(mode) {
-  return SHORT_MODE[mode] || mode;
-}
-
-function shortAgentClass(uri) {
-  return SHORT_AGENT_CLASS[uri] || uri;
-}
-
 function fullMode(mode) {
   return FULL_MODE[mode] || mode;
 }
 
 function fullAgentClass(value) {
   return FULL_AGENT_CLASS[value] || value;
-}
-
-async function read_acl({ path }, ctx) {
-  if (!path) return toolError('path required');
-  // Reading the ACL document itself requires Control on the resource.
-  if (!(await wac(ctx, path, AccessMode.CONTROL))) {
-    return toolError(`access denied: control ${path}`);
-  }
-  const aclPath = aclUrlFor(path);
-  if (!(await storage.exists(aclPath))) {
-    return toolJson({ path, aclPath, exists: false, authorizations: [] });
-  }
-  const content = await storage.read(aclPath);
-  const aclUrl = buildUrl(ctx, aclPath);
-  const auths = await parseAcl(content.toString('utf8'), aclUrl);
-  return toolJson({
-    path,
-    aclPath,
-    exists: true,
-    authorizations: auths.map(a => ({
-      agents: a.agents || [],
-      agentClasses: (a.agentClasses || []).map(shortAgentClass),
-      modes: (a.modes || []).map(shortMode),
-      isDefault: !!a.default
-    }))
-  });
 }
 
 function buildAclDoc(structured, targetRef, isContainer) {
@@ -631,20 +518,6 @@ async function lws_type_search(args, ctx) {
   });
 }
 
-async function lws_linkset({ path }, ctx) {
-  if (!path) return toolError('path required');
-  if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
-  if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
-  const isContainer = path.endsWith('/');
-  const declared = await readDeclaredTypes(storage, path);
-  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
-  const ls = generateLinkset(buildUrl(ctx, path), {
-    parentUrl: buildUrl(ctx, parentPath(path)),
-    isContainer, describedByShapes: shapes, declaredTypes: declared,
-  });
-  return toolJson(ls);
-}
-
 async function lws_storage_description(_args, ctx) {
   // Mirror the /.well-known/lws-storage generator (same service set) — the
   // shared buildStorageDescription() is the single source of the service
@@ -657,26 +530,6 @@ async function lws_storage_description(_args, ctx) {
 // --- registry ---
 
 export const TOOLS = {
-  list_resources: {
-    description: 'List contents of an LDP container. Returns child resources and sub-containers.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Container path, must end in /' }
-      },
-      required: ['path']
-    },
-    handler: list_resources
-  },
-  read_resource: {
-    description: 'Read the body of a non-container resource (any content type). Returns UTF-8.',
-    inputSchema: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path']
-    },
-    handler: read_resource
-  },
   write_resource: {
     description: 'Write (PUT) a resource at the given path. Overwrites if exists.',
     inputSchema: {
@@ -718,15 +571,6 @@ export const TOOLS = {
     },
     handler: delete_resource
   },
-  head_resource: {
-    description: 'Return metadata (size, modified) for a resource without reading the body.',
-    inputSchema: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path']
-    },
-    handler: head_resource
-  },
   list_skills: {
     description: 'List SKILL.md / SKILL.jsonld files at conventional paths (pod-wide, per-app, per-bot).',
     inputSchema: { type: 'object', properties: {} },
@@ -764,15 +608,6 @@ export const TOOLS = {
     description: 'Basic pod identity and MCP capabilities.',
     inputSchema: { type: 'object', properties: {} },
     handler: pod_info
-  },
-  read_acl: {
-    description: 'Read the WAC ACL for a resource as a structured list of authorizations. Requires acl:Control.',
-    inputSchema: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path']
-    },
-    handler: read_acl
   },
   write_acl: {
     description: 'Write a structured ACL for a resource. authorizations: [{ agents?, agentClasses?, modes, isDefault? }]. Requires acl:Control.',
@@ -815,11 +650,6 @@ export const TOOLS = {
       describedby: { type: 'array', items: {}, description: 'CNF describedby (shape) filter.' },
     } },
     handler: lws_type_search,
-  },
-  lws_linkset: {
-    description: "A resource's RFC 9264 linkset: anchor/up/type/describedby.",
-    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-    handler: lws_linkset,
   },
   lws_storage_description: {
     description: 'The pod storage description (type:Storage + advertised services).',

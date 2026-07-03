@@ -3,12 +3,16 @@
 // URI-addressed, WAC-checked, sanitized (sanitize wiring in Task 8). Every
 // resolver reuses the same read logic + wac() as the former read tools, so
 // the no-oracle property is inherited, not reimplemented.
-import { parseUri, pathUri, fixedUri } from './uri.js';
-import { wac } from './wac.js';
+import { parseUri, fixedUri } from './uri.js';
+import { wac, buildUrl, parentPath } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
-import { AccessMode } from '../wac/parser.js';
+import { AccessMode, parseAcl } from '../wac/parser.js';
 import { readPodSkill } from './skills.js';
+import * as storage from '../storage/filesystem.js';
+import { generateLinkset } from '../lws/linkset.js';
+import { readDeclaredTypes } from '../lws/type-metadata.js';
+import { describedbyTargets } from '../lws/constraint.js';
 
 // --- template + fixed advertisement -----------------------------------------
 
@@ -59,8 +63,106 @@ const FIXED = {
 
 // --- templated resolvers (added in Tasks 4-5) -------------------------------
 
+const MIME = {
+  '.json': 'application/json', '.jsonld': 'application/ld+json',
+  '.ttl': 'text/turtle', '.md': 'text/markdown', '.html': 'text/html', '.txt': 'text/plain',
+};
+function mimeFor(path) {
+  const dot = path.lastIndexOf('.');
+  return dot === -1 ? 'text/plain' : (MIME[path.slice(dot).toLowerCase()] || 'text/plain');
+}
+
+// WAC-check BEFORE storage.exists so a denied read is indistinguishable from
+// not-found where existence is privileged (spec §4, mirrors lws_linkset).
+async function requireRead(ctx, path, uri) {
+  if (!(await wac(ctx, path, AccessMode.READ))) {
+    throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `access denied: read ${uri}`);
+  }
+}
+function requireExists(exists, uri) {
+  if (!exists) throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`);
+}
+
+async function readResourceBody(path, ctx, uri) {
+  await requireRead(ctx, path, uri);
+  if (path.endsWith('/')) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `use lws://container for containers: ${uri}`);
+  requireExists(await storage.exists(path), uri);
+  const content = await storage.read(path);
+  let text = content.toString('utf8');
+  const MAX = 200_000;
+  if (text.length > MAX) text = text.slice(0, MAX);
+  // Sanitizer envelope wired in Task 8; raw text for now.
+  return { contents: [{ uri, mimeType: mimeFor(path), text }] };
+}
+
+async function readContainer(path, ctx, uri) {
+  const p = path.endsWith('/') ? path : path + '/';
+  await requireRead(ctx, p, uri);
+  requireExists(await storage.exists(p), uri);
+  const entries = await storage.listContainer(p);
+  return jsonContents(uri, {
+    container: p,
+    items: (entries || []).map(e => ({
+      name: e.name,
+      path: `${p}${e.name}${e.isDirectory ? '/' : ''}`,
+      isContainer: e.isDirectory,
+      size: e.size ?? null,
+      modified: e.modified ?? null,
+    })),
+  });
+}
+
+async function readLinkset(path, ctx, uri) {
+  await requireRead(ctx, path, uri);
+  requireExists(await storage.exists(path), uri);
+  const isContainer = path.endsWith('/');
+  const declared = await readDeclaredTypes(storage, path);
+  const shapes = await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path));
+  const ls = generateLinkset(buildUrl(ctx, path), {
+    parentUrl: buildUrl(ctx, parentPath(path)),
+    isContainer, describedByShapes: shapes, declaredTypes: declared,
+  });
+  return jsonContents(uri, ls, 'application/linkset+json');
+}
+
+async function readMeta(path, ctx, uri) {
+  await requireRead(ctx, path, uri);
+  requireExists(await storage.exists(path), uri);
+  const s = await storage.stat(path);
+  return jsonContents(uri, {
+    path, isContainer: path.endsWith('/'),
+    size: s?.size ?? null, modified: s?.mtime ?? null,
+  });
+}
+
+async function readAcl(path, ctx, uri) {
+  // Reading the ACL document itself requires Control on the resource.
+  if (!(await wac(ctx, path, AccessMode.CONTROL))) {
+    throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `access denied: control ${uri}`);
+  }
+  const aclPath = path.endsWith('/') ? path + '.acl' : path + '.acl';
+  if (!(await storage.exists(aclPath))) {
+    return jsonContents(uri, { path, aclPath, exists: false, authorizations: [] });
+  }
+  const content = await storage.read(aclPath);
+  const auths = await parseAcl(content.toString('utf8'), buildUrl(ctx, aclPath));
+  return jsonContents(uri, {
+    path, aclPath, exists: true,
+    authorizations: auths.map(a => ({
+      agents: a.agents || [],
+      agentClasses: a.agentClasses || [],
+      modes: (a.modes || []).map(m => m.split('#').pop()),
+      isDefault: !!a.default,
+    })),
+  });
+}
+
 const KIND = {
-  // 'resource','container','linkset','meta','acl' added in Task 4;
+  resource: readResourceBody,
+  container: readContainer,
+  linkset: readLinkset,
+  meta: readMeta,
+  acl: readAcl,
   // 'skill' added in Task 5.
 };
 
