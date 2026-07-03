@@ -6,12 +6,28 @@ import assert from 'node:assert/strict';
 import { parseUri } from '../src/mcp/uri.js';
 import { listResourceTemplates, listFixedResources, RESOLVERS, readResource } from '../src/mcp/resources.js';
 import { SURFACE_TEMPLATES, SURFACE_FIXED } from '../src/mcp/surface.js';
-import { startLwsPod, ownerCtx, putFile } from './helpers.js';
+import { startLwsPod, ownerCtx, putFile, putShape } from './helpers.js';
 import { callTool } from '../src/mcp/tools.js';
-import { sanitizeTypes } from '../src/mcp/sanitize.js';
+import { sanitizeTypes, sanitizeDeep } from '../src/mcp/sanitize.js';
 import { readDeclaredTypes } from '../src/lws/type-metadata.js';
+import { ResourceError } from '../src/mcp/errors.js';
 import * as storage from '../src/storage/filesystem.js';
 import { generateOwnerAcl, serializeAcl } from '../src/wac/parser.js';
+
+const NOTE_SHAPE = {
+  '@context': { sh: 'http://www.w3.org/ns/shacl#', ex: 'http://ex/' },
+  '@id': 'http://ex/NoteShape', '@type': 'sh:NodeShape',
+  'sh:targetClass': { '@id': 'http://ex/Note' },
+  'sh:property': {
+    '@id': '_:p1', 'sh:path': { '@id': 'http://ex/title' }, 'sh:minCount': 1,
+    'sh:severity': { '@id': 'http://www.w3.org/ns/shacl#Violation' },
+    'sh:message': 'title required',
+  },
+};
+const note = (base, path, title) => JSON.stringify({
+  '@context': { ex: 'http://ex/' }, '@id': `${base}${path}`, '@type': 'ex:Note',
+  ...(title ? { 'http://ex/title': title } : {}),
+});
 
 const RPC = { INVALID_PARAMS: -32602, INTERNAL_ERROR: -32603, ACCESS_DENIED: -32002 };
 
@@ -132,4 +148,65 @@ test('#2 MCP write validates types to absolute URIs (garbage not persisted)', as
   assert.equal(res.isError, false);
   const stored = await readDeclaredTypes(storage, `/${p.podName}/typed`);
   assert.deepEqual(stored, ['http://ok/T', 'ftp://x/'], 'only absolute-URI types persist; free text is dropped');
+});
+
+// --- #1: put_typed_resource must not mutate .meta on a rejected write --------
+
+test('#1 a rejected put_typed_resource leaves the existing .meta intact (no clobber/dangling shape)', async (t) => {
+  const p = await startLwsPod(t);
+  const ctx = { ...ownerCtx(p), lwsEnabled: true };
+  const shapeUrl = await putShape(p, `/${p.podName}/shapes/note`, NOTE_SHAPE);
+  const metaPath = `/${p.podName}/x.meta`;
+  await storage.write(metaPath, Buffer.from(JSON.stringify({ '@id': `${p.base}/${p.podName}/x`, keep: 'ME' })));
+
+  const res = await callTool('put_typed_resource', {
+    path: `/${p.podName}/x`, content: note(p.base, `/${p.podName}/x`), // no title → violates
+    contentType: 'application/ld+json', describedby: shapeUrl,
+  }, ctx);
+
+  assert.equal(res.isError, true, 'shape-violating write is rejected');
+  const meta = JSON.parse((await storage.read(metaPath)).toString('utf8'));
+  assert.equal(meta.keep, 'ME', 'pre-existing .meta content must survive a rejected write');
+  assert.equal(meta.describedby, undefined, 'a rejected write must not leave a dangling describedby');
+});
+
+test('#1 a successful put_typed_resource merges describedby without dropping prior .meta keys', async (t) => {
+  const p = await startLwsPod(t);
+  const ctx = { ...ownerCtx(p), lwsEnabled: true };
+  const shapeUrl = await putShape(p, `/${p.podName}/shapes/note`, NOTE_SHAPE);
+  const metaPath = `/${p.podName}/y.meta`;
+  await storage.write(metaPath, Buffer.from(JSON.stringify({ '@id': `${p.base}/${p.podName}/y`, keep: 'ME' })));
+
+  const res = await callTool('put_typed_resource', {
+    path: `/${p.podName}/y`, content: note(p.base, `/${p.podName}/y`, 'hi'), // has title → conforms
+    contentType: 'application/ld+json', describedby: shapeUrl,
+  }, ctx);
+
+  assert.equal(res.isError, false);
+  const meta = JSON.parse((await storage.read(metaPath)).toString('utf8'));
+  assert.equal(meta.keep, 'ME', 'prior .meta keys are preserved (merge, not clobber)');
+  assert.equal(meta.describedby, shapeUrl, 'the shape is declared on success');
+});
+
+// --- #7: federated (call_remote_pod) content is sanitized -------------------
+
+test('#7 sanitizeDeep strips hidden chars from every string in a nested payload', () => {
+  const dirty = { content: [{ type: 'text', text: 'a​b' }], meta: { k: '‮evil' } };
+  assert.deepEqual(sanitizeDeep(dirty), { content: [{ type: 'text', text: 'ab' }], meta: { k: 'evil' } });
+});
+
+// --- #9: resource-read failures carry model-readable content, like tools -----
+
+test('#9 a ResourceError carries the same content[] teaching shape as a tool error', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/secret`, 'x');   // owner-only, no public ACL
+  // Anonymous read → denied; the error must expose content[] the model reads.
+  await assert.rejects(
+    () => readResource(`lws://resource/${p.podName}/secret`, { origin: p.origin, webId: null }),
+    (e) => e instanceof ResourceError
+      && Array.isArray(e.data?.content)
+      && /access denied/i.test(e.data.content[0].text)
+      && e.data.isError === true,
+    'resource-read failures must carry isError + content[] like tool errors',
+  );
 });

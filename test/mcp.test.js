@@ -110,10 +110,14 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(body.result.content[0].text, /wrote/);
   });
 
-  it('lws://resource returns the written content', async () => {
+  it('lws://resource returns the written content (enveloped as untrusted data)', async () => {
     const body = await readResource('lws://resource/mcptest/public/hello.txt', { token });
     assert.ok(!body.error, body.error?.message);
-    assert.strictEqual(body.result.contents[0].text, 'hi');
+    // v2 wraps resource bodies in the untrusted-content envelope (anti prompt-
+    // injection) — the payload is inside the fence, not the raw string.
+    const text = body.result.contents[0].text;
+    assert.match(text, /BEGIN untrusted pod content/);
+    assert.match(text, /\nhi\n/);
   });
 
   it('lws://container lists the container', async () => {

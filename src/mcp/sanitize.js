@@ -47,3 +47,18 @@ export function sanitizeField(s) {
 export function sanitizeTypes(arr) {
   return Array.isArray(arr) ? arr.map(stripHidden) : [];
 }
+
+// Recursively strip hidden chars from every string in an arbitrary JSON value.
+// For federated content (call_remote_pod's remote_result) — the least-trusted
+// source on the pod — where the shape is a foreign MCP result, not a body we
+// can envelope (review #7).
+export function sanitizeDeep(value) {
+  if (typeof value === 'string') return stripHidden(value);
+  if (Array.isArray(value)) return value.map(sanitizeDeep);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = sanitizeDeep(v);
+    return out;
+  }
+  return value;
+}
