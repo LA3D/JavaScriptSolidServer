@@ -6,8 +6,8 @@ import { startLwsPod, ownerCtx } from './helpers.js';
 test('tool registry is the 7 core + 2 convenience set (<= 9)', () => {
   const names = listToolsForRpc().map(t => t.name).sort();
   assert.deepEqual(names, [
-    'call_remote_pod', 'create_resource', 'delete_resource', 'describe_resource',
-    'lws_type_search', 'put_typed_resource', 'subscribe', 'write_acl', 'write_resource',
+    'create_resource', 'delete_resource', 'describe_resource',
+    'lws_type_search', 'put_typed_resource', 'read_remote_resource', 'subscribe', 'write_acl', 'write_resource',
   ]);
 });
 

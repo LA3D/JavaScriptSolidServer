@@ -77,14 +77,14 @@ describe('MCP server (--mcp enabled)', () => {
     const names = body.result.tools.map(t => t.name);
     for (const expected of [
       'write_resource', 'create_resource', 'delete_resource',
-      'write_acl', 'subscribe', 'lws_type_search', 'call_remote_pod'
+      'write_acl', 'subscribe', 'lws_type_search', 'read_remote_resource'
     ]) {
       assert.ok(names.includes(expected), `missing tool: ${expected}`);
     }
     for (const removed of [
       'list_resources', 'read_resource', 'head_resource', 'lws_linkset', 'read_acl',
       'list_skills', 'get_skill', 'get_pod_skill', 'pod_info', 'lws_storage_description',
-      'list_docs', 'read_docs'
+      'list_docs', 'read_docs', 'call_remote_pod'
     ]) {
       assert.ok(!names.includes(removed), `tool should have been removed: ${removed}`);
     }
@@ -319,18 +319,16 @@ describe('MCP server (--mcp enabled)', () => {
       'resource ACL should grant the owner Control');
   });
 
-  // --- call_remote_pod (#495) ---
+  // --- read_remote_resource (#495, retired call_remote_pod's RPC proxy in
+  // Task 6 — federation is now a thin affordance-driven GET of a remote
+  // real-URI resource, not an arbitrary {tool,arguments} invocation) ---
 
-  it('call_remote_pod denied without federation gate access', async () => {
+  it('read_remote_resource denied without federation gate access', async () => {
     const { body } = await rpc({
       jsonrpc: '2.0', id: 210, method: 'tools/call',
       params: {
-        name: 'call_remote_pod',
-        arguments: {
-          pod_url: 'http://example.invalid',
-          tool: 'lws_type_search',
-          arguments: {}
-        }
+        name: 'read_remote_resource',
+        arguments: { url: 'http://example.invalid/x' }
       }
     });  // no token
     assert.ok(body.result.isError);
@@ -338,7 +336,7 @@ describe('MCP server (--mcp enabled)', () => {
     assert.match(body.result.content[0].text, /federation/i);
   });
 
-  it('call_remote_pod hits its own /mcp when gated open', async () => {
+  it('read_remote_resource fetches its own public resource when gated open', async () => {
     // Federation gate lives at <agent-pod>/private/federation/. For the
     // mcptest pod owner that's /mcptest/private/federation/. Create the
     // container, then grant AuthenticatedAgent Write there.
@@ -366,26 +364,33 @@ describe('MCP server (--mcp enabled)', () => {
       }
     }, { token });
 
-    // Now call our own MCP back at /mcp invoking lws_type_search
+    // Publish a resource under /mcptest/public/ (foaf:Agent Read by default,
+    // per the earlier write_acl round-trip test), then federate-read it by
+    // its own real URL — self-federation, no remote server needed.
+    const wr = await rpc({
+      jsonrpc: '2.0', id: 223, method: 'tools/call',
+      params: {
+        name: 'write_resource',
+        arguments: { path: '/mcptest/public/federated.txt', content: 'federated-hello', contentType: 'text/plain' }
+      }
+    }, { token });
+    assert.strictEqual(wr.body.result.isError, false, wr.body.result.content?.[0]?.text);
+
     const base = getBaseUrl();
     const { body } = await rpc({
       jsonrpc: '2.0', id: 222, method: 'tools/call',
       params: {
-        name: 'call_remote_pod',
-        arguments: {
-          pod_url: base,
-          tool: 'lws_type_search',
-          arguments: {}
-        }
+        name: 'read_remote_resource',
+        arguments: { url: `${base}/mcptest/public/federated.txt` }
       }
     }, { token });
     assert.strictEqual(body.result.isError, false, body.result.content?.[0]?.text);
     const payload = JSON.parse(body.result.content[0].text);
-    assert.strictEqual(payload.depth, 1);
-    assert.ok(payload.remote_result);
+    assert.strictEqual(payload.status, 200);
+    assert.match(payload.body, /federated-hello/);
   });
 
-  it('call_remote_pod enforces depth cap', async () => {
+  it('read_remote_resource enforces depth cap', async () => {
     // Force an inbound MCP-Federation-Depth header so the next hop trips MAX
     const res = await request('/mcp', {
       method: 'POST',
@@ -397,12 +402,8 @@ describe('MCP server (--mcp enabled)', () => {
       body: JSON.stringify({
         jsonrpc: '2.0', id: 230, method: 'tools/call',
         params: {
-          name: 'call_remote_pod',
-          arguments: {
-            pod_url: getBaseUrl(),
-            tool: 'lws_type_search',
-            arguments: {}
-          }
+          name: 'read_remote_resource',
+          arguments: { url: `${getBaseUrl()}/mcptest/public/federated.txt` }
         }
       })
     });

@@ -61,9 +61,9 @@ export function sanitizeJsonLeaves(v) {
 }
 
 // Recursively strip hidden chars from every string in an arbitrary JSON value.
-// For federated content (call_remote_pod's remote_result) — the least-trusted
-// source on the pod — where the shape is a foreign MCP result, not a body we
-// can envelope (review #7).
+// For federated content (read_remote_resource's body) — the least-trusted
+// source on the pod — where the shape is a foreign resource representation,
+// not a body we can envelope (review #7).
 export function sanitizeDeep(value) {
   if (typeof value === 'string') return stripHidden(value);
   if (Array.isArray(value)) return value.map(sanitizeDeep);

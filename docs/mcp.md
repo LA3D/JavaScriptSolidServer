@@ -87,7 +87,7 @@ Nine tools: seven core + two convenience.
 | `write_acl` | persist a structured ACL to the resource's `.acl` | Control + anti-lockout |
 | `lws_type_search` | CNF `type` (+ `describedby`) query, WAC-filtered, no-oracle | reuses the authorized-resources walk |
 | `subscribe` | SSE stream of `resource_changed` events, WAC-filtered per event | Read per event |
-| `call_remote_pod` | forward an MCP `tools/call` to another pod | caller needs `acl:Write` on `<pod>/private/federation/`; depth-capped at 3 |
+| `read_remote_resource` | GET a resource on another pod by its real URL (incl. that pod's storage description) | caller needs `acl:Write` on `<pod>/private/federation/`; depth-capped at 3 |
 
 Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) route through the shared LWS admission core (SHACL validation → write → type-capture) — the same enforcement path as HTTP PUT/POST. Pass a `types` array (the `Link: rel="type"` equivalent) to declare server-managed types.
 
@@ -124,7 +124,9 @@ curl -N http://localhost:4443/mcp -H "Content-Type: application/json" -H "Author
 
 ### Federation
 
-`call_remote_pod` forwards a `tools/call` to another pod; WAC-gated on both ends, depth-capped at 3. Foreign WebIDs cannot initiate federation from this pod (no local gate path). Grant an agent `acl:Write` on `/private/federation/` to delegate outbound calls.
+Federation is a thin, affordance-driven read, not an RPC proxy: `read_remote_resource({ url })` GETs a resource on another pod by its real URL — including that pod's `/.well-known/lws-storage` description — and returns the (deep-sanitized) representation. The agent then follows *that* pod's own typed links and `@context` to keep operating it, the same way it operates this one; there's no `{tool, arguments}` pair to forward.
+
+Outbound calls are WAC-gated at the caller's own pod: the caller needs `acl:Write` on `<pod>/private/federation/`, and the call is depth-capped at 3 via the `MCP-Federation-Depth` header. Foreign WebIDs cannot initiate federation from this pod (no local gate path). A remote pod is the least-trusted content source, so the fetched body is deep-sanitized (`sanitizeDeep`) before it reaches the model.
 
 ## Error / teaching model
 
@@ -166,7 +168,7 @@ If the proposed ACL doesn't grant `Control` to the caller, `write_acl` refuses. 
 - **`update_resource` (PATCH)** — SPARQL Update / N3 patches. Read-modify-write through the tools is the workaround.
 - **`resources/list` child enumeration** — v1 lists fixed resources + templates only, not WAC-readable container children (deferred behind a page-bound).
 - **Skills over the MCP Resources *primitive* (SEP-2640)** — skills are exposed as `lws://skill` resources today; aligning to the experimental SEP is deferred until it stabilizes.
-- **Pod-resident federation credentials** — every `call_remote_pod` carries its own auth.
+- **Authenticated federation reads** — `read_remote_resource` fetches anonymously; it carries no per-call auth, so it can only see what the remote pod exposes to `foaf:Agent`/anonymous. Reading a remote agent-scoped resource is not yet supported.
 
 ## Why this exists
 

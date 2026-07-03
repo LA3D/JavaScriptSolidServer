@@ -156,7 +156,7 @@ test('#1 a successful put_typed_resource merges describedby without dropping pri
   assert.equal(meta.describedby, shapeUrl, 'the shape is declared on success');
 });
 
-// --- #7: federated (call_remote_pod) content is sanitized -------------------
+// --- #7: federated (read_remote_resource) content is sanitized --------------
 
 test('#7 sanitizeDeep strips hidden chars from every string in a nested payload', () => {
   const dirty = { content: [{ type: 'text', text: 'a​b' }], meta: { k: '‮evil' } };
