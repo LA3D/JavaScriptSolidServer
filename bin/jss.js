@@ -95,6 +95,7 @@ program
   .option('--lws', 'Enable the W3C Linked Web Storage surface (application/lws+json containers)')
   .option('--lws-type-index', 'Enable the LWS Type Index/Search services (default on when --lws)')
   .option('--no-lws-type-index', 'Disable the LWS Type Index/Search services')
+  .option('--lws-profile-index <path>', 'Advertise a ProfileIndexService at this pod path in the storage description (requires --lws)')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -227,6 +228,7 @@ program
         conneg: config.conneg,
         lws: config.lws,
         lwsTypeIndex: config.lwsTypeIndex,
+        lwsProfileIndex: config.lwsProfileIndex,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,

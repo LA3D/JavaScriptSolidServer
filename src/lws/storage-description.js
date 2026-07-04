@@ -35,10 +35,10 @@ export function generateStorageDescription(storageRootUrl, services = []) {
  * resource (read at /.well-known/lws-storage) both call this so the advertised
  * service set can never drift between the two surfaces.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean}} flags
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null}} flags
  * @returns {object}
  */
-export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false } = {}) {
+export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null } = {}) {
   const lwsStoragePath = '/.well-known/lws-storage';
   const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
   if (typeIndexEnabled) {
@@ -47,6 +47,9 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
   }
   if (notificationsEnabled) {
     services.push({ type: 'NotificationService', serviceEndpoint: `${origin}/notification/api` });
+  }
+  if (profileIndexPath) {
+    services.push({ type: 'ProfileIndexService', serviceEndpoint: `${origin}${profileIndexPath}` });
   }
   return generateStorageDescription(`${origin}/`, services);
 }
