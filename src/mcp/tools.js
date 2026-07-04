@@ -19,7 +19,7 @@ import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
 import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
-import { describedbyTargets } from '../lws/constraint.js';
+import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 import { sanitizeBody, sanitizeTypes, sanitizeDeep } from './sanitize.js';
 import { readBounded, MAX_BODY_BYTES } from './read.js';
@@ -487,9 +487,10 @@ async function describe_resource({ path }, ctx) {
   }
   const declared = sanitizeTypes(await readDeclaredTypes(storage, path));
   const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
+  const conformsTo = sanitizeTypes(await conformsToTargets(storage, path + '.meta', buildUrl(ctx, path)));
   const linkset = generateLinkset(buildUrl(ctx, path), {
     parentUrl: buildUrl(ctx, parentPath(path)),
-    isContainer, describedByShapes: shapes, declaredTypes: declared,
+    isContainer, describedByShapes: shapes, declaredTypes: declared, conformsTo,
   });
   return toolJson({ path, isContainer, body, truncated, types: declared, linkset });
 }
