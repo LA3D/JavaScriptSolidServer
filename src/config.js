@@ -36,6 +36,7 @@ export const defaults = {
   conneg: false,
   lws: false,
   lwsTypeIndex: true,
+  lwsProfileIndex: null,
   notifications: false,
 
   // Identity Provider
@@ -176,6 +177,7 @@ const envMap = {
   JSS_CONNEG: 'conneg',
   JSS_LWS: 'lws',
   JSS_LWS_TYPE_INDEX: 'lwsTypeIndex',
+  JSS_LWS_PROFILE_INDEX: 'lwsProfileIndex',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
