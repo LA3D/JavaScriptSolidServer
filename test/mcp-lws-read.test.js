@@ -80,6 +80,34 @@ test('the storage-description resource mirrors /.well-known/lws-storage', async 
   assert.equal(resourceBody.type, 'Storage');
 });
 
+// Same drift-guard as above, for lwsProfileIndex: proves the HTTP route
+// (src/server.js ~107/1048) and the MCP ctx (src/mcp/index.js:238, reading
+// request.profileIndexPath) both advertise the same ProfileIndexService
+// entry rather than one of them silently omitting it.
+test('the storage-description resource mirrors /.well-known/lws-storage with lwsProfileIndex set', async (t) => {
+  await startTestServer({ lws: true, mcp: true, lwsProfileIndex: '/alice/profiles/index.jsonld' });
+  t.after(async () => { await stopTestServer(); });
+  const base = getBaseUrl();
+
+  const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+  const httpBody = await httpRes.json();
+
+  const mcpRes = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'resources/read',
+      params: { uri: `${base}/.well-known/lws-storage` },
+    }),
+  });
+  const mcpJson = await mcpRes.json();
+  const resourceBody = JSON.parse(mcpJson.result.contents[0].text);
+
+  const profileSvc = httpBody.service.find((s) => s.type === 'ProfileIndexService');
+  assert.deepEqual(profileSvc, { type: 'ProfileIndexService', serviceEndpoint: `${base}/alice/profiles/index.jsonld` });
+  assert.deepEqual(resourceBody.service, httpBody.service);
+});
+
 // Edge combo: liveReload on, notifications explicitly off. The
 // NotificationService plugin is still registered in this combo
 // (notificationsEnabled || liveReloadEnabled, src/server.js ~464), and the
