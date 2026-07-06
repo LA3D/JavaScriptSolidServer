@@ -52,7 +52,7 @@ async function readPodInfo(ctx, uri) {
     context: `${ctx.origin}/.well-known/lws/context`,
     vocabulary: `${ctx.origin}/.well-known/lws/vocab`,
     capabilities: { crud: true, acl: true, skills: true, resources: true, federation: true },
-    hint: 'Resources are real https:// URLs returning JSON-LD. Read one, then follow its typed links (rel="up", describedby, and edges in the body) and resolve terms via @context (see `context`/`vocabulary`). Start at `storageDescription`.',
+    hint: 'Resources are real https:// URLs returning JSON-LD. Read one with the read_resource tool, then follow its typed links (up, describedby, and edges in the body) and resolve terms via @context (see `context`/`vocabulary`). Start at `storageDescription`. This substrate speaks RFC 9264 linksets — get a resource\'s typed links via describe_resource, or negotiate application/linkset+json on its URL.',
     skill: skillVisible ? { path: skill.path, format: skill.format } : null,
   });
 }

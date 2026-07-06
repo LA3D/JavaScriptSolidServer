@@ -13,6 +13,7 @@ import { ResourceError } from '../src/mcp/errors.js';
 import { startLwsPod, ownerCtx, putFile } from './helpers.js';
 import { generatePublicReadAcl, serializeAcl } from '../src/wac/parser.js';
 import * as storage from '../src/storage/filesystem.js';
+import { buildStorageDescription } from '../src/lws/storage-description.js';
 import http from 'node:http';
 
 test('parseRemoteLinks extracts json-ld#context, ld+json alternate, and linkset rels', () => {
@@ -175,5 +176,34 @@ test('index-shadowed container omits rel="linkset"; plain container keeps it (co
   assert.doesNotMatch(shadowed.headers.get('link') || '', /rel="linkset"/);
   assert.match(shadowed.headers.get('link') || '', /storageDescription/);   // still advertised
   const plain = await fetch(`${p.origin}/${p.podName}/plain/`);
+  assert.match(plain.headers.get('link') || '', /rel="linkset"/);
+});
+
+test('storage description names RFC 9264 linkset negotiation (priming-ablation steering)', () => {
+  const sd = buildStorageDescription('https://pod.example', {});
+  assert.equal(sd.linkset.mediaType, 'application/linkset+json');
+  assert.equal(sd.linkset.conformsTo, 'https://www.rfc-editor.org/rfc/rfc9264');
+  assert.match(sd.linkset.hint, /RFC 9264/);
+  assert.equal(sd.type, 'Storage');                       // spec-required shape intact
+  assert.ok(Array.isArray(sd.service));
+});
+
+test('pod-info hint primes RFC 9264 + read_resource', async (t) => {
+  const p = await startLwsPod(t);
+  const res = await callTool('read_resource', { uri: `${p.origin}/.well-known/mcp/pod-info` }, ownerCtx(p));
+  const info = JSON.parse(res.content[0].text);
+  assert.match(info.hint, /RFC 9264/);
+  assert.match(info.hint, /read_resource/);
+});
+
+test('HEAD: index-shadowed container omits rel="linkset"; plain container keeps it', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/shadowed/index.html`, '<html></html>', { publicRead: true });
+  await putFile(p, `/${p.podName}/plain/x.txt`, 'x', { publicRead: true });
+  await storage.write(`/${p.podName}/shadowed/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/shadowed/`)));
+  await storage.write(`/${p.podName}/plain/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/plain/`)));
+  const shadowed = await fetch(`${p.origin}/${p.podName}/shadowed/`, { method: 'HEAD' });
+  assert.doesNotMatch(shadowed.headers.get('link') || '', /rel="linkset"/);
+  const plain = await fetch(`${p.origin}/${p.podName}/plain/`, { method: 'HEAD' });
   assert.match(plain.headers.get('link') || '', /rel="linkset"/);
 });
