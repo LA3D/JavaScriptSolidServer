@@ -244,7 +244,8 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled
+                lwsEnabled: request.lwsEnabled,
+                suppressLinkset: true
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -259,7 +260,8 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled
+                lwsEnabled: request.lwsEnabled,
+                suppressLinkset: true
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -280,7 +282,8 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        lwsEnabled: request.lwsEnabled
+        lwsEnabled: request.lwsEnabled,
+        suppressLinkset: true
       });
 
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -890,6 +893,7 @@ export async function handleHead(request, reply) {
   let contentType;
   let headEtag = stats.etag;
   let isMashlibResponse = false;
+  let suppressLinkset = false;
 
   if (stats.isDirectory) {
     const indexPath = storagePath.endsWith('/') ? `${storagePath}index.html` : `${storagePath}/index.html`;
@@ -933,6 +937,10 @@ export async function handleHead(request, reply) {
       // Mirror GET: containers with index.html use the index file's ETag
       const indexStats = await storage.stat(indexPath);
       headEtag = indexStats?.etag || stats.etag;
+      // Mirror GET's rel="linkset" suppression: index.html shadows every
+      // Accept with text/html, so advertising linkset conneg here is a
+      // false affordance (cold-probe defect c).
+      suppressLinkset = true;
     } else if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
       // Container listing via mashlib — suffix the ETag (#456)
       headEtag = stats.etag.replace(/"$/, '-html"');
@@ -995,6 +1003,7 @@ export async function handleHead(request, reply) {
     resourceUrl,
     connegEnabled,
     mashlibEnabled: request.mashlibEnabled,
+    suppressLinkset,
     lwsEnabled: request.lwsEnabled
   });
 

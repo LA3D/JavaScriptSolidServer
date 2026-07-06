@@ -109,15 +109,19 @@ export function getCorsHeaders(origin) {
  * @param {object} options
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
   };
   if (lwsEnabled && resourceUrl) {
-    const sd = `<${storageDescriptionUrl(resourceUrl)}>; rel="${LWS_STORAGE_DESC_REL}"`;
-    const ls = `<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`;
-    const extra = `${sd}, ${ls}`;
+    // An index.html-shadowed container serves text/html for every Accept, so
+    // advertising linkset conneg there is a false affordance (cold-probe
+    // defect c) — suppress the rel where conneg won't be honored. The
+    // storage-description rel points at a DIFFERENT URL and stays.
+    const parts = [`<${storageDescriptionUrl(resourceUrl)}>; rel="${LWS_STORAGE_DESC_REL}"`];
+    if (!suppressLinkset) parts.push(`<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`);
+    const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
   }
   return headers;

@@ -11,6 +11,8 @@ import { callTool, TOOLS, listToolsForRpc } from '../src/mcp/tools.js';
 import { readResource } from '../src/mcp/resources.js';
 import { ResourceError } from '../src/mcp/errors.js';
 import { startLwsPod, ownerCtx, putFile } from './helpers.js';
+import { generatePublicReadAcl, serializeAcl } from '../src/wac/parser.js';
+import * as storage from '../src/storage/filesystem.js';
 import http from 'node:http';
 
 test('parseRemoteLinks extracts json-ld#context, ld+json alternate, and linkset rels', () => {
@@ -155,4 +157,23 @@ test('GET /mcp answers 405 with Allow: POST (not a misleading 404)', async (t) =
   assert.match(r.headers.get('allow') || '', /POST/);
   const body = await r.json();
   assert.match(body.hint, /POST JSON-RPC/);
+});
+
+test('index-shadowed container omits rel="linkset"; plain container keeps it (cold-probe defect c)', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/shadowed/index.html`, '<html></html>', { publicRead: true });
+  await putFile(p, `/${p.podName}/plain/x.txt`, 'x', { publicRead: true });
+  // `publicRead` on putFile grants read on the *file*, not the container —
+  // the container GET (which is what serves index.html / the listing) is
+  // WAC-checked against the container URL itself, and the pod-root default
+  // ACL only inherits Read to the owner, not the public (generateOwnerAcl).
+  // Grant the containers their own public-read ACL directly so the
+  // anonymous fetches below reach handleGet instead of 401ing.
+  await storage.write(`/${p.podName}/shadowed/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/shadowed/`)));
+  await storage.write(`/${p.podName}/plain/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/plain/`)));
+  const shadowed = await fetch(`${p.origin}/${p.podName}/shadowed/`);
+  assert.doesNotMatch(shadowed.headers.get('link') || '', /rel="linkset"/);
+  assert.match(shadowed.headers.get('link') || '', /storageDescription/);   // still advertised
+  const plain = await fetch(`${p.origin}/${p.podName}/plain/`);
+  assert.match(plain.headers.get('link') || '', /rel="linkset"/);
 });
