@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { callTool, listToolsForRpc } from '../src/mcp/tools.js';
 import { startLwsPod, ownerCtx } from './helpers.js';
 
-test('tool registry is the 7 core + 2 convenience set (<= 9)', () => {
+test('tool registry is the model-driven read set (exactly 10)', () => {
   const names = listToolsForRpc().map(t => t.name).sort();
   assert.deepEqual(names, [
-    'create_resource', 'delete_resource', 'describe_resource',
-    'lws_type_search', 'put_typed_resource', 'read_remote_resource', 'subscribe', 'write_acl', 'write_resource',
+    'create_resource', 'delete_resource', 'describe_resource', 'list_resources',
+    'lws_type_search', 'put_typed_resource', 'read_resource', 'subscribe',
+    'write_acl', 'write_resource',
   ]);
 });
 
@@ -27,4 +28,20 @@ test('put_typed_resource writes + captures type; describe_resource returns body+
   assert.ok(d.body !== undefined);
   assert.ok(d.linkset);
   assert.ok(d.types.includes('http://ex/Thing'));
+});
+
+test('describe_resource accepts a real https:// uri for a local resource', async (t) => {
+  const pod = await startLwsPod(t);
+  const ctx = { ...ownerCtx(pod), lwsEnabled: true };
+  await callTool('put_typed_resource', { path: `/${pod.podName}/things/y`, content: '{}', contentType: 'application/ld+json' }, ctx);
+  const desc = await callTool('describe_resource', { uri: `${pod.origin}/${pod.podName}/things/y` }, ctx);
+  assert.equal(desc.isError ?? false, false, JSON.stringify(desc));
+  assert.equal(JSON.parse(desc.content[0].text).path, `/${pod.podName}/things/y`);
+});
+
+test('describe_resource on a foreign uri teaches read_resource', async (t) => {
+  const pod = await startLwsPod(t);
+  const desc = await callTool('describe_resource', { uri: 'https://other.example/x' }, ownerCtx(pod));
+  assert.equal(desc.isError, true);
+  assert.match(desc.content[0].text, /read_resource/);
 });

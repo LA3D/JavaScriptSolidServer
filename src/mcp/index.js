@@ -225,7 +225,7 @@ export async function mcpPlugin(fastify, options = {}) {
         'this endpoint requires an audience-bound credential (LWS-CID or Solid-OIDC DPoP)');
     }
 
-    // Federation depth (used by read_remote_resource to enforce the cap)
+    // Federation depth (used by read_resource's remote arm to enforce the cap)
     const depthHdr = request.headers['mcp-federation-depth'];
     const federationDepth = depthHdr ? parseInt(depthHdr, 10) || 0 : 0;
 
@@ -269,5 +269,17 @@ export async function mcpPlugin(fastify, options = {}) {
     reply.header('Allow', 'POST, OPTIONS');
     reply.code(204);
     return null;
+  });
+
+  // MCP Streamable HTTP: this server does not offer the GET SSE stream, so a
+  // GET answers 405 (spec-prescribed) — never a 404 whose Allow omits POST,
+  // which reads as "no MCP here" to a discovering agent (cold-probe defect b).
+  fastify.get('/mcp', async (_request, reply) => {
+    reply.header('Allow', 'POST, OPTIONS');
+    reply.code(405);
+    return {
+      error: 'method not allowed',
+      hint: 'MCP endpoint — POST JSON-RPC 2.0 (protocol 2025-03-26). This server does not offer the GET SSE stream.'
+    };
   });
 }

@@ -51,5 +51,16 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
   if (profileIndexPath) {
     services.push({ type: 'ProfileIndexService', serviceEndpoint: `${origin}${profileIndexPath}` });
   }
-  return generateStorageDescription(`${origin}/`, services);
+  return {
+    ...generateStorageDescription(`${origin}/`, services),
+    // Steering, not spec vocabulary (unmapped in the LWS @context — the
+    // audience is a cold LLM agent reading JSON): RFC-9264-as-storage-metadata
+    // is LWS-new and outside model priors; the priming ablation (2026-07-04)
+    // showed one sentence naming the RFC flips agent behavior.
+    linkset: {
+      mediaType: 'application/linkset+json',
+      conformsTo: 'https://www.rfc-editor.org/rfc/rfc9264',
+      hint: 'This storage speaks RFC 9264: every resource serves a linkset of its typed links (up, type, describedby, conformsTo) — request the resource URL with Accept: application/linkset+json (rel="linkset").',
+    },
+  };
 }

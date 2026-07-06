@@ -24,7 +24,7 @@ test('a foreign-origin read is refused with a federation-steering error', async 
   const p = await startLwsPod(t);
   await assert.rejects(
     () => readResource('https://other.example/x', ownerCtx(p)),
-    (e) => e instanceof ResourceError && /remote|federation|read_remote/i.test(e.message),
+    (e) => e instanceof ResourceError && /not a local resource|read_resource/i.test(e.message),
   );
 });
 

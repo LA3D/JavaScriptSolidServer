@@ -21,8 +21,10 @@ import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeBody, sanitizeTypes, sanitizeDeep } from './sanitize.js';
+import { sanitizeBody, sanitizeTypes } from './sanitize.js';
 import { readBounded, MAX_BODY_BYTES } from './read.js';
+import { read_resource, list_resources } from './read-tools.js';
+import { isLocalUri, uriToPath } from './uri.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -303,85 +305,6 @@ function subscribe({ path }, ctx) {
   };
 }
 
-// --- federation (#495) ---
-
-// Conservative defaults locked in for v1. Future PRs may add more flexibility.
-//
-//   1. Federation gate is `<agent-pod>/private/federation/` — caller must
-//      have acl:Write there to initiate outbound federation. The agent's
-//      pod is derived from their WebID. Foreign WebIDs are denied (no
-//      local path to gate against).
-//   2. No pod-resident credential storage — every call carries its own
-//      credentials in the `auth` argument (or none for anonymous reads).
-//   3. Depth cap via MCP-Federation-Depth header, max 3.
-const MAX_FEDERATION_DEPTH = 3;
-
-function federationGatePathFor(webId, origin) {
-  if (!webId || !origin) return null;
-  if (!webId.startsWith(origin)) return null;  // foreign WebID — deny
-  const localPath = webId.slice(origin.length);
-  // Extract pod root: everything up to and including the segment before /profile/
-  const profileIdx = localPath.indexOf('/profile/');
-  const podPath = profileIdx > 0 ? localPath.slice(0, profileIdx + 1) : '/';
-  return podPath + 'private/federation/';
-}
-
-// read_remote_resource replaces the call_remote_pod RPC proxy (task 6): a
-// remote pod is read by its own real URL — including its storage
-// description — not invoked via an arbitrary {tool, arguments} pair. The
-// agent then follows the returned representation's own typed links +
-// @context to operate the remote pod from ITS OWN affordances, the same way
-// it operates this one.
-async function read_remote_resource({ url }, ctx) {
-  if (!url || typeof url !== 'string' || !/^https?:\/\//.test(url)) {
-    return toolError('absolute http(s) url required');
-  }
-
-  // Local WAC gate — derived from the agent's WebID. Foreign or
-  // anonymous identities can't federate. (Carried verbatim from the retired
-  // call_remote_pod handler.)
-  const gatePath = federationGatePathFor(ctx.webId, ctx.origin);
-  if (!gatePath) {
-    return toolError(
-      'access denied: federation requires a local WebID identity (anonymous and foreign identities cannot initiate outbound federation)'
-    );
-  }
-  if (!(await wac(ctx, gatePath, AccessMode.WRITE))) {
-    return toolError(
-      `access denied: write ${gatePath} (federation gate). Owner must grant acl:Write at this path to delegate outbound federation.`
-    );
-  }
-
-  // Depth cap
-  const depth = (ctx.federationDepth ?? 0) + 1;
-  if (depth > MAX_FEDERATION_DEPTH) {
-    return toolError(`federation depth exceeded (max ${MAX_FEDERATION_DEPTH})`);
-  }
-
-  let r;
-  try {
-    r = await fetch(url, {
-      headers: {
-        Accept: 'application/ld+json, application/lws+json, text/turtle, */*',
-        'MCP-Federation-Depth': String(depth)
-      },
-      signal: AbortSignal.timeout(30_000)
-    });
-  } catch (e) {
-    return toolError(`remote unreachable: ${e.message}`);
-  }
-  const body = await r.text();
-  // A remote pod is the least-trusted content source. Deep-strip hidden/bidi
-  // chars before its representation enters the model's context — the
-  // cross-agent injection vector (review #7).
-  return toolJson({
-    url,
-    status: r.status,
-    contentType: r.headers.get('content-type') || null,
-    body: sanitizeDeep(body)
-  });
-}
-
 // --- LWS-aware read tools ---
 //
 // These reuse collectAuthorizedResources — the SAME WAC-filtered walk the
@@ -470,8 +393,17 @@ function mergeDescribedby(priorBytes, id, describedby) {
 
 // Convenience: one read returning body + linkset + declared types together,
 // saving an agent 2-3 round-trips to orient on a resource.
-async function describe_resource({ path }, ctx) {
-  if (!path) return toolError('path required');
+async function describe_resource({ path, uri }, ctx) {
+  // uri-or-path: removes the "read by URI, write by path" asymmetry at the
+  // orientation tool. Local-only — a remote resource has no local linkset.
+  if (!path && uri) {
+    if (!isLocalUri(ctx.origin, uri)) {
+      return toolError(`describe_resource is local-only; use the read_resource tool for ${uri}`);
+    }
+    path = uriToPath(ctx.origin, uri);
+    if (path === null) return toolError(`bad resource uri: ${uri}`);
+  }
+  if (!path) return toolError('path or uri required');
   if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
   if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
   const isContainer = path.endsWith('/');
@@ -581,16 +513,19 @@ export const TOOLS = {
     } },
     handler: lws_type_search,
   },
-  read_remote_resource: {
-    description: 'Read a resource on ANOTHER pod by its real URL (including that pod\'s storage description). Then follow its typed links + @context — you operate a remote pod from its own affordances.',
+  read_resource: {
+    description: 'Read any resource by its real https:// URL — this pod\'s or another pod\'s (federation-gated). Returns the representation (JSON-LD with @context intact where the pod vouches for it) plus a `links` block of its header-borne affordances: up, describedby (SHACL shape), storageDescription locally; json-ld#context / alternate / linkset from a remote\'s Link headers. Follow the typed links and resolve terms via @context.',
     inputSchema: {
       type: 'object',
-      properties: {
-        url: { type: 'string' }
-      },
-      required: ['url']
+      properties: { uri: { type: 'string', description: 'Absolute http(s) URL.' } },
+      required: ['uri']
     },
-    handler: read_remote_resource
+    handler: read_resource
+  },
+  list_resources: {
+    description: 'List this pod\'s entry-point resources (storage description, pod-info, skills, LWS @context + vocabulary) and the real-URI resource template. Start here to discover the pod.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: list_resources
   },
   put_typed_resource: {
     description: 'Store a typed resource in one call: writes the body, captures LWS types (rel="type"), and optionally declares a describedby shape into the target .meta. Routes through SHACL admission.',
@@ -608,11 +543,14 @@ export const TOOLS = {
     handler: put_typed_resource,
   },
   describe_resource: {
-    description: "One-shot orientation on a resource: its body, declared types, and RFC 9264 linkset together.",
+    description: "One-shot orientation on a local resource (by path or real URL): its body, declared types, and RFC 9264 linkset together.",
     inputSchema: {
       type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path'],
+      properties: {
+        path: { type: 'string' },
+        uri: { type: 'string', description: "Alternative to path: the resource's real https:// URL (local only)." }
+      },
+      required: [],
     },
     handler: describe_resource,
   },
