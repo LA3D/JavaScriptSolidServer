@@ -60,7 +60,10 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
     linkset: {
       mediaType: 'application/linkset+json',
       conformsTo: 'https://www.rfc-editor.org/rfc/rfc9264',
-      hint: 'This storage speaks RFC 9264: every resource serves a linkset of its typed links (up, type, describedby, conformsTo) — request the resource URL with Accept: application/linkset+json (rel="linkset").',
+      // Wording is load-bearing: an unprimed cold agent inferred (2026-07-06
+      // probe) that members carry describedby/conformsTo — they live on the
+      // CONTAINER linkset; a member's affordance for them is its `up` edge.
+      hint: 'This storage speaks RFC 9264: every resource serves a linkset of its typed links — request the resource URL with Accept: application/linkset+json (rel="linkset"). A member linkset carries up/type; the governing describedby (SHACL shape) and conformsTo (profile) edges live on its CONTAINER\'s linkset — follow up.',
     },
   };
 }
