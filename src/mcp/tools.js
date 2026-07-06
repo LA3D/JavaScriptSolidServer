@@ -24,6 +24,7 @@ import { wac, buildUrl, parentPath } from './wac.js';
 import { sanitizeBody, sanitizeTypes } from './sanitize.js';
 import { readBounded, MAX_BODY_BYTES } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
+import { isLocalUri, uriToPath } from './uri.js';
 
 const ACL_NS = 'http://www.w3.org/ns/auth/acl#';
 const FOAF_AGENT = 'http://xmlns.com/foaf/0.1/Agent';
@@ -392,8 +393,17 @@ function mergeDescribedby(priorBytes, id, describedby) {
 
 // Convenience: one read returning body + linkset + declared types together,
 // saving an agent 2-3 round-trips to orient on a resource.
-async function describe_resource({ path }, ctx) {
-  if (!path) return toolError('path required');
+async function describe_resource({ path, uri }, ctx) {
+  // uri-or-path: removes the "read by URI, write by path" asymmetry at the
+  // orientation tool. Local-only — a remote resource has no local linkset.
+  if (!path && uri) {
+    if (!isLocalUri(ctx.origin, uri)) {
+      return toolError(`describe_resource is local-only; use the read_resource tool for ${uri}`);
+    }
+    path = uriToPath(ctx.origin, uri);
+    if (path === null) return toolError(`bad resource uri: ${uri}`);
+  }
+  if (!path) return toolError('path or uri required');
   if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
   if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
   const isContainer = path.endsWith('/');
@@ -533,11 +543,14 @@ export const TOOLS = {
     handler: put_typed_resource,
   },
   describe_resource: {
-    description: "One-shot orientation on a resource: its body, declared types, and RFC 9264 linkset together.",
+    description: "One-shot orientation on a local resource (by path or real URL): its body, declared types, and RFC 9264 linkset together.",
     inputSchema: {
       type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path'],
+      properties: {
+        path: { type: 'string' },
+        uri: { type: 'string', description: "Alternative to path: the resource's real https:// URL (local only)." }
+      },
+      required: [],
     },
     handler: describe_resource,
   },
