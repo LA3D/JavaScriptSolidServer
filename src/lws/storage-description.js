@@ -70,7 +70,7 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
     base.capability = [{
       // DX-PROF-CONNEG cnpr:http functional profile — the pod negotiates
       // representations by profile via Accept-Profile / Content-Profile.
-      type: 'https://www.w3.org/ns/dx/connegp/profile/http',
+      type: 'http://www.w3.org/ns/dx/connegp/profile/http',
       hint: 'This storage negotiates by profile (W3C Content Negotiation by Profile). Send Accept-Profile: <profile-uri> to select a representation; a resource lists its representations as canonical/alternate links in its RFC 9264 linkset (type=media, formats=profile).',
     }];
   }
