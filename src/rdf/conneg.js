@@ -98,6 +98,25 @@ function parseAcceptHeader(header) {
 }
 
 /**
+ * Parse an Accept-Profile header (DX-PROF-CONNEG cnpr:http). Values are
+ * angle-bracketed profile URIs with optional ;q= weights. Returns profile
+ * URIs ordered by q descending (stable for ties), brackets stripped.
+ */
+export function parseAcceptProfile(header) {
+  if (!header) return [];
+  const entries = String(header).split(',').map((s) => s.trim()).filter(Boolean);
+  const parsed = entries.map((e, i) => {
+    const [ref, ...params] = e.split(';').map((s) => s.trim());
+    const uri = ref.replace(/^</, '').replace(/>$/, '');
+    const qParam = params.find((p) => p.toLowerCase().startsWith('q='));
+    const q = qParam ? parseFloat(qParam.slice(2)) : 1.0;
+    return { uri, q: Number.isFinite(q) ? q : 1.0, i };
+  }).filter((p) => p.uri);
+  parsed.sort((a, b) => (b.q - a.q) || (a.i - b.i));
+  return parsed.map((p) => p.uri);
+}
+
+/**
  * Check if content type is RDF
  */
 export function isRdfType(contentType) {
