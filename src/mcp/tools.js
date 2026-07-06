@@ -316,9 +316,9 @@ async function lws_type_search(args, ctx) {
   let filter;
   try { filter = parseFilter({ body: args || {} }); }
   catch (e) { return toolError(`bad filter: ${e.message}`); }
-  const needDescribedby = Object.keys(filter.relations).length > 0;
+  const neededRelations = Object.keys(filter.relations);
   const resources = await collectAuthorizedResources({
-    agentWebId: ctx.webId, origin: ctx.origin, needDescribedby,
+    agentWebId: ctx.webId, origin: ctx.origin, neededRelations,
   });
   const matched = resources.filter((r) => matchesFilter(r, filter));
   return toolJson({
@@ -506,10 +506,11 @@ export const TOOLS = {
     handler: subscribe
   },
   lws_type_search: {
-    description: 'Search pod resources by LWS type (and describedby) — WAC-filtered, no-oracle.',
+    description: 'Search pod resources by LWS type, describedby, and/or conformsTo — WAC-filtered, no-oracle.',
     inputSchema: { type: 'object', properties: {
       type: { type: 'array', items: {}, description: 'CNF type filter (see LWS Type Search).' },
       describedby: { type: 'array', items: {}, description: 'CNF describedby (shape) filter.' },
+      conformsTo: { type: 'array', items: {}, description: 'CNF conformsTo (profile) filter.' },
     } },
     handler: lws_type_search,
   },

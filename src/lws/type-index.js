@@ -37,7 +37,7 @@ export function matchesTypeFilter(types, cnf) {
   return cnf.every((g) => g.some((t) => types.includes(t)));
 }
 
-export const INDEXED_RELATIONS = new Set(['describedby']);
+export const INDEXED_RELATIONS = new Set(['describedby', 'conformsTo']);
 const RESERVED_QUERY_KEYS = new Set(['page']);   // pagination refs, not relation filters
 
 // Push comma/array raw groups into `cnf`, enforcing the shared budget.

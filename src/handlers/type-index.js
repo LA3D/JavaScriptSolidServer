@@ -48,12 +48,13 @@ const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 // Same authorization story as authorizedTypeLists above: /types/search
 // is a virtual aggregate endpoint exempted from the blanket preHandler,
 // so the per-resource checkAccess()-and-drop loop here IS the authz.
-// describedby targets are resolved per-resource only when the filter
-// references them, to avoid an extra .meta read on every resource.
-async function authorizedResources(request, { needDescribedby = false } = {}) {
+// Indexed-relation targets (describedby, conformsTo) are resolved per-resource
+// only for the relations the filter actually references, to avoid an extra
+// .meta read on every resource.
+async function authorizedResources(request, { neededRelations = [] } = {}) {
   const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
   return collectAuthorizedResources({
-    agentWebId, needDescribedby,
+    agentWebId, neededRelations,
     buildId: (urlPath) => buildResourceUrl(request, urlPath),
   });
 }
@@ -90,8 +91,8 @@ export async function handleTypeSearch(request, reply) {
       .send({ type: 'about:blank', status, title: 'Bad Request', detail: e.message });
   }
 
-  const needDescribedby = Object.keys(filter.relations).length > 0;
-  const resources = await authorizedResources(request, { needDescribedby });
+  const neededRelations = Object.keys(filter.relations);
+  const resources = await authorizedResources(request, { neededRelations });
   const matched = resources.filter((r) => matchesFilter(r, filter));
   reply.header('Cache-Control', 'private, no-store');
   reply.type(LWS_JSON);
