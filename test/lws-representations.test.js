@@ -34,3 +34,15 @@ test('readRepresentations: missing .meta → empty', async () => {
   const reps = await readRepresentations(stubStorage(null), RES + '.meta', RES);
   assert.deepEqual(reps, { default: null, alternates: [] });
 });
+
+test('readRepresentations: unreadable .meta (read throws) → empty', async () => {
+  const storage = { async exists() { return true; }, async read() { throw new Error('EIO'); } };
+  const reps = await readRepresentations(storage, RES + '.meta', RES);
+  assert.deepEqual(reps, { default: null, alternates: [] });
+});
+
+test('readRepresentations: parse-corrupt .meta → empty', async () => {
+  const storage = { async exists() { return true; }, async read() { return Buffer.from('{ not valid json-ld', 'utf8'); } };
+  const reps = await readRepresentations(storage, RES + '.meta', RES);
+  assert.deepEqual(reps, { default: null, alternates: [] });
+});

@@ -12,6 +12,7 @@ const DCT_FORMAT = 'http://purl.org/dc/terms/format';
 const DCT_CONFORMS = 'http://purl.org/dc/terms/conformsTo';
 
 function repFrom(ds, repTerm, baseIri) {
+  // @id-less rep nodes are dropped upstream by jsonLdToQuads (n3 bridge, src/rdf/turtle.js); reps arrive as NamedNodes in practice — baseIri is a defensive fallback.
   const href = repTerm.termType === 'NamedNode' ? repTerm.value : baseIri;
   let format = null, profile = null;
   for (const q of ds) {
