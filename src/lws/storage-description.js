@@ -35,10 +35,10 @@ export function generateStorageDescription(storageRootUrl, services = []) {
  * resource (read at /.well-known/lws-storage) both call this so the advertised
  * service set can never drift between the two surfaces.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null}} flags
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, profileConnegEnabled?:boolean}} flags
  * @returns {object}
  */
-export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null } = {}) {
+export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, profileConnegEnabled = false } = {}) {
   const lwsStoragePath = '/.well-known/lws-storage';
   const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
   if (typeIndexEnabled) {
@@ -51,7 +51,7 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
   if (profileIndexPath) {
     services.push({ type: 'ProfileIndexService', serviceEndpoint: `${origin}${profileIndexPath}` });
   }
-  return {
+  const base = {
     ...generateStorageDescription(`${origin}/`, services),
     // Steering, not spec vocabulary (unmapped in the LWS @context — the
     // audience is a cold LLM agent reading JSON): RFC-9264-as-storage-metadata
@@ -66,4 +66,13 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
       hint: 'This storage speaks RFC 9264: every resource serves a linkset of its typed links — request the resource URL with Accept: application/linkset+json (rel="linkset"). A member linkset carries up/type; the governing describedby (SHACL shape) and conformsTo (profile) edges live on its CONTAINER\'s linkset — follow up.',
     },
   };
+  if (profileConnegEnabled) {
+    base.capability = [{
+      // DX-PROF-CONNEG cnpr:http functional profile — the pod negotiates
+      // representations by profile via Accept-Profile / Content-Profile.
+      type: 'https://www.w3.org/ns/dx/connegp/profile/http',
+      hint: 'This storage negotiates by profile (W3C Content Negotiation by Profile). Send Accept-Profile: <profile-uri> to select a representation; a resource lists its representations as canonical/alternate links in its RFC 9264 linkset (type=media, formats=profile).',
+    }];
+  }
+  return base;
 }
