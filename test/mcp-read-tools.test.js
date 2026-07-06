@@ -147,3 +147,12 @@ test('read_resource local: a declared describedby shape surfaces in links', asyn
   const meta = JSON.parse(res.content[1].text);
   assert.deepEqual(meta.links.describedby, ['https://ex.org/shape']);
 });
+
+test('GET /mcp answers 405 with Allow: POST (not a misleading 404)', async (t) => {
+  const p = await startLwsPod(t);
+  const r = await fetch(`${p.origin}/mcp`);
+  assert.equal(r.status, 405);
+  assert.match(r.headers.get('allow') || '', /POST/);
+  const body = await r.json();
+  assert.match(body.hint, /POST JSON-RPC/);
+});
