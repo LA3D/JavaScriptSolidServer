@@ -88,3 +88,22 @@ test('admit: declared shape resource missing → pass (opt-in miss), no throw', 
   assert.equal(r.shapeUrl, null);
   assert.equal(r.violations.length, 0);
 });
+
+test('admit: shape stored as ARRAY-form JSON-LD (JSS multi-subject store format) still validates', async () => {
+  // A text/turtle shape PUT through the conneg-enabled write path is stored as
+  // JSON-LD; multi-subject docs (any realistic SHACL file) serialize as a
+  // TOP-LEVEL ARRAY. The media-type sniff must recognize '[' as JSON-LD, or the
+  // JSON bytes go to the n3 Turtle parser and every write into the bound
+  // container 500s ("Expected entity but got { on line 2" — the ld+json-500
+  // bug, FOLLOWUP 2026-07-04; SHACL never ran there).
+  const { toJsonLd } = await import('../src/rdf/conneg.js');
+  const stored = Buffer.from(JSON.stringify(
+    await toJsonLd(Buffer.from(SHAPE), 'text/turtle', 'http://h/shapes/X', true), null, 2));
+  assert.equal(stored.toString('utf8').trimStart()[0], '[',
+    'precondition: the multi-subject store form is a top-level array');
+  const o = opts(TTL('; ex:desc "d"'));
+  o.storage.files['/shapes/X'] = stored;
+  const r = await admit(o);                                  // was: throws via n3
+  assert.equal(r.decision, 'reject');
+  assert.equal(r.violations[0].message, 'title required');   // restrictions not orphaned
+});

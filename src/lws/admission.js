@@ -41,9 +41,14 @@ export async function admit({ storage, content, contentType, resourceUrl,
   let shapeBuf;
   try { shapeBuf = await storage.read(shapeUrlToPath(shapeUrl)); } catch { return pass(); }
   if (!shapeBuf) return pass();
-  // Sniff media type: JSON-LD objects start with '{'; everything else is treated
-  // as Turtle/N3 (Step 3a — makes the seam tolerant of both on-disk formats).
-  const shapeCt = shapeBuf.toString('utf8').trimStart().startsWith('{')
+  // Sniff media type: stored JSON-LD is an object ('{') OR — for multi-subject
+  // docs converted from Turtle on the conneg write path, i.e. any realistic
+  // SHACL file published as text/turtle — a top-level ARRAY ('['). Everything
+  // else is treated as Turtle/N3. Missing the array form sent JSON bytes to the
+  // n3 parser and 500'd every write into the bound container ("Expected entity
+  // but got {" — the ld+json-500 bug); SHACL never ran there.
+  const first = shapeBuf.toString('utf8').trimStart()[0];
+  const shapeCt = (first === '{' || first === '[')
     ? 'application/ld+json'
     : 'text/turtle';
   const shapeDs = await toDataset(shapeBuf, shapeCt, shapeUrl);
