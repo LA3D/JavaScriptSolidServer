@@ -197,7 +197,7 @@ export async function readResource(uri, ctx) {
   if (origin !== ctx?.origin) ctx = { ...ctx, origin };
   if (!isLocalUri(ctx.origin, uri)) {
     throw new ResourceError(RPC_ERRORS.INVALID_PARAMS,
-      `not a local resource: ${uri}. Use the read_remote_resource tool for another pod.`);
+      `not a local resource: ${uri}. Use the read_resource tool for another pod.`);
   }
   const path = uriToPath(ctx.origin, uri);
   if (path === null) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `bad resource URI: ${uri}`);

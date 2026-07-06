@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { callTool, listToolsForRpc } from '../src/mcp/tools.js';
 import { startLwsPod, ownerCtx } from './helpers.js';
 
-test('tool registry is the 7 core + 2 convenience set (<= 9)', () => {
+test('tool registry is the model-driven read set (exactly 10)', () => {
   const names = listToolsForRpc().map(t => t.name).sort();
   assert.deepEqual(names, [
-    'create_resource', 'delete_resource', 'describe_resource',
-    'lws_type_search', 'put_typed_resource', 'read_remote_resource', 'subscribe', 'write_acl', 'write_resource',
+    'create_resource', 'delete_resource', 'describe_resource', 'list_resources',
+    'lws_type_search', 'put_typed_resource', 'read_resource', 'subscribe',
+    'write_acl', 'write_resource',
   ]);
 });
 

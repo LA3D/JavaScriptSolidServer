@@ -225,7 +225,7 @@ export async function mcpPlugin(fastify, options = {}) {
         'this endpoint requires an audience-bound credential (LWS-CID or Solid-OIDC DPoP)');
     }
 
-    // Federation depth (used by read_remote_resource to enforce the cap)
+    // Federation depth (used by read_resource's remote arm to enforce the cap)
     const depthHdr = request.headers['mcp-federation-depth'];
     const federationDepth = depthHdr ? parseInt(depthHdr, 10) || 0 : 0;
 

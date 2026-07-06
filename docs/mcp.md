@@ -4,7 +4,9 @@ JSS speaks the [Model Context Protocol](https://modelcontextprotocol.io). Once `
 
 > **Thesis**: MCP needs a backend. Solid is the backend.
 
-> **v2 (Resource Gateway).** The MCP surface follows the Resource-Gateway pattern: **reads are MCP Resources** (addressed by the pod's real `https://` URLs, dispatched on the resource itself), **mutations and parameterized queries are Tools** (9 total). This keeps the tool count under the selection-accuracy budget (~10–15 tools), lets the client browse the read surface as resources, and routes SHACL admission failures back as teaching content the model can read and act on. This is a hard break from the earlier flat tool dump — the old read tools (`read_resource`, `list_resources`, `head_resource`, `read_acl`, `get_skill`, `list_skills`, `get_pod_skill`, `pod_info`, `lws_linkset`, `lws_storage_description`, `list_docs`, `read_docs`) no longer exist; their capability re-appears as Resources.
+> **v2 (Resource Gateway).** The MCP surface follows the Resource-Gateway pattern: **reads are MCP Resources** (addressed by the pod's real `https://` URLs, dispatched on the resource itself), **mutations and parameterized queries are Tools** (10 total). This keeps the tool count under the selection-accuracy budget (~10–15 tools), lets the client browse the read surface as resources, and routes SHACL admission failures back as teaching content the model can read and act on. This is a hard break from the earlier flat tool dump — the old read tools (`head_resource`, `read_acl`, `get_skill`, `list_skills`, `get_pod_skill`, `pod_info`, `lws_linkset`, `lws_storage_description`, `list_docs`, `read_docs`) no longer exist; their capability re-appears as Resources.
+
+> **Model-driven read path.** MCP Resources are *application-driven* — the host stages them into context, not the model — so an autonomous agent that only gets Tools has no way to invoke `resources/read`/`resources/list` itself. `read_resource` and `list_resources` re-appear as Tools (a later round, folding in the retired `read_remote_resource`) as the model-callable twin of the Resources primitive: `read_resource({ uri })` is **one-Web** — a `uri` sharing this pod's origin dispatches through the same resolver as `resources/read`; any other origin is a federation-gated remote GET (see Federation below). Both the Resources primitive and these Tools stay live side by side.
 
 ## Quick start
 
@@ -22,7 +24,7 @@ curl -s http://localhost:4443/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}' | jq '.result.capabilities'
 
-# List the tools (9) and the resource templates
+# List the tools (10) and the resource templates
 curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | jq '.result.tools[].name'
 curl -s http://localhost:4443/mcp -H "Content-Type: application/json" \
@@ -88,9 +90,9 @@ Skills live at conventional paths the server walks: `<pod>/SKILL.md` (pod-wide),
 
 The RFC 9264 linkset is **not** a resource kind — it's returned by the `describe_resource` tool (one read: body + declared types + linkset together).
 
-## Tools (mutations + queries)
+## Tools (mutations + queries + model-driven reads)
 
-Nine tools: seven core + two convenience.
+Ten tools: eight core + two convenience.
 
 ### Core
 
@@ -102,7 +104,8 @@ Nine tools: seven core + two convenience.
 | `write_acl` | persist a structured ACL to the resource's `.acl` | Control + anti-lockout |
 | `lws_type_search` | CNF `type` (+ `describedby`) query, WAC-filtered, no-oracle | reuses the authorized-resources walk |
 | `subscribe` | SSE stream of `resource_changed` events, WAC-filtered per event | Read per event |
-| `read_remote_resource` | GET a resource on another pod by its real URL (incl. that pod's storage description) | caller needs `acl:Write` on `<pod>/private/federation/`; depth-capped at 3 |
+| `read_resource` | Read any resource by its real `https://` URL — one-Web: this pod's own uri dispatches as a local read (same resolver as `resources/read`), any other origin is a federation-gated remote GET (incl. that pod's storage description) | local: Read; remote: caller needs `acl:Write` on `<pod>/private/federation/`, depth-capped at 3 |
+| `list_resources` | The model-callable twin of `resources/list` — this pod's fixed entry resources + the real-URI template | none (fixed, public shape) |
 
 Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) route through the shared LWS admission core (SHACL validation → write → type-capture) — the same enforcement path as HTTP PUT/POST. Pass a `types` array (the `Link: rel="type"` equivalent) to declare server-managed types.
 
@@ -139,7 +142,7 @@ curl -N http://localhost:4443/mcp -H "Content-Type: application/json" -H "Author
 
 ### Federation
 
-Federation is a thin, affordance-driven read, not an RPC proxy: `read_remote_resource({ url })` GETs a resource on another pod by its real URL — including that pod's `/.well-known/lws-storage` description — and returns the (deep-sanitized) representation. The agent then follows *that* pod's own typed links and `@context` to keep operating it, the same way it operates this one; there's no `{tool, arguments}` pair to forward.
+Federation is a thin, affordance-driven read, not an RPC proxy: it's the remote arm of `read_resource({ uri })` — a `uri` on another pod's origin GETs that resource by its real URL — including that pod's `/.well-known/lws-storage` description — and returns the (deep-sanitized) representation. The agent then follows *that* pod's own typed links and `@context` to keep operating it, the same way it operates this one; there's no `{tool, arguments}` pair to forward.
 
 Outbound calls are WAC-gated at the caller's own pod: the caller needs `acl:Write` on `<pod>/private/federation/`, and the call is depth-capped at 3 via the `MCP-Federation-Depth` header. Foreign WebIDs cannot initiate federation from this pod (no local gate path). A remote pod is the least-trusted content source, so the fetched body is deep-sanitized (`sanitizeDeep`) before it reaches the model.
 
@@ -183,7 +186,7 @@ If the proposed ACL doesn't grant `Control` to the caller, `write_acl` refuses. 
 - **`update_resource` (PATCH)** — SPARQL Update / N3 patches. Read-modify-write through the tools is the workaround.
 - **`resources/list` child enumeration** — v1 lists fixed resources + templates only, not WAC-readable container children (deferred behind a page-bound).
 - **Skills over the MCP Resources *primitive* (SEP-2640)** — skills are exposed as ordinary pod resources today (a skill file is read by its real `https://` URL); aligning to the experimental SEP is deferred until it stabilizes.
-- **Authenticated federation reads** — `read_remote_resource` fetches anonymously; it carries no per-call auth, so it can only see what the remote pod exposes to `foaf:Agent`/anonymous. Reading a remote agent-scoped resource is not yet supported.
+- **Authenticated federation reads** — `read_resource`'s remote arm fetches anonymously; it carries no per-call auth, so it can only see what the remote pod exposes to `foaf:Agent`/anonymous. Reading a remote agent-scoped resource is not yet supported.
 
 ## Why this exists
 

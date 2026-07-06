@@ -7,7 +7,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseRemoteLinks, localLinks } from '../src/mcp/read-tools.js';
-import { startLwsPod, ownerCtx } from './helpers.js';
+import { callTool, TOOLS, listToolsForRpc } from '../src/mcp/tools.js';
+import { readResource } from '../src/mcp/resources.js';
+import { ResourceError } from '../src/mcp/errors.js';
+import { startLwsPod, ownerCtx, putFile } from './helpers.js';
+import http from 'node:http';
 
 test('parseRemoteLinks extracts json-ld#context, ld+json alternate, and linkset rels', () => {
   const h = '<https://ex.org/ctx.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json", ' +
@@ -46,4 +50,100 @@ test('localLinks: root has no up', async (t) => {
   const links = await localLinks('/', { ...ownerCtx(pod), lwsEnabled: true });
   assert.equal(links.up, undefined);
   assert.ok(links.storageDescription);
+});
+
+test('registry: read_resource + list_resources in, read_remote_resource gone, exactly 10', () => {
+  const names = listToolsForRpc().map(t => t.name).sort();
+  assert.deepEqual(names, [
+    'create_resource', 'delete_resource', 'describe_resource', 'list_resources',
+    'lws_type_search', 'put_typed_resource', 'read_resource', 'subscribe',
+    'write_acl', 'write_resource',
+  ]);
+});
+
+test('read_resource local: body block preserves @context; links block carries up + storageDescription', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/pub.json`, '{"@context":{"ex":"http://ex/"},"ex:k":"v"}', { publicRead: true });
+  const ctx = { ...ownerCtx(p), lwsEnabled: true };
+  const res = await callTool('read_resource', { uri: `${p.origin}/${p.podName}/pub.json` }, ctx);
+  assert.equal(res.isError ?? false, false, JSON.stringify(res));
+  const body = JSON.parse(res.content[0].text);
+  assert.ok(body['@context']);                                  // structured, not enveloped
+  const meta = JSON.parse(res.content[1].text);
+  assert.equal(meta.links.up, `${p.origin}/${p.podName}/`);
+  assert.equal(meta.links.storageDescription, `${p.origin}/.well-known/lws-storage`);
+});
+
+test('read_resource local: WAC denial is a teaching error, not a throw (no-oracle preserved)', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/private.json`, '{}');          // owner-only
+  const anon = { ...ownerCtx(p), webId: null };
+  const res = await callTool('read_resource', { uri: `${p.origin}/${p.podName}/private.json` }, anon);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /access denied|not found/i);
+});
+
+test('read_resource remote: federation gate blocks anonymous; owner passes and links pass through', async (t) => {
+  const p = await startLwsPod(t);
+  // A genuinely foreign origin: a stub server on another port serving ordinary
+  // JSON + the json-ld#context Link header (JSON-LD 1.1 §6.1).
+  const stub = http.createServer((req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Link': '<https://ex.org/ctx.jsonld>; rel="http://www.w3.org/ns/json-ld#context"; type="application/ld+json"',
+    });
+    res.end('{"name":"probe"}');
+  });
+  await new Promise(r => stub.listen(0, '127.0.0.1', r));
+  t.after(() => stub.close());
+  const url = `http://127.0.0.1:${stub.address().port}/thing.json`;
+
+  const anonRes = await callTool('read_resource', { uri: url }, { ...ownerCtx(p), webId: null, federationDepth: 0 });
+  assert.equal(anonRes.isError, true);
+  assert.match(anonRes.content[0].text, /federation requires a local WebID/);
+
+  const res = await callTool('read_resource', { uri: url }, { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+  assert.equal(res.isError ?? false, false, JSON.stringify(res));
+  const out = JSON.parse(res.content[0].text);
+  assert.equal(out.links.context, 'https://ex.org/ctx.jsonld');   // surfaced, not applied
+  assert.match(out.body, /probe/);
+});
+
+test('read_resource remote: depth cap enforced (verbatim from read_remote_resource)', async (t) => {
+  const p = await startLwsPod(t);
+  const res = await callTool('read_resource', { uri: 'http://127.0.0.1:1/x' },
+    { ...ownerCtx(p), federationDepth: 3 });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /federation depth exceeded/);
+});
+
+test('list_resources returns the fixed entry resources + the real-URI template', async (t) => {
+  const p = await startLwsPod(t);
+  const res = await callTool('list_resources', {}, ownerCtx(p));
+  const out = JSON.parse(res.content[0].text);
+  assert.ok(out.resources.some(r => r.uri === `${p.origin}/.well-known/lws-storage`));
+  assert.ok(out.templates[0].uriTemplate.startsWith('https://'));
+});
+
+test('resources/read foreign-origin steering error names read_resource (and it exists)', async (t) => {
+  const p = await startLwsPod(t);
+  await assert.rejects(
+    () => readResource('https://other.example/x', ownerCtx(p)),
+    (e) => e instanceof ResourceError && /read_resource/.test(e.message),
+  );
+  assert.ok(TOOLS.read_resource);
+  assert.equal(TOOLS.read_remote_resource, undefined);
+});
+
+test('read_resource local: a declared describedby shape surfaces in links', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/shaped.json`, '{"a":1}', { publicRead: true });
+  await putFile(p, `/${p.podName}/shaped.json.meta`, JSON.stringify({
+    '@context': { describedby: { '@id': 'http://www.w3.org/2007/05/powder-s#describedby', '@type': '@id' } },
+    '@id': `${p.origin}/${p.podName}/shaped.json`,
+    describedby: 'https://ex.org/shape',
+  }), { publicRead: true });
+  const res = await callTool('read_resource', { uri: `${p.origin}/${p.podName}/shaped.json` }, { ...ownerCtx(p), lwsEnabled: true });
+  const meta = JSON.parse(res.content[1].text);
+  assert.deepEqual(meta.links.describedby, ['https://ex.org/shape']);
 });

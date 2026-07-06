@@ -10,10 +10,16 @@
 // (JSON-LD 1.1 syntax §6.1 context link / §6.2 alternate; surfaced, never
 // applied — the agent dereferences them itself with read_resource).
 import * as storage from '../storage/filesystem.js';
-import { buildUrl, parentPath } from './wac.js';
-import { sanitizeTypes, sanitizeField } from './sanitize.js';
+import { AccessMode } from '../wac/parser.js';
+import { wac, buildUrl, parentPath } from './wac.js';
+import { sanitizeTypes, sanitizeField, sanitizeDeep } from './sanitize.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { storageDescriptionUrl } from '../lws/storage-description.js';
+import { toolError, toolJson } from './protocol.js';
+import { readResource } from './resources.js';
+import { ResourceError } from './errors.js';
+import { isLocalUri, uriToPath } from './uri.js';
+import { listFixed, RESOURCE_TEMPLATE } from './surface.js';
 
 const JSONLD_CONTEXT_REL = 'http://www.w3.org/ns/json-ld#context';
 
@@ -51,4 +57,97 @@ export async function localLinks(path, ctx) {
   const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   if (shapes.length) links.describedby = shapes;
   return links;
+}
+
+// --- federation constants + gate (moved VERBATIM from tools.js read_remote_resource) ---
+
+// Conservative defaults locked in for v1:
+//   1. Federation gate is `<agent-pod>/private/federation/` — caller must
+//      have acl:Write there to initiate outbound federation. Foreign WebIDs
+//      are denied (no local path to gate against).
+//   2. No pod-resident credential storage.
+//   3. Depth cap via MCP-Federation-Depth header, max 3.
+const MAX_FEDERATION_DEPTH = 3;
+
+function federationGatePathFor(webId, origin) {
+  if (!webId || !origin) return null;
+  if (!webId.startsWith(origin)) return null;  // foreign WebID — deny
+  const localPath = webId.slice(origin.length);
+  const profileIdx = localPath.indexOf('/profile/');
+  const podPath = profileIdx > 0 ? localPath.slice(0, profileIdx + 1) : '/';
+  return podPath + 'private/federation/';
+}
+
+async function readRemote(url, ctx) {
+  const gatePath = federationGatePathFor(ctx.webId, ctx.origin);
+  if (!gatePath) {
+    return toolError(
+      'access denied: federation requires a local WebID identity (anonymous and foreign identities cannot initiate outbound federation)'
+    );
+  }
+  if (!(await wac(ctx, gatePath, AccessMode.WRITE))) {
+    return toolError(
+      `access denied: write ${gatePath} (federation gate). Owner must grant acl:Write at this path to delegate outbound federation.`
+    );
+  }
+  const depth = (ctx.federationDepth ?? 0) + 1;
+  if (depth > MAX_FEDERATION_DEPTH) {
+    return toolError(`federation depth exceeded (max ${MAX_FEDERATION_DEPTH})`);
+  }
+  let r;
+  try {
+    r = await fetch(url, {
+      headers: {
+        Accept: 'application/ld+json, application/lws+json, text/turtle, */*',
+        'MCP-Federation-Depth': String(depth)
+      },
+      signal: AbortSignal.timeout(30_000)
+    });
+  } catch (e) {
+    return toolError(`remote unreachable: ${e.message}`);
+  }
+  const body = await r.text();
+  // Header-borne affordances (json-ld#context / alternate / linkset) are the
+  // agent's ONLY channel to how a remote representation should be interpreted
+  // — surface them (never auto-fetch/apply). Body: a remote pod is the
+  // least-trusted content source — deep-strip (review #7, carried verbatim).
+  const links = parseRemoteLinks(r.headers.get('link'));
+  return toolJson({
+    url,
+    status: r.status,
+    contentType: r.headers.get('content-type') || null,
+    ...(Object.keys(links).length ? { links } : {}),
+    body: sanitizeDeep(body)
+  });
+}
+
+// --- the tools ---
+
+export async function read_resource({ uri }, ctx) {
+  if (!uri || typeof uri !== 'string' || !/^https?:\/\//.test(uri)) {
+    return toolError('absolute http(s) uri required');
+  }
+  if (uri === ctx.origin) uri = uri + '/';           // bare origin = the root container
+  if (!isLocalUri(ctx.origin, uri)) return readRemote(uri, ctx);
+
+  let out;
+  try {
+    out = await readResource(uri, ctx);              // WAC-before-exists + sanitization inherited
+  } catch (e) {
+    if (e instanceof ResourceError) return toolError(e.message);  // teaching content, tool-shaped
+    throw e;
+  }
+  const c = out.contents[0];
+  const links = await localLinks(uriToPath(ctx.origin, uri), ctx);
+  return {
+    content: [
+      { type: 'text', text: c.text },
+      { type: 'text', text: JSON.stringify({ uri, mimeType: c.mimeType, links }, null, 2) },
+    ],
+    isError: false,
+  };
+}
+
+export async function list_resources(_args, ctx) {
+  return toolJson({ resources: listFixed(ctx.origin), templates: [RESOURCE_TEMPLATE] });
 }
