@@ -5,10 +5,17 @@ import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { resourceTypes } from './type-index.js';
 import { readDeclaredTypes } from './type-metadata.js';
-import { describedbyTargets } from './constraint.js';
+import { describedbyTargets, conformsToTargets } from './constraint.js';
 
 /** Origin-based resource id (path-mode: id = origin + urlPath). */
 function idFor(origin, urlPath) { return origin.replace(/\/$/, '') + urlPath; }
+
+// Per-relation .meta readers, keyed the same as INDEXED_RELATIONS
+// (src/lws/type-index.js) — describedby -> shape, conformsTo -> profile.
+const RELATION_READERS = {
+  describedby: describedbyTargets,
+  conformsTo: conformsToTargets,
+};
 
 /**
  * The single WAC-filtered walk. The per-resource checkAccess()-and-drop loop
@@ -20,7 +27,7 @@ function idFor(origin, urlPath) { return origin.replace(/\/$/, '') + urlPath; }
 // id — the HTTP handler needs subdomain-mode-aware `buildResourceUrl`
 // (path-mode `origin + urlPath` differs from it when subdomains are on), so
 // it passes its own; MCP tools have no subdomain concern and use the default.
-export async function collectAuthorizedResources({ agentWebId, origin, needDescribedby = false, buildId } = {}) {
+export async function collectAuthorizedResources({ agentWebId, origin, neededRelations = [], buildId } = {}) {
   const idOf = buildId || ((urlPath) => idFor(origin, urlPath));
   const aclCache = new Map();
   const resources = await walkResources('/');
@@ -34,8 +41,12 @@ export async function collectAuthorizedResources({ agentWebId, origin, needDescr
     if (!allowed) continue;
     const declared = await readDeclaredTypes(storage, r.urlPath);
     const entry = { id, types: resourceTypes({ isDirectory: r.isDirectory, declared }) };
-    if (needDescribedby) {
-      entry.relations = { describedby: await describedbyTargets(storage, r.urlPath + '.meta', id) };
+    if (neededRelations.length) {
+      entry.relations = {};
+      for (const rel of neededRelations) {
+        const reader = RELATION_READERS[rel];
+        if (reader) entry.relations[rel] = await reader(storage, r.urlPath + '.meta', id);
+      }
     }
     out.push(entry);
   }

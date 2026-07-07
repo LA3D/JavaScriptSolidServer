@@ -98,6 +98,49 @@ function parseAcceptHeader(header) {
 }
 
 /**
+ * Parse an Accept-Profile header (DX-PROF-CONNEG cnpr:http). Values are
+ * angle-bracketed profile URIs with optional ;q= weights. Returns profile
+ * URIs ordered by q descending (stable for ties), brackets stripped.
+ */
+export function parseAcceptProfile(header) {
+  if (!header) return [];
+  const entries = String(header).split(',').map((s) => s.trim()).filter(Boolean);
+  const parsed = entries.map((e, i) => {
+    const [ref, ...params] = e.split(';').map((s) => s.trim());
+    const uri = ref.replace(/^</, '').replace(/>$/, '');
+    const qParam = params.find((p) => p.toLowerCase().startsWith('q='));
+    const q = qParam ? parseFloat(qParam.slice(2)) : 1.0;
+    return { uri, q: Number.isFinite(q) ? q : 1.0, i };
+  }).filter((p) => p.uri);
+  parsed.sort((a, b) => (b.q - a.q) || (a.i - b.i));
+  return parsed.map((p) => p.uri);
+}
+
+/**
+ * Negotiate a profile-conneg outcome (DX-PROF-CONNEG cnpr:http) against a
+ * resource's declared representations (readRepresentations()'s shape:
+ * { default, alternates }). EXACT match only — no profile hierarchy (P13).
+ * @param {string} acceptProfileHeader
+ * @param {{default: object|null, alternates: object[]}} representations
+ * @returns {{outcome: 'none'|'self'|'redirect'|'notacceptable', rep: object|null}}
+ */
+export function negotiateProfile(acceptProfileHeader, representations) {
+  const requested = parseAcceptProfile(acceptProfileHeader);
+  if (!requested.length) return { outcome: 'none', rep: null };
+  for (const wanted of requested) {              // preference order; EXACT match (no hierarchy — P13)
+    // Outcome is decided by WHICH SLOT matched, never by href equality: an
+    // alternate whose href collapses to the resource's own URL (blank-node/
+    // self-authored) must not serve the default's bytes under the alternate's
+    // profile (mis-stamp). Default checked first, so a duplicate profile
+    // declaration resolves to 'self'.
+    if (representations?.default?.profile === wanted) return { outcome: 'self', rep: representations.default };
+    const rep = (representations?.alternates || []).find((r) => r.profile === wanted);
+    if (rep) return { outcome: 'redirect', rep };
+  }
+  return { outcome: 'notacceptable', rep: null };
+}
+
+/**
  * Check if content type is RDF
  */
 export function isRdfType(contentType) {
@@ -213,9 +256,16 @@ export async function fromJsonLd(jsonLd, targetType, baseUri, connegEnabled = fa
  * - `Origin` — CORS headers echo the request's Origin
  */
 export function getVaryHeader(connegEnabled, mashlibEnabled = false, lwsEnabled = false) {
-  return (connegEnabled || mashlibEnabled || lwsEnabled)
-    ? 'Accept, Authorization, Origin'
-    : 'Authorization, Origin';
+  if (!connegEnabled && !mashlibEnabled && !lwsEnabled) {
+    return 'Authorization, Origin';
+  }
+  // Accept-Profile only ever matters once profile conneg can engage, which
+  // requires --lws. A --conneg-only pod (no --lws) never negotiates
+  // profiles, so advertising the token there would breach "the --lws-off
+  // path MUST be byte-identical" for no benefit.
+  return lwsEnabled
+    ? 'Accept, Accept-Profile, Authorization, Origin'
+    : 'Accept, Authorization, Origin';
 }
 
 /**

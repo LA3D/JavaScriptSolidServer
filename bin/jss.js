@@ -96,6 +96,8 @@ program
   .option('--lws-type-index', 'Enable the LWS Type Index/Search services (default on when --lws)')
   .option('--no-lws-type-index', 'Disable the LWS Type Index/Search services')
   .option('--lws-profile-index <path>', 'Advertise a ProfileIndexService at this pod path in the storage description (requires --lws)')
+  .option('--lws-profile-conneg', 'Enable content negotiation by profile (default on when --lws)')
+  .option('--no-lws-profile-conneg', 'Disable content negotiation by profile')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -229,6 +231,7 @@ program
         lws: config.lws,
         lwsTypeIndex: config.lwsTypeIndex,
         lwsProfileIndex: config.lwsProfileIndex,
+        lwsProfileConneg: config.lwsProfileConneg,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,

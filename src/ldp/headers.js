@@ -97,19 +97,53 @@ export function getCorsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS',
-    'Access-Control-Allow-Headers': 'Accept, Authorization, Content-Type, DPoP, If-Match, If-None-Match, Link, Range, Slug, Origin',
-    'Access-Control-Expose-Headers': 'Accept-Patch, Accept-Post, Accept-Ranges, Allow, Content-Length, Content-Range, Content-Type, ETag, Link, Location, Updates-Via, WAC-Allow, X-Cost, X-Balance, X-Pay-Currency',
+    'Access-Control-Allow-Headers': 'Accept, Accept-Profile, Authorization, Content-Type, DPoP, If-Match, If-None-Match, Link, Range, Slug, Origin',
+    'Access-Control-Expose-Headers': 'Accept-Patch, Accept-Post, Accept-Ranges, Allow, Content-Length, Content-Profile, Content-Range, Content-Type, ETag, Link, Location, Updates-Via, WAC-Allow, X-Cost, X-Balance, X-Pay-Currency',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Max-Age': '86400'
   };
 }
 
+// DX-PROF-CONNEG §8.2.1 list-profiles as Link header parts: the default
+// representation is rel="canonical", each alternate rel="alternate", with
+// type= (media type) and formats= (profile URI — the attribute every worked
+// example in DX-PROF-CONNEG and the IETF draft uses; the Figure-3 prose
+// saying `profile` is the spec contradicting its own examples). Returns the
+// comma-joined string, or null when there is nothing to advertise.
+export function representationLinks(representations) {
+  if (!representations) return null;
+  const part = (r, rel) => {
+    let s = `<${r.href}>; rel="${rel}"`;
+    if (r.format) s += `; type="${r.format}"`;
+    if (r.profile) s += `; formats="${r.profile}"`;
+    return s;
+  };
+  const parts = [];
+  if (representations.default) parts.push(part(representations.default, 'canonical'));
+  for (const a of representations.alternates || []) parts.push(part(a, 'alternate'));
+  return parts.length ? parts.join(', ') : null;
+}
+
 /**
  * Get all headers combined
  * @param {object} options
+ * @param {string|null} [options.chosenProfile] - DX-PROF-CONNEG cnpr:http:
+ *   when the file-GET path negotiated a 'self' outcome (Task 7), the caller
+ *   passes the matched profile URI here so it gets stamped (Content-Profile
+ *   + Link rel="profile") regardless of which serve branch handles the
+ *   response — centralizing this in getAllHeaders means every branch that
+ *   builds its headers here gets the stamp for free, instead of each branch
+ *   having to remember to append it itself.
+ * @param {object|null} [options.representations] - authz-filtered
+ *   { default, alternates } set: when present, the DX-PROF-CONNEG §8.2.1
+ *   list-profiles advertisement (rel="canonical"/"alternate" Link parts) is
+ *   appended. Callers pass it only when the negotiation block already
+ *   computed the set (Accept-Profile engaged) — never a bare-GET hot-path
+ *   .meta read. Linkset responses carry the list in their BODY; their
+ *   headers advertise only when Accept-Profile was also sent.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false, chosenProfile = null, representations = null }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
@@ -123,6 +157,15 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
     if (!suppressLinkset) parts.push(`<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`);
     const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
+  }
+  if (chosenProfile) {
+    const profileLink = `<${chosenProfile}>; rel="profile"`;
+    headers['Content-Profile'] = `<${chosenProfile}>`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${profileLink}` : profileLink;
+  }
+  const repLinks = representationLinks(representations);
+  if (repLinks) {
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${repLinks}` : repLinks;
   }
   return headers;
 }

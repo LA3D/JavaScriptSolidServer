@@ -105,6 +105,10 @@ export function createServer(options = {}) {
   const typeIndexEnabled = lwsEnabled && (options.lwsTypeIndex ?? true);
   // ProfileIndexService advertisement is OFF by default (opt-in path, --lws-gated)
   const profileIndexPath = lwsEnabled ? (options.lwsProfileIndex ?? null) : null;
+  // Content Negotiation by Profile is ON by default whenever --lws is on;
+  // --no-lws-profile-conneg is a per-deployment safety valve to disable just
+  // the capability advertisement without disabling the rest of --lws.
+  const profileConnegEnabled = lwsEnabled && (options.lwsProfileConneg ?? true);
   // WebSocket notifications are OFF by default
   const notificationsEnabled = options.notifications ?? false;
   // Identity Provider is OFF by default
@@ -379,6 +383,7 @@ export function createServer(options = {}) {
   fastify.decorateRequest('lwsEnabled', null);
   fastify.decorateRequest('typeIndexEnabled', null);
   fastify.decorateRequest('profileIndexPath', null);
+  fastify.decorateRequest('lwsProfileConneg', null);
   fastify.decorateRequest('notificationsEnabled', null);
   fastify.decorateRequest('idpEnabled', null);
   fastify.decorateRequest('subdomainsEnabled', null);
@@ -399,6 +404,7 @@ export function createServer(options = {}) {
     request.lwsEnabled = lwsEnabled;
     request.typeIndexEnabled = typeIndexEnabled;
     request.profileIndexPath = profileIndexPath;
+    request.lwsProfileConneg = profileConnegEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
     request.idpEnabled = idpEnabled;
     request.subdomainsEnabled = subdomainsEnabled;
@@ -1045,7 +1051,7 @@ export function createServer(options = {}) {
       // storage-description resource ctx (src/mcp/index.js) — otherwise HTTP
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath });
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, profileConnegEnabled });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

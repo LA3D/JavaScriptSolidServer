@@ -37,6 +37,9 @@ export const defaults = {
   lws: false,
   lwsTypeIndex: true,
   lwsProfileIndex: null,
+  // ON by default whenever --lws is on (mirrors lwsTypeIndex, not
+  // lwsProfileIndex's opt-in-path null) — see task-6-report.md for why.
+  lwsProfileConneg: true,
   notifications: false,
 
   // Identity Provider
@@ -178,6 +181,7 @@ const envMap = {
   JSS_LWS: 'lws',
   JSS_LWS_TYPE_INDEX: 'lwsTypeIndex',
   JSS_LWS_PROFILE_INDEX: 'lwsProfileIndex',
+  JSS_LWS_PROFILE_CONNEG: 'lwsProfileConneg',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
@@ -259,6 +263,7 @@ const BOOLEAN_KEYS = new Set([
   'conneg',
   'lws',
   'lwsTypeIndex',
+  'lwsProfileConneg',
   'subdomains',
   'mashlib',
   'mashlibCdn',

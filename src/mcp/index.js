@@ -236,7 +236,8 @@ export async function mcpPlugin(fastify, options = {}) {
       lwsEnabled: request.lwsEnabled || false,
       typeIndexEnabled: request.typeIndexEnabled || false,
       profileIndexPath: request.profileIndexPath || null,
-      notificationsEnabled: request.notificationsEnabled || false
+      notificationsEnabled: request.notificationsEnabled || false,
+      profileConnegEnabled: request.lwsProfileConneg || false
     };
 
     // Streaming tool? Hand off to SSE handler.

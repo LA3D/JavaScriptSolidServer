@@ -173,8 +173,8 @@ describe('parseFilter (type + indexed relations)', () => {
     q.append('describedby', SHAPE);                 // one group over the global cap
     assert.throws(() => parseFilter({ query: q }), (e) => e instanceof FilterError && e.status === 400);
   });
-  it('describedby is the sole indexed relation in v1', () => {
-    assert.deepEqual([...INDEXED_RELATIONS], ['describedby']);
+  it('describedby and conformsTo are the indexed relations', () => {
+    assert.deepEqual([...INDEXED_RELATIONS], ['describedby', 'conformsTo']);
   });
 });
 
