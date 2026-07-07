@@ -80,6 +80,39 @@ test('the storage-description resource mirrors /.well-known/lws-storage', async 
   assert.equal(resourceBody.type, 'Storage');
 });
 
+// Same drift-guard as above, for profileConnegEnabled (Task 6 review fix):
+// buildStorageDescription now takes profileConnegEnabled and the HTTP route
+// passes it (src/server.js ~1054), but until this fix the MCP ctx
+// (src/mcp/index.js) never read request.lwsProfileConneg, so it fell back to
+// buildStorageDescription's own destructured default (false) and silently
+// dropped the ContentNegotiation capability. --lws defaults profileConneg on
+// (src/server.js:111), so this proves the MCP view carries capability[] too.
+test('the storage-description resource mirrors /.well-known/lws-storage capability[] (profile conneg)', async (t) => {
+  await startTestServer({ lws: true, mcp: true });
+  t.after(async () => { await stopTestServer(); });
+  const base = getBaseUrl();
+
+  const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+  const httpBody = await httpRes.json();
+
+  const mcpRes = await fetch(`${base}/mcp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'resources/read',
+      params: { uri: `${base}/.well-known/lws-storage` },
+    }),
+  });
+  const mcpJson = await mcpRes.json();
+  const resourceBody = JSON.parse(mcpJson.result.contents[0].text);
+
+  const httpHasConneg = httpBody.capability?.some((c) => c.type === 'http://www.w3.org/ns/dx/connegp/profile/http');
+  const mcpHasConneg = resourceBody.capability?.some((c) => c.type === 'http://www.w3.org/ns/dx/connegp/profile/http');
+  assert.equal(httpHasConneg, true, 'HTTP route must advertise the ContentNegotiation capability under --lws');
+  assert.equal(mcpHasConneg, true, 'MCP ctx must advertise the ContentNegotiation capability under --lws');
+  assert.deepEqual(resourceBody.capability, httpBody.capability);
+});
+
 // Same drift-guard as above, for lwsProfileIndex: proves the HTTP route
 // (src/server.js ~107/1048) and the MCP ctx (src/mcp/index.js:238, reading
 // request.profileIndexPath) both advertise the same ProfileIndexService
