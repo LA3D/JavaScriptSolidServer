@@ -16,7 +16,8 @@ import {
   getVaryHeader,
   negotiateProfile
 } from '../rdf/conneg.js';
-import { readRepresentations } from '../lws/representations.js';
+import { readAuthorizedRepresentations } from '../lws/representations.js';
+import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
@@ -67,6 +68,25 @@ function getRequestPaths(request) {
   // Resource URL - uses the actual request hostname (subdomain in subdomain mode)
   const resourceUrl = `${request.protocol}://${request.hostname}${urlPath}`;
   return { urlPath, storagePath, resourceUrl };
+}
+
+/**
+ * Read a resource's altr: representations (src/lws/representations.js),
+ * filtered to what the REQUESTING client is authorized to READ (Task 9 —
+ * no-oracle discipline: an alternate the client can't read must be absent
+ * from both the linkset advertisement and negotiateProfile's search set,
+ * not merely 403 on request). Resolves the request's own identity via
+ * getWebIdFromRequestAsync, same pattern as src/handlers/type-index.js —
+ * independent of request.config.public, which only bypasses the blanket
+ * preHandler gate, not this explicit per-alternate checkAccess call.
+ */
+async function authorizedRepresentations(request, storagePath, resourceUrl) {
+  const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+  return readAuthorizedRepresentations(storage, storagePath + '.meta', resourceUrl, {
+    origin: new URL(resourceUrl).origin,
+    agentWebId,
+    public: !!request.config?.public,
+  });
 }
 
 /**
@@ -369,7 +389,7 @@ export async function handleGet(request, reply) {
     // chosenProfile via getAllHeaders on the listing branches below.
     let chosenProfile = null;
     if (request.lwsProfileConneg && request.headers['accept-profile']) {
-      const reps = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+      const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
       const neg = negotiateProfile(request.headers['accept-profile'], reps);
       if (neg.outcome === 'redirect') {
         reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
@@ -414,7 +434,7 @@ export async function handleGet(request, reply) {
       const declaredTypes = await readDeclaredTypes(storage, storagePath);
       const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
       const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
-      const representations = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+      const representations = await authorizedRepresentations(request, storagePath, resourceUrl);
       const ls = generateLinkset(resourceUrl, {
         parentUrl: parentContainerUrl(resourceUrl),
         isContainer: true,
@@ -502,7 +522,7 @@ export async function handleGet(request, reply) {
   // on every serve branch below.
   let chosenProfile = null;
   if (request.lwsProfileConneg && request.headers['accept-profile']) {
-    const reps = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+    const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
     const neg = negotiateProfile(request.headers['accept-profile'], reps);
     if (neg.outcome === 'redirect') {
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
@@ -650,7 +670,7 @@ export async function handleGet(request, reply) {
     const declaredTypes = await readDeclaredTypes(storage, storagePath);
     const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
     const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
-    const representations = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+    const representations = await authorizedRepresentations(request, storagePath, resourceUrl);
     const ls = generateLinkset(resourceUrl, {
       parentUrl: parentContainerUrl(resourceUrl),
       isContainer: false,
@@ -1057,7 +1077,7 @@ export async function handleHead(request, reply) {
   // (skipProfileNegotiation); files are never skipped, matching GET's
   // universal chosenProfile stamp across every file serve branch.
   if (!skipProfileNegotiation && request.lwsProfileConneg && request.headers['accept-profile']) {
-    const reps = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+    const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
     const neg = negotiateProfile(request.headers['accept-profile'], reps);
     if (neg.outcome === 'redirect') {
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
