@@ -394,11 +394,11 @@ export async function handleGet(request, reply) {
       if (neg.outcome === 'redirect') {
         reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
         reply.header('Content-Profile', `<${neg.rep.profile}>`);
-        reply.header('Vary', 'Accept-Profile');
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(303).header('Location', neg.rep.href).send();
       }
       if (neg.outcome === 'notacceptable') {
-        reply.header('Vary', 'Accept-Profile');
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
       }
       chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
@@ -527,12 +527,12 @@ export async function handleGet(request, reply) {
     if (neg.outcome === 'redirect') {
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
       reply.header('Content-Profile', `<${neg.rep.profile}>`);
-      reply.header('Vary', 'Accept-Profile');
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(303).header('Location', neg.rep.href).send();
     }
     if (neg.outcome === 'notacceptable') {
       // advertise what IS available (authz-filtered in Task 9)
-      reply.header('Vary', 'Accept-Profile');
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
     }
     // 'none' can still occur here: the gate above only checks the header is
@@ -1082,11 +1082,11 @@ export async function handleHead(request, reply) {
     if (neg.outcome === 'redirect') {
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
       reply.header('Content-Profile', `<${neg.rep.profile}>`);
-      reply.header('Vary', 'Accept-Profile');
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(303).header('Location', neg.rep.href).send();
     }
     if (neg.outcome === 'notacceptable') {
-      reply.header('Vary', 'Accept-Profile');
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(406).send();
     }
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;

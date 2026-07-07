@@ -84,11 +84,22 @@ describe('Accept-Profile file GET (--lws, lwsProfileConneg ON by default)', () =
     assert.equal(res.headers.get('location'), ALT);
     assert.equal(res.headers.get('content-profile'), `<${LINKS_PROFILE}>`);
     assert.match(res.headers.get('link') || '', /rel="profile"/);
+    // Final-review fix 1: the 303 short-circuit must carry the FULL Vary
+    // (same as the 200 serve path), not just 'Accept-Profile' — dropping
+    // Authorization here made a cache keyed on URL+Accept-Profile blind to
+    // the fact this outcome is authz-dependent (no-oracle cache-correctness).
+    const vary = res.headers.get('vary') || '';
+    assert.match(vary, /Authorization/, `303 Vary must include Authorization, got: ${vary}`);
+    assert.match(vary, /Accept-Profile/, `303 Vary must include Accept-Profile, got: ${vary}`);
   });
 
   it('Accept-Profile with no matching representation → 406', async () => {
     const res = await request(RES_PATH, { headers: { 'Accept-Profile': `<${UNKNOWN_PROFILE}>` } });
     assertStatus(res, 406);
+    // Final-review fix 1: same full-Vary requirement on the 406 short-circuit.
+    const vary = res.headers.get('vary') || '';
+    assert.match(vary, /Authorization/, `406 Vary must include Authorization, got: ${vary}`);
+    assert.match(vary, /Accept-Profile/, `406 Vary must include Accept-Profile, got: ${vary}`);
   });
 
   it('no Accept-Profile → conneg block skipped entirely, bare GET unchanged (200, no stamp)', async () => {

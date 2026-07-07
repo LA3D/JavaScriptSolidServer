@@ -251,9 +251,16 @@ export async function fromJsonLd(jsonLd, targetType, baseUri, connegEnabled = fa
  * - `Origin` — CORS headers echo the request's Origin
  */
 export function getVaryHeader(connegEnabled, mashlibEnabled = false, lwsEnabled = false) {
-  return (connegEnabled || mashlibEnabled || lwsEnabled)
+  if (!connegEnabled && !mashlibEnabled && !lwsEnabled) {
+    return 'Authorization, Origin';
+  }
+  // Accept-Profile only ever matters once profile conneg can engage, which
+  // requires --lws. A --conneg-only pod (no --lws) never negotiates
+  // profiles, so advertising the token there would breach "the --lws-off
+  // path MUST be byte-identical" for no benefit.
+  return lwsEnabled
     ? 'Accept, Accept-Profile, Authorization, Origin'
-    : 'Authorization, Origin';
+    : 'Accept, Authorization, Origin';
 }
 
 /**
