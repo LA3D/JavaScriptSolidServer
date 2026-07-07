@@ -78,6 +78,7 @@ export async function filterReadableAlternates(alternates, { origin, agentWebId,
     try { u = new URL(rep.href); } catch { continue; } // unparseable href → drop
     if (u.origin !== origin) continue; // off-origin → can't vouch for its ACLs
     if (isPublic) { out.push(rep); continue; }
+    // NOTE: urlToStoragePath is path-mode only (bare URL.pathname); under --subdomains it omits the pod-name prefix (carried-forward gap shared with SHACL admission, src/lws/admission.js). This pod runs path-mode; guard/fix before enabling --subdomains with conneg.
     const resourcePath = urlToStoragePath(rep.href);
     const isContainer = resourcePath.endsWith('/');
     const { allowed } = await checkAccess({

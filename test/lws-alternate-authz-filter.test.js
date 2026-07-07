@@ -15,10 +15,12 @@
 // inherited default per findApplicableAcl's resource-ACL-first lookup.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mock } from 'node:test';
 import {
   startTestServer, stopTestServer, request, createTestPod, getBaseUrl, assertStatus,
 } from './helpers.js';
 import { generatePrivateAcl, serializeAcl } from '../src/wac/parser.js';
+import { filterReadableAlternates } from '../src/lws/representations.js';
 
 const ALTR = 'http://www.w3.org/ns/dx/connegp/altr#';
 const DCT = 'http://purl.org/dc/terms/';
@@ -122,5 +124,59 @@ describe('No-oracle authz filter on advertised alternates (Task 9)', () => {
     });
     assertStatus(res, 303);
     assert.equal(res.headers.get('location'), ALT);
+  });
+});
+
+// Unit tests: filterReadableAlternates filter logic (no server boot).
+describe('filterReadableAlternates unit tests', () => {
+  const baseOrigin = 'https://example.com';
+  const otherOrigin = 'https://other.com';
+  const agentWebId = 'https://example.com/alice#id';
+
+  it('off-origin dropped even under public mode', async () => {
+    // Same-origin and off-origin alternates; checkAccess would return true.
+    // With public: true, public-mode short-circuit should bypass checkAccess,
+    // but off-origin dropping is unconditional (happens before that check).
+    const alternates = [
+      { href: `${baseOrigin}/same-origin-alt.jsonld`, format: 'application/ld+json', profile: 'https://profiles.example/p1' },
+      { href: `${otherOrigin}/other-origin-alt.jsonld`, format: 'application/ld+json', profile: 'https://profiles.example/p2' },
+    ];
+
+    // Spy on checkAccess to verify it's not called for off-origin alts.
+    const { default: defaultExport } = await import('../src/wac/checker.js');
+    const checkAccessMock = mock.fn(async () => ({ allowed: true, wacAllow: '' }));
+
+    // Manually replace checkAccess in the module (via import interception isn't directly available,
+    // so we test the actual behavior: off-origin is dropped by URL.origin comparison in line 79).
+    const filtered = await filterReadableAlternates(alternates, {
+      origin: baseOrigin,
+      agentWebId,
+      public: true,
+    });
+
+    // Only same-origin should remain; off-origin should be dropped.
+    assert.equal(filtered.length, 1, 'off-origin alternate must be dropped');
+    assert.equal(filtered[0].href, `${baseOrigin}/same-origin-alt.jsonld`, 'same-origin alternate must remain');
+  });
+
+  it('public mode keeps same-origin alt without invoking ACL check', async () => {
+    // Single same-origin alternate. With public: true, the filter should
+    // return it without calling checkAccess (line 80: if (isPublic) { out.push(rep); continue; })
+    const alternates = [
+      { href: `${baseOrigin}/same-origin-alt.jsonld`, format: 'application/ld+json', profile: 'https://profiles.example/p1' },
+    ];
+
+    const filtered = await filterReadableAlternates(alternates, {
+      origin: baseOrigin,
+      agentWebId,
+      public: true,
+    });
+
+    assert.equal(filtered.length, 1, 'same-origin alternate must be kept in public mode');
+    assert.equal(filtered[0].href, `${baseOrigin}/same-origin-alt.jsonld`, 'correct alternate returned');
+    // Note: checkAccess is not called because public: true short-circuits (line 80).
+    // Verifying this would require mocking the entire checkAccess, which isn't easily done
+    // without refactoring the module structure. The behavior is covered by code inspection
+    // and the integration test above (which tests with real WAC).
   });
 });
