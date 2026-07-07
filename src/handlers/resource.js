@@ -460,25 +460,32 @@ export async function handleGet(request, reply) {
   const connegEnabled = request.connegEnabled || false;
 
   // Profile conneg (DX-PROF-CONNEG cnpr:http) — only when explicitly
-  // enabled. Reads the resource's client-managed .meta altr: declarations
-  // and negotiates against Accept-Profile: redirect/notacceptable return
-  // early; self/none fall through and stamp the chosen profile on the
-  // normal serve path below (request.__lwsChosenProfile).
-  if (request.lwsProfileConneg) {
+  // enabled AND the client actually sent Accept-Profile. Gating on the
+  // header too (not just the flag) keeps a bare file GET byte-identical
+  // to pre-conneg behavior: no .meta read, no negotiation, zero extra
+  // I/O (fix round 1 — was running readRepresentations on every file GET).
+  // Reads the resource's client-managed .meta altr: declarations and
+  // negotiates against Accept-Profile: redirect/notacceptable return
+  // early; self falls through and stamps chosenProfile via getAllHeaders
+  // on every serve branch below.
+  let chosenProfile = null;
+  if (request.lwsProfileConneg && request.headers['accept-profile']) {
     const reps = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
-    const neg = negotiateProfile(request.headers['accept-profile'] || '', reps);
+    const neg = negotiateProfile(request.headers['accept-profile'], reps);
     if (neg.outcome === 'redirect') {
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
       reply.header('Content-Profile', `<${neg.rep.profile}>`);
+      reply.header('Vary', 'Accept-Profile');
       return reply.code(303).header('Location', neg.rep.href).send();
     }
     if (neg.outcome === 'notacceptable') {
       // advertise what IS available (authz-filtered in Task 9)
+      reply.header('Vary', 'Accept-Profile');
       return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
     }
-    // 'self' and 'none' fall through to normal serving; on 'self' we stamp the chosen profile below
-    request.__lwsChosenProfile = neg.outcome === 'self' ? neg.rep.profile : (reps.default?.profile || null);
-    request.__lwsRepresentations = reps;
+    // Only 'self' remains here (redirect/notacceptable returned above; 'none'
+    // can't occur since Accept-Profile is non-empty by the gate above).
+    chosenProfile = neg.rep.profile;
   }
 
   // Check if we should serve Mashlib data browser
@@ -552,7 +559,8 @@ export async function handleGet(request, reply) {
       resourceUrl,
       connegEnabled,
       mashlibEnabled: request.mashlibEnabled,
-      lwsEnabled: request.lwsEnabled
+      lwsEnabled: request.lwsEnabled,
+      chosenProfile
     });
     headers['X-Frame-Options'] = 'DENY';
     headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -579,7 +587,8 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        lwsEnabled: request.lwsEnabled
+        lwsEnabled: request.lwsEnabled,
+        chosenProfile
       });
       headers['Content-Range'] = `bytes ${start}-${end}/${stats.size}`;
       headers['Content-Length'] = chunkSize;
@@ -666,7 +675,8 @@ export async function handleGet(request, reply) {
             resourceUrl,
             connegEnabled,
             mashlibEnabled: request.mashlibEnabled,
-            lwsEnabled: request.lwsEnabled
+            lwsEnabled: request.lwsEnabled,
+            chosenProfile
           });
           headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -698,7 +708,8 @@ export async function handleGet(request, reply) {
           resourceUrl,
           connegEnabled,
           mashlibEnabled: request.mashlibEnabled,
-          lwsEnabled: request.lwsEnabled
+          lwsEnabled: request.lwsEnabled,
+          chosenProfile
         });
         headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -728,15 +739,11 @@ export async function handleGet(request, reply) {
     resourceUrl,
     connegEnabled,
     mashlibEnabled: request.mashlibEnabled,
-    lwsEnabled: request.lwsEnabled
+    lwsEnabled: request.lwsEnabled,
+    chosenProfile
   });
   if (isRdfContentType(actualContentType)) {
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
-  }
-  if (request.__lwsChosenProfile) {
-    const profileLink = `<${request.__lwsChosenProfile}>; rel="profile"`;
-    headers['Content-Profile'] = `<${request.__lwsChosenProfile}>`;
-    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${profileLink}` : profileLink;
   }
 
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));

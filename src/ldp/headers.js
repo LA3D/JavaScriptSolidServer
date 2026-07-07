@@ -107,9 +107,16 @@ export function getCorsHeaders(origin) {
 /**
  * Get all headers combined
  * @param {object} options
+ * @param {string|null} [options.chosenProfile] - DX-PROF-CONNEG cnpr:http:
+ *   when the file-GET path negotiated a 'self' outcome (Task 7), the caller
+ *   passes the matched profile URI here so it gets stamped (Content-Profile
+ *   + Link rel="profile") regardless of which serve branch handles the
+ *   response — centralizing this in getAllHeaders means every branch that
+ *   builds its headers here gets the stamp for free, instead of each branch
+ *   having to remember to append it itself.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false, chosenProfile = null }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
@@ -123,6 +130,11 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
     if (!suppressLinkset) parts.push(`<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`);
     const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
+  }
+  if (chosenProfile) {
+    const profileLink = `<${chosenProfile}>; rel="profile"`;
+    headers['Content-Profile'] = `<${chosenProfile}>`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${profileLink}` : profileLink;
   }
   return headers;
 }
