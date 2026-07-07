@@ -117,6 +117,25 @@ export function parseAcceptProfile(header) {
 }
 
 /**
+ * Negotiate a profile-conneg outcome (DX-PROF-CONNEG cnpr:http) against a
+ * resource's declared representations (readRepresentations()'s shape:
+ * { default, alternates }). EXACT match only — no profile hierarchy (P13).
+ * @param {string} acceptProfileHeader
+ * @param {{default: object|null, alternates: object[]}} representations
+ * @returns {{outcome: 'none'|'self'|'redirect'|'notacceptable', rep: object|null}}
+ */
+export function negotiateProfile(acceptProfileHeader, representations) {
+  const requested = parseAcceptProfile(acceptProfileHeader);
+  if (!requested.length) return { outcome: 'none', rep: null };
+  const all = [representations?.default, ...(representations?.alternates || [])].filter(Boolean);
+  for (const wanted of requested) {              // preference order
+    const rep = all.find((r) => r.profile === wanted);   // EXACT match (no hierarchy — P13)
+    if (rep) return { outcome: rep.href === representations.default?.href ? 'self' : 'redirect', rep };
+  }
+  return { outcome: 'notacceptable', rep: null };
+}
+
+/**
  * Check if content type is RDF
  */
 export function isRdfType(contentType) {
@@ -233,7 +252,7 @@ export async function fromJsonLd(jsonLd, targetType, baseUri, connegEnabled = fa
  */
 export function getVaryHeader(connegEnabled, mashlibEnabled = false, lwsEnabled = false) {
   return (connegEnabled || mashlibEnabled || lwsEnabled)
-    ? 'Accept, Authorization, Origin'
+    ? 'Accept, Accept-Profile, Authorization, Origin'
     : 'Authorization, Origin';
 }
 

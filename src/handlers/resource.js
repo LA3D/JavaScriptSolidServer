@@ -13,8 +13,10 @@ import {
   toJsonLd,
   fromJsonLd,
   RDF_TYPES,
-  getVaryHeader
+  getVaryHeader,
+  negotiateProfile
 } from '../rdf/conneg.js';
+import { readRepresentations } from '../lws/representations.js';
 import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
@@ -457,6 +459,28 @@ export async function handleGet(request, reply) {
   const storedContentType = getContentType(storagePath);
   const connegEnabled = request.connegEnabled || false;
 
+  // Profile conneg (DX-PROF-CONNEG cnpr:http) — only when explicitly
+  // enabled. Reads the resource's client-managed .meta altr: declarations
+  // and negotiates against Accept-Profile: redirect/notacceptable return
+  // early; self/none fall through and stamp the chosen profile on the
+  // normal serve path below (request.__lwsChosenProfile).
+  if (request.lwsProfileConneg) {
+    const reps = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+    const neg = negotiateProfile(request.headers['accept-profile'] || '', reps);
+    if (neg.outcome === 'redirect') {
+      reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
+      reply.header('Content-Profile', `<${neg.rep.profile}>`);
+      return reply.code(303).header('Location', neg.rep.href).send();
+    }
+    if (neg.outcome === 'notacceptable') {
+      // advertise what IS available (authz-filtered in Task 9)
+      return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
+    }
+    // 'self' and 'none' fall through to normal serving; on 'self' we stamp the chosen profile below
+    request.__lwsChosenProfile = neg.outcome === 'self' ? neg.rep.profile : (reps.default?.profile || null);
+    request.__lwsRepresentations = reps;
+  }
+
   // Check if we should serve Mashlib data browser
   // Only for RDF resources when Accept: text/html is requested
   if (shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
@@ -708,6 +732,11 @@ export async function handleGet(request, reply) {
   });
   if (isRdfContentType(actualContentType)) {
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
+  }
+  if (request.__lwsChosenProfile) {
+    const profileLink = `<${request.__lwsChosenProfile}>; rel="profile"`;
+    headers['Content-Profile'] = `<${request.__lwsChosenProfile}>`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${profileLink}` : profileLink;
   }
 
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));

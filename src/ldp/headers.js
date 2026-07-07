@@ -97,8 +97,8 @@ export function getCorsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS',
-    'Access-Control-Allow-Headers': 'Accept, Authorization, Content-Type, DPoP, If-Match, If-None-Match, Link, Range, Slug, Origin',
-    'Access-Control-Expose-Headers': 'Accept-Patch, Accept-Post, Accept-Ranges, Allow, Content-Length, Content-Range, Content-Type, ETag, Link, Location, Updates-Via, WAC-Allow, X-Cost, X-Balance, X-Pay-Currency',
+    'Access-Control-Allow-Headers': 'Accept, Accept-Profile, Authorization, Content-Type, DPoP, If-Match, If-None-Match, Link, Range, Slug, Origin',
+    'Access-Control-Expose-Headers': 'Accept-Patch, Accept-Post, Accept-Ranges, Allow, Content-Length, Content-Profile, Content-Range, Content-Type, ETag, Link, Location, Updates-Via, WAC-Allow, X-Cost, X-Balance, X-Pay-Currency',
     'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Max-Age': '86400'
   };
