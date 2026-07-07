@@ -51,8 +51,27 @@ export async function admit({ storage, content, contentType, resourceUrl,
   const shapeCt = (first === '{' || first === '[')
     ? 'application/ld+json'
     : 'text/turtle';
-  const shapeDs = await toDataset(shapeBuf, shapeCt, shapeUrl);
-  const dataDs  = await toDataset(content, contentType, resourceUrl);
+  // A corrupt/unparseable declared shape degrades to pass — same stance as the
+  // unresolvable-shape read above (a server-side config problem is never the
+  // writer's 4xx). An unparseable BODY in a governed container is the writer's
+  // problem: reject with a teaching violation (400 via the existing plumbing),
+  // never a 500 and never a silent admit (the ld+json-500 lesson).
+  let shapeDs;
+  try { shapeDs = await toDataset(shapeBuf, shapeCt, shapeUrl); } catch { return pass(); }
+  let dataDs;
+  try {
+    dataDs = await toDataset(content, contentType, resourceUrl);
+  } catch (e) {
+    return {
+      decision: 'reject', shapeUrl,
+      violations: [{
+        severity: 'Violation',
+        message: `body is not parseable as ${(contentType || '').split(';')[0].trim()} (${e.message}) — this container validates writes against ${shapeUrl}`,
+        path: null, focusNode: null, value: null,
+      }],
+      advisories: [],
+    };
+  }
   const { results } = await validate(dataDs, shapeDs);
 
   const violations = results.filter(r => r.severity === 'Violation');
