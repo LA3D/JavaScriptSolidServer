@@ -483,9 +483,12 @@ export async function handleGet(request, reply) {
       reply.header('Vary', 'Accept-Profile');
       return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
     }
-    // Only 'self' remains here (redirect/notacceptable returned above; 'none'
-    // can't occur since Accept-Profile is non-empty by the gate above).
-    chosenProfile = neg.rep.profile;
+    // 'none' can still occur here: the gate above only checks the header is
+    // truthy, but parseAcceptProfile can yield an empty array for a
+    // non-empty-but-content-less header (e.g. "Accept-Profile: ,"), which
+    // negotiateProfile reports as { outcome: 'none', rep: null }. Guard so
+    // that degrades to normal serving with no stamp instead of throwing.
+    chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
   }
 
   // Check if we should serve Mashlib data browser
@@ -631,6 +634,7 @@ export async function handleGet(request, reply) {
       connegEnabled,
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
+      chosenProfile
     });
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));

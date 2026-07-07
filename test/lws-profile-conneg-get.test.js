@@ -183,3 +183,92 @@ describe('Accept-Profile stamp on a non-serve-as-is branch (conneg enabled)', ()
     assert.match(res.headers.get('link') || '', /rel="profile"/);
   });
 });
+
+// Fix round 2, fix 1: the per-resource linkset branch (resource.js ~614-638,
+// application/linkset+json) built its own getAllHeaders({...}) call but
+// never passed chosenProfile, so a client asking for the linkset AND
+// negotiating a matching profile got the linkset body with no
+// Content-Profile/Link rel="profile" stamp. Proves that branch now stamps
+// like the other five file-GET serve branches.
+describe('Accept-Profile stamp on the linkset serve branch (Accept: application/linkset+json)', () => {
+  const RES_PATH2 = '/dana/mem/mem-b.md';
+  const DANA_PROFILE = 'https://profiles.example/dana-content';
+  let RES2;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('dana');
+    const base = getBaseUrl();
+    RES2 = `${base}${RES_PATH2}`;
+
+    await request('/dana/mem/', { method: 'PUT', auth: 'dana' });
+    await request(RES_PATH2, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# hi dana',
+      auth: 'dana',
+    });
+    await request(`${RES_PATH2}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RES2,
+        'altr:hasDefaultRepresentation': {
+          '@id': RES2, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': DANA_PROFILE },
+        },
+      }),
+      auth: 'dana',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('Accept-Profile: <default> + Accept: application/linkset+json → 200, linkset body, stamped', async () => {
+    const res = await request(RES_PATH2, {
+      headers: { 'Accept-Profile': `<${DANA_PROFILE}>`, 'Accept': 'application/linkset+json' },
+    });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type') || '', /^application\/linkset\+json/);
+    assert.equal(res.headers.get('content-profile'), `<${DANA_PROFILE}>`);
+    assert.match(res.headers.get('link') || '', /rel="profile"/);
+    const body = await res.json();
+    assert.ok(Array.isArray(body.linkset));
+  });
+});
+
+// Fix round 2, fix 2: chosenProfile was being set unconditionally to
+// neg.rep.profile on the assumption 'none' can't occur once Accept-Profile
+// is present. But parseAcceptProfile can return [] for a non-empty-but-
+// content-less header (e.g. "Accept-Profile: ,"), so negotiateProfile
+// returns { outcome: 'none', rep: null } and neg.rep.profile threw a
+// TypeError → 500. Proves the guarded form degrades gracefully instead.
+describe('Accept-Profile malformed-but-present header (regression, no crash)', () => {
+  const RES_PATH3 = '/erin/notes/note.md';
+  let RES3;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('erin');
+    const base = getBaseUrl();
+    RES3 = `${base}${RES_PATH3}`;
+
+    await request('/erin/notes/', { method: 'PUT', auth: 'erin' });
+    await request(RES_PATH3, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# erin',
+      auth: 'erin',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('Accept-Profile: "," (present but parses to empty) → 200, served normally, no stamp', async () => {
+    const res = await request(RES_PATH3, { headers: { 'Accept-Profile': ',' } });
+    assertStatus(res, 200);
+    assert.equal(res.headers.get('content-profile'), null);
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+    assert.equal(await res.text(), '# erin');
+  });
+});
