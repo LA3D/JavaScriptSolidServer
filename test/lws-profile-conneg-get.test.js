@@ -283,3 +283,55 @@ describe('Accept-Profile malformed-but-present header (regression, no crash)', (
     assert.equal(await res.text(), '# erin');
   });
 });
+
+describe('representation-list advertisement (DX-PROF-CONNEG §8.2.1 list-profiles)', () => {
+  // Emitted whenever the negotiation block runs (Accept-Profile present — the
+  // DX Example-19 "send Accept-Profile just in case" discovery pattern); bare
+  // GETs stay zero-I/O, cold discovery rides the linkset + capability hint.
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('alice');
+    const base = getBaseUrl();
+    RES = `${base}${RES_PATH}`;
+    ALT = `${base}${ALT_PATH}`;
+    await request('/alice/mem/', { method: 'PUT', auth: 'alice' });
+    await request(RES_PATH, { method: 'PUT', headers: { 'Content-Type': 'text/markdown' }, body: '# hello', auth: 'alice' });
+    await request(`${RES_PATH}.meta`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RES,
+        'altr:hasDefaultRepresentation': { '@id': RES, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': CONTENT_PROFILE } },
+        'altr:hasRepresentation': { '@id': ALT, 'dct:format': 'application/ld+json', 'dct:conformsTo': { '@id': LINKS_PROFILE } },
+      }),
+      auth: 'alice',
+    });
+  });
+  after(async () => { await stopTestServer(); });
+  let RES, ALT;
+
+  it('self (200) carries rel="canonical" + rel="alternate" with type/formats', async () => {
+    const res = await request(RES_PATH, { headers: { 'Accept-Profile': `<${CONTENT_PROFILE}>` } });
+    assertStatus(res, 200);
+    const link = res.headers.get('link') || '';
+    assert.ok(link.includes(`<${RES}>; rel="canonical"; type="text/markdown"; formats="${CONTENT_PROFILE}"`), `canonical entry in: ${link}`);
+    assert.ok(link.includes(`<${ALT}>; rel="alternate"; type="application/ld+json"; formats="${LINKS_PROFILE}"`), `alternate entry in: ${link}`);
+  });
+
+  it('406 advertises what IS available (alternate list, no profile stamp)', async () => {
+    const res = await request(RES_PATH, { headers: { 'Accept-Profile': `<${UNKNOWN_PROFILE}>` } });
+    assertStatus(res, 406);
+    const link = res.headers.get('link') || '';
+    assert.ok(link.includes('rel="canonical"'), `canonical on 406 in: ${link}`);
+    assert.ok(link.includes(`formats="${LINKS_PROFILE}"`), `alternate on 406 in: ${link}`);
+    assert.equal(res.headers.get('content-profile'), null);
+  });
+
+  it('bare GET still advertises nothing (zero-I/O additivity holds)', async () => {
+    const res = await request(RES_PATH);
+    assertStatus(res, 200);
+    const link = res.headers.get('link') || '';
+    assert.ok(!link.includes('rel="canonical"'), 'no canonical on bare GET');
+    assert.equal(res.headers.get('content-profile'), null);
+  });
+});

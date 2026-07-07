@@ -104,6 +104,26 @@ export function getCorsHeaders(origin) {
   };
 }
 
+// DX-PROF-CONNEG §8.2.1 list-profiles as Link header parts: the default
+// representation is rel="canonical", each alternate rel="alternate", with
+// type= (media type) and formats= (profile URI — the attribute every worked
+// example in DX-PROF-CONNEG and the IETF draft uses; the Figure-3 prose
+// saying `profile` is the spec contradicting its own examples). Returns the
+// comma-joined string, or null when there is nothing to advertise.
+export function representationLinks(representations) {
+  if (!representations) return null;
+  const part = (r, rel) => {
+    let s = `<${r.href}>; rel="${rel}"`;
+    if (r.format) s += `; type="${r.format}"`;
+    if (r.profile) s += `; formats="${r.profile}"`;
+    return s;
+  };
+  const parts = [];
+  if (representations.default) parts.push(part(representations.default, 'canonical'));
+  for (const a of representations.alternates || []) parts.push(part(a, 'alternate'));
+  return parts.length ? parts.join(', ') : null;
+}
+
 /**
  * Get all headers combined
  * @param {object} options
@@ -114,9 +134,15 @@ export function getCorsHeaders(origin) {
  *   response — centralizing this in getAllHeaders means every branch that
  *   builds its headers here gets the stamp for free, instead of each branch
  *   having to remember to append it itself.
+ * @param {object|null} [options.representations] - authz-filtered
+ *   { default, alternates } set: when present, the DX-PROF-CONNEG §8.2.1
+ *   list-profiles advertisement (rel="canonical"/"alternate" Link parts) is
+ *   appended. Callers pass it only when the set was already computed
+ *   (Accept-Profile engaged, or a linkset response) — never a bare-GET
+ *   hot-path .meta read.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false, chosenProfile = null }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false, chosenProfile = null, representations = null }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
@@ -135,6 +161,10 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
     const profileLink = `<${chosenProfile}>; rel="profile"`;
     headers['Content-Profile'] = `<${chosenProfile}>`;
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${profileLink}` : profileLink;
+  }
+  const repLinks = representationLinks(representations);
+  if (repLinks) {
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${repLinks}` : repLinks;
   }
   return headers;
 }

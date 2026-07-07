@@ -44,3 +44,23 @@ test('getVaryHeader: all off → Authorization, Origin only (no Accept)', () => 
   const vary = getVaryHeader(false, false, false);
   assert.equal(vary, 'Authorization, Origin');
 });
+
+test('alternate whose href collides with the default NEVER yields self', () => {
+  // blank-node/self-authored alternates must not serve the default's bytes
+  // under the alternate's profile (mis-stamp hazard) — always redirect.
+  const collided = {
+    default: { href: RES, format: 'text/markdown', profile: 'https://p/content' },
+    alternates: [{ href: RES, format: 'application/ld+json', profile: 'https://p/links' }],
+  };
+  const r = negotiateProfile('<https://p/links>', collided);
+  assert.equal(r.outcome, 'redirect');
+  assert.equal(r.rep.profile, 'https://p/links');
+});
+
+test('default and an alternate declaring the SAME profile → default wins (self)', () => {
+  const dup = {
+    default: { href: RES, format: 'text/markdown', profile: 'https://p/content' },
+    alternates: [{ href: RES + '.alt', format: 'text/markdown', profile: 'https://p/content' }],
+  };
+  assert.equal(negotiateProfile('<https://p/content>', dup).outcome, 'self');
+});

@@ -15,7 +15,6 @@
 // inherited default per findApplicableAcl's resource-ACL-first lookup.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mock } from 'node:test';
 import {
   startTestServer, stopTestServer, request, createTestPod, getBaseUrl, assertStatus,
 } from './helpers.js';
@@ -142,12 +141,9 @@ describe('filterReadableAlternates unit tests', () => {
       { href: `${otherOrigin}/other-origin-alt.jsonld`, format: 'application/ld+json', profile: 'https://profiles.example/p2' },
     ];
 
-    // Spy on checkAccess to verify it's not called for off-origin alts.
-    const { default: defaultExport } = await import('../src/wac/checker.js');
-    const checkAccessMock = mock.fn(async () => ({ allowed: true, wacAllow: '' }));
-
-    // Manually replace checkAccess in the module (via import interception isn't directly available,
-    // so we test the actual behavior: off-origin is dropped by URL.origin comparison in line 79).
+    // Off-origin dropping is pure URL.origin comparison, upstream of any ACL
+    // check - proven by behavior: with public:true even a permissive ACL result
+    // could not save an off-origin alt, so its absence pins the origin gate.
     const filtered = await filterReadableAlternates(alternates, {
       origin: baseOrigin,
       agentWebId,
@@ -159,9 +155,10 @@ describe('filterReadableAlternates unit tests', () => {
     assert.equal(filtered[0].href, `${baseOrigin}/same-origin-alt.jsonld`, 'same-origin alternate must remain');
   });
 
-  it('public mode keeps same-origin alt without invoking ACL check', async () => {
-    // Single same-origin alternate. With public: true, the filter should
-    // return it without calling checkAccess (line 80: if (isPublic) { out.push(rep); continue; })
+  it('public mode keeps a same-origin alt (WAC short-circuit)', async () => {
+    // Single same-origin alternate with NO ACL provisioned: under real WAC
+    // checkAccess would deny-by-default, so the alt surviving proves the
+    // public:true short-circuit fired (delete it and this test fails).
     const alternates = [
       { href: `${baseOrigin}/same-origin-alt.jsonld`, format: 'application/ld+json', profile: 'https://profiles.example/p1' },
     ];
@@ -174,9 +171,5 @@ describe('filterReadableAlternates unit tests', () => {
 
     assert.equal(filtered.length, 1, 'same-origin alternate must be kept in public mode');
     assert.equal(filtered[0].href, `${baseOrigin}/same-origin-alt.jsonld`, 'correct alternate returned');
-    // Note: checkAccess is not called because public: true short-circuits (line 80).
-    // Verifying this would require mocking the entire checkAccess, which isn't easily done
-    // without refactoring the module structure. The behavior is covered by code inspection
-    // and the integration test above (which tests with real WAC).
   });
 });

@@ -127,10 +127,15 @@ export function parseAcceptProfile(header) {
 export function negotiateProfile(acceptProfileHeader, representations) {
   const requested = parseAcceptProfile(acceptProfileHeader);
   if (!requested.length) return { outcome: 'none', rep: null };
-  const all = [representations?.default, ...(representations?.alternates || [])].filter(Boolean);
-  for (const wanted of requested) {              // preference order
-    const rep = all.find((r) => r.profile === wanted);   // EXACT match (no hierarchy — P13)
-    if (rep) return { outcome: rep.href === representations.default?.href ? 'self' : 'redirect', rep };
+  for (const wanted of requested) {              // preference order; EXACT match (no hierarchy — P13)
+    // Outcome is decided by WHICH SLOT matched, never by href equality: an
+    // alternate whose href collapses to the resource's own URL (blank-node/
+    // self-authored) must not serve the default's bytes under the alternate's
+    // profile (mis-stamp). Default checked first, so a duplicate profile
+    // declaration resolves to 'self'.
+    if (representations?.default?.profile === wanted) return { outcome: 'self', rep: representations.default };
+    const rep = (representations?.alternates || []).find((r) => r.profile === wanted);
+    if (rep) return { outcome: 'redirect', rep };
   }
   return { outcome: 'notacceptable', rep: null };
 }
