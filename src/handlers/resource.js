@@ -358,6 +358,32 @@ export async function handleGet(request, reply) {
       || negotiated === RDF_TYPES.N3
       || negotiated === 'application/n-triples';
 
+    // Profile conneg (DX-PROF-CONNEG cnpr:http) for the container's RDF
+    // listing representations — mirrors the file-GET gate below. Only when
+    // explicitly enabled AND the client sent Accept-Profile. index.html and
+    // the mashlib data-browser wrapper above already returned early and are
+    // out of scope (they're not part of the altr: representation family
+    // being negotiated here). Reads the container's client-managed .meta
+    // altr: declarations and negotiates against Accept-Profile: redirect/
+    // notacceptable return early; self falls through and stamps
+    // chosenProfile via getAllHeaders on the listing branches below.
+    let chosenProfile = null;
+    if (request.lwsProfileConneg && request.headers['accept-profile']) {
+      const reps = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+      const neg = negotiateProfile(request.headers['accept-profile'], reps);
+      if (neg.outcome === 'redirect') {
+        reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
+        reply.header('Content-Profile', `<${neg.rep.profile}>`);
+        reply.header('Vary', 'Accept-Profile');
+        return reply.code(303).header('Location', neg.rep.href).send();
+      }
+      if (neg.outcome === 'notacceptable') {
+        reply.header('Vary', 'Accept-Profile');
+        return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
+      }
+      chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
+    }
+
     // LWS container representation — only when enabled AND explicitly negotiated.
     if (request.lwsEnabled && negotiated === RDF_TYPES.LWS_JSON) {
       const lws = generateLwsContainer(resourceUrl, entries || []);
@@ -369,7 +395,8 @@ export async function handleGet(request, reply) {
         resourceUrl,
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
-        lwsEnabled: request.lwsEnabled
+        lwsEnabled: request.lwsEnabled,
+        chosenProfile
       });
       headers['Cache-Control'] = RDF_CACHE_CONTROL;
       const parent = parentContainerUrl(resourceUrl);
@@ -387,12 +414,14 @@ export async function handleGet(request, reply) {
       const declaredTypes = await readDeclaredTypes(storage, storagePath);
       const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
       const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
+      const representations = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
       const ls = generateLinkset(resourceUrl, {
         parentUrl: parentContainerUrl(resourceUrl),
         isContainer: true,
         describedByShapes,
         declaredTypes,
         conformsTo,
+        representations,
       });
       const headers = getAllHeaders({
         isContainer: true,
@@ -403,6 +432,7 @@ export async function handleGet(request, reply) {
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
         lwsEnabled: request.lwsEnabled,
+        chosenProfile
       });
       headers['Cache-Control'] = RDF_CACHE_CONTROL;
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -427,7 +457,8 @@ export async function handleGet(request, reply) {
           resourceUrl,
           connegEnabled,
           mashlibEnabled: request.mashlibEnabled,
-          lwsEnabled: request.lwsEnabled
+          lwsEnabled: request.lwsEnabled,
+          chosenProfile
         });
         headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -447,7 +478,8 @@ export async function handleGet(request, reply) {
       resourceUrl,
       connegEnabled,
       mashlibEnabled: request.mashlibEnabled,
-      lwsEnabled: request.lwsEnabled
+      lwsEnabled: request.lwsEnabled,
+      chosenProfile
     });
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -618,12 +650,14 @@ export async function handleGet(request, reply) {
     const declaredTypes = await readDeclaredTypes(storage, storagePath);
     const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
     const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
+    const representations = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
     const ls = generateLinkset(resourceUrl, {
       parentUrl: parentContainerUrl(resourceUrl),
       isContainer: false,
       describedByShapes,
       declaredTypes,
       conformsTo,
+      representations,
     });
     const headers = getAllHeaders({
       isContainer: false,
@@ -934,6 +968,13 @@ export async function handleHead(request, reply) {
   let headEtag = stats.etag;
   let isMashlibResponse = false;
   let suppressLinkset = false;
+  let chosenProfile = null;
+  // Set when index.html or the mashlib wrapper shadows the container
+  // listing — those representations are out of scope for profile conneg
+  // (mirrors GET, where both branches return before reaching the
+  // negotiation block). Files are never skipped (GET stamps chosenProfile
+  // on every file serve branch, mashlib included).
+  let skipProfileNegotiation = false;
 
   if (stats.isDirectory) {
     const indexPath = storagePath.endsWith('/') ? `${storagePath}index.html` : `${storagePath}/index.html`;
@@ -981,11 +1022,13 @@ export async function handleHead(request, reply) {
       // Accept with text/html, so advertising linkset conneg here is a
       // false affordance (cold-probe defect c).
       suppressLinkset = true;
+      skipProfileNegotiation = true;
     } else if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
       // Container listing via mashlib — suffix the ETag (#456)
       headEtag = stats.etag.replace(/"$/, '-html"');
       contentType = 'text/html';
       isMashlibResponse = true;
+      skipProfileNegotiation = true;
     }
   } else {
     const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
@@ -1005,6 +1048,28 @@ export async function handleHead(request, reply) {
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
       return reply.code(304).send();
     }
+  }
+
+  // Profile conneg (DX-PROF-CONNEG cnpr:http) — mirrors the GET gate,
+  // placed after the 304 check (parity: a cache-valid conditional request
+  // short-circuits before any profile redirect/406, same as GET). Skipped
+  // for container representations that index.html/mashlib already shadow
+  // (skipProfileNegotiation); files are never skipped, matching GET's
+  // universal chosenProfile stamp across every file serve branch.
+  if (!skipProfileNegotiation && request.lwsProfileConneg && request.headers['accept-profile']) {
+    const reps = await readRepresentations(storage, storagePath + '.meta', resourceUrl);
+    const neg = negotiateProfile(request.headers['accept-profile'], reps);
+    if (neg.outcome === 'redirect') {
+      reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
+      reply.header('Content-Profile', `<${neg.rep.profile}>`);
+      reply.header('Vary', 'Accept-Profile');
+      return reply.code(303).header('Location', neg.rep.href).send();
+    }
+    if (neg.outcome === 'notacceptable') {
+      reply.header('Vary', 'Accept-Profile');
+      return reply.code(406).send();
+    }
+    chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
   }
 
   let negotiationConverted = false;
@@ -1044,7 +1109,8 @@ export async function handleHead(request, reply) {
     connegEnabled,
     mashlibEnabled: request.mashlibEnabled,
     suppressLinkset,
-    lwsEnabled: request.lwsEnabled
+    lwsEnabled: request.lwsEnabled,
+    chosenProfile
   });
 
   // Mirror GET's Cache-Control for RDF responses (#552 header parity).
