@@ -3,7 +3,7 @@
 // altr: model) from its client-managed .meta. Opaque: no profile-hierarchy
 // resolution (P13) — conformsTo/format are surfaced verbatim. [] when .meta
 // is missing/unreadable, mirroring src/lws/constraint.js.
-import { toDataset } from './admission-rdf.js';
+import { toDataset } from '../rdf/dataset.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { urlToStoragePath } from './admission.js';

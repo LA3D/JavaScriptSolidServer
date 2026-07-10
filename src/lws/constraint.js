@@ -1,5 +1,5 @@
 // src/lws/constraint.js
-import { toDataset } from './admission-rdf.js';
+import { toDataset } from '../rdf/dataset.js';
 
 const DESCRIBEDBY = 'http://www.w3.org/2007/05/powder-s#describedby';
 const DCT_CONFORMS = 'http://purl.org/dc/terms/conformsTo';

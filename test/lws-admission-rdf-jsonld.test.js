@@ -4,7 +4,7 @@
 // documentLoader, LWS v1 preloaded from the pod's own mirror).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toDataset } from '../src/lws/admission-rdf.js';
+import { toDataset } from '../src/rdf/dataset.js';
 import { readRepresentations } from '../src/lws/representations.js';
 import { admit } from '../src/lws/admission.js';
 
@@ -133,10 +133,14 @@ test('admit: corrupt declared shape degrades to pass (missing-shape precedent)',
   assert.equal(r.decision, 'pass');
 });
 
-test('toDataset: JSS legacy store-array (context on element 0 only) — restriction NOT orphaned', async () => {
+test('toDataset: JSS legacy store-array (context on element 0 only) — restriction now ORPHANS under standard JSON-LD (shim removed, spec 2026-07-10 §3)', async () => {
   // JSS's own toJsonLd store format: top-level array, @context only on [0].
-  // The shim must give elements 1..n the document context so e.g. sh: keys
-  // expand into the SHACL namespace instead of scheme-'sh:' garbage.
+  // The shim that hoisted element 0's context onto elements 1..n is retired —
+  // a top-level array is standard JSON-LD now (decision log #3). Elements
+  // without their own @context get NO prefix expansion: sh:path/sh:minCount
+  // stay literal scheme-'sh:' predicates, not the SHACL namespace. Fixing the
+  // store form itself is a later serializer-round task; this seam no longer
+  // papers over it.
   const SH = 'http://www.w3.org/ns/shacl#';
   const stored = [
     { '@context': { sh: SH, ex: 'http://ex.org/' },
@@ -146,9 +150,10 @@ test('toDataset: JSS legacy store-array (context on element 0 only) — restrict
   ];
   const ds = await toDataset(buf(stored), 'application/ld+json', 'http://h/shapes/X');
   const ps = preds(ds);
-  assert.ok(ps.has(SH + 'path'), 'sh:path expanded via the hoisted context');
-  assert.ok(ps.has(SH + 'minCount'), 'sh:minCount expanded');
-  assert.ok(!([...ps].some((p) => p.startsWith('sh:'))), 'no scheme-"sh:" garbage predicates');
+  assert.ok(ps.has(SH + 'property'), 'element 0 still expands via its own @context');
+  assert.ok(!ps.has(SH + 'path'), 'sh:path on element 1 no longer expands — no hoisted context');
+  assert.ok(!ps.has(SH + 'minCount'), 'sh:minCount on element 1 no longer expands');
+  assert.ok(ps.has('sh:path'), 'unresolved compact IRI kept literal, per standard JSON-LD IRI expansion');
 });
 
 test('toDataset: array element with its OWN @context keeps it (shim never overwrites)', async () => {
