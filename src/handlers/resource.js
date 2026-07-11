@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders, representationLinks } from '../ldp/headers.js';
@@ -180,6 +181,64 @@ function getMashlibEtag(request, stats, storagePath) {
   return { willServeMashlib, effectiveEtag };
 }
 
+// Task 10 (probe-#6 F2): one strong ETag covering every representation of a
+// resource let a format-switching client 304-revalidate a wrong-format
+// cache entry, and a WAC-filtered listing varied by requester under one
+// shared ETag. variantEtag suffixes the mashlib '-html' precedent above
+// for RDF representations that DIFFER from what's stored — own-format
+// reads (Task 1's short-circuit: bytes are bytes) keep the bare
+// stats.etag. --lws-gated everywhere it's applied below.
+const VARIANT_KEYS = {
+  [RDF_TYPES.TURTLE]: 'ttl',
+  [RDF_TYPES.NTRIPLES]: 'nt',
+  [RDF_TYPES.NQUADS]: 'nq',
+  [RDF_TYPES.LWS_JSON]: 'lws',
+  [RDF_TYPES.LINKSET]: 'ls',
+};
+
+function variantEtag(etag, key) {
+  return etag.replace(/"$/, `-${key}"`);
+}
+
+// Container-listing ETag: representation variant (per the served content
+// type) + an 8-char md5 of the sorted VISIBLE member names. WAC-filtered
+// listings vary by requester (S1) — an anon and an owner listing of the
+// same container must not share one ETag. `visKey` is null when the
+// caller didn't filter (public mode, or --lws off).
+function containerListingEtag(etag, contentType, visKey) {
+  const repKey = VARIANT_KEYS[contentType];
+  const e = repKey ? variantEtag(etag, repKey) : etag;
+  return visKey ? variantEtag(e, visKey) : e;
+}
+
+// Predicts a FILE GET's eventual representation ETag from sync,
+// content-independent inputs only (stored type / Accept / URL) — the same
+// derivation the real --lws serving arm below runs (algebraically
+// equivalent to serve.js's own-format check: a real conversion happens
+// exactly when the negotiated target differs from the stored type — see
+// isOwnFormat in src/rdf/serve.js). Lets the early If-None-Match check
+// compare against the right variant before the file is read, so a
+// format-switching client can't 304-revalidate a wrong-format cache entry;
+// the real branches below reuse this same value, so the header and the
+// 304 comparison never drift apart.
+function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
+  if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
+  const acceptHeader = request.headers.accept || '';
+  if (selectContentType(acceptHeader, connegEnabled) === RDF_TYPES.LINKSET) {
+    return variantEtag(stats.etag, 'ls');
+  }
+  const storedContentType = getContentType(storagePath);
+  if (connegEnabled && isRdfSourceType(storedContentType)) {
+    const negotiated = selectContentType(acceptHeader, connegEnabled, true);
+    const negotiatedLws = QUADS_OUTPUTS[negotiated] ? negotiated : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
+    const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+    if (quadsTarget && quadsTarget !== storedContentType) {
+      return variantEtag(stats.etag, VARIANT_KEYS[quadsTarget]);
+    }
+  }
+  return stats.etag;
+}
+
 /**
  * Handle GET request
  */
@@ -195,18 +254,25 @@ export async function handleGet(request, reply) {
     return reply.code(404).send({ error: 'Not Found' });
   }
 
+  const connegEnabled = request.connegEnabled || false;
   const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
+  // Task 10 (probe-#6 F2): the representation-specific ETag a FILE GET will
+  // actually emit, predicted up front (see predictFileEtag) — unused for
+  // containers, whose listing ETag depends on WAC-filtered membership and
+  // is computed further down once entries are read.
+  const fileEtag = stats.isDirectory ? null
+    : predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled);
 
-  // For non-containers, check If-None-Match early using the effective
-  // ETag. For containers, defer the check until we know which branch
-  // (index.html vs listing vs mashlib) will run — each uses a
-  // different ETag source (#456).
+  // For non-containers, check If-None-Match early using the predicted
+  // representation ETag (Task 10). For containers, defer the check until
+  // we know which branch (index.html vs listing vs mashlib) will run —
+  // each uses a different ETag source (#456).
   const ifNoneMatch = request.headers['if-none-match'];
   if (ifNoneMatch && !stats.isDirectory) {
-    const check = checkIfNoneMatchForGet(ifNoneMatch, effectiveEtag);
+    const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
-      reply.header('ETag', effectiveEtag);
-      reply.header('Vary', getVaryHeader(request.connegEnabled, request.mashlibEnabled));
+      reply.header('ETag', fileEtag);
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
       return reply.code(304).send();
     }
   }
@@ -215,8 +281,6 @@ export async function handleGet(request, reply) {
 
   // Handle container
   if (stats.isDirectory) {
-    const connegEnabled = request.connegEnabled || false;
-
     // Check for index.html (serves as both profile and container representation)
     const indexPath = storagePath.endsWith('/') ? `${storagePath}index.html` : `${storagePath}/index.html`;
     const indexExists = await storage.exists(indexPath);
@@ -345,31 +409,66 @@ export async function handleGet(request, reply) {
     }
 
     // No index.html, return JSON-LD container listing
-    // Deferred 304 check for container listings (#456)
-    if (ifNoneMatch) {
-      const check = checkIfNoneMatchForGet(ifNoneMatch, effectiveEtag);
-      if (!check.ok && check.notModified) {
-        reply.header('ETag', effectiveEtag);
-        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-        return reply.code(304).send();
-      }
-    }
-
     let entries = await storage.listContainer(storagePath);
     // S1 (spec 2026-07-10 §4): WAC-filter the membership per requester
     // before ANY rendering (ldp:contains, lws+json items[], Turtle, mashlib
     // embed all flow from `entries`/`jsonLd`). --public mode has no WAC to
     // filter by; --lws off keeps the upstream unfiltered listing.
+    let visKey = null;
     if (request.lwsEnabled && !request.config?.public) {
       const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       entries = await filterReadableEntries({
         entries: entries || [], containerUrl: resourceUrl, containerStoragePath: storagePath, agentWebId,
       });
+      // Task 10 (probe-#6 F2): visibility hash — an anon and an owner
+      // listing of the same container must not share one strong ETag.
+      visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
     }
+
+    // Pick the negotiated RDF type using q-aware Accept parsing (#325).
+    // LWS media type negotiation is always active when lwsEnabled, even
+    // without full conneg — selectContentType handles it independently.
+    // Computed here (before the mashlib check and the 304 check below) so
+    // Task 10's representation- and visibility-keyed listing ETag is known
+    // before either needs it.
+    const negotiated = (connegEnabled || request.lwsEnabled)
+      ? selectContentType(acceptHeader, connegEnabled, request.lwsEnabled)
+      : null;
+    const wantsTurtle = negotiated === RDF_TYPES.TURTLE
+      || negotiated === RDF_TYPES.N3
+      || negotiated === 'application/n-triples';
+    const willMashlib = shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json');
+    const listingContentType = willMashlib ? 'text/html'
+      : negotiated === RDF_TYPES.LWS_JSON ? RDF_TYPES.LWS_JSON
+      : negotiated === RDF_TYPES.LINKSET ? RDF_TYPES.LINKSET
+      : (request.lwsEnabled && QUADS_OUTPUTS[negotiated]) ? QUADS_OUTPUTS[negotiated]
+      : wantsTurtle ? RDF_TYPES.TURTLE
+      : RDF_TYPES.JSON_LD;
+    // --lws-off / mashlib-HTML keep the pre-Task-10 etag source (bare or
+    // the mashlib '-html' suffix) — mashlib's embedded listing isn't part
+    // of the altr: representation family this task scopes (brief: lws+json/
+    // linkset/quads/turtle/ld+json).
+    const listingEtag = (request.lwsEnabled && !willMashlib)
+      ? containerListingEtag(stats.etag, listingContentType, visKey)
+      : effectiveEtag;
+
+    // Deferred 304 check for container listings (#456) — compared against
+    // the representation- and visibility-keyed ETag above (Task 10,
+    // probe-#6 F2), not the bare container ETag, so a format-switching or
+    // visibility-switching client can't 304-revalidate the wrong variant.
+    if (ifNoneMatch) {
+      const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
+      if (!check.ok && check.notModified) {
+        reply.header('ETag', listingEtag);
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+        return reply.code(304).send();
+      }
+    }
+
     const jsonLd = generateContainerJsonLd(resourceUrl, entries || []);
 
     // Check if we should serve Mashlib data browser for containers
-    if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
+    if (willMashlib) {
       // Phase 1 of #7: also embed the container's JSON-LD listing as a
       // data island so consumers that look for `<script
       // type="application/ld+json">` (search-engine rich-results,
@@ -402,16 +501,6 @@ export async function handleGet(request, reply) {
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
       return reply.type('text/html').send(html);
     }
-
-    // Pick the negotiated RDF type using q-aware Accept parsing (#325).
-    // LWS media type negotiation is always active when lwsEnabled, even
-    // without full conneg — selectContentType handles it independently.
-    const negotiated = (connegEnabled || request.lwsEnabled)
-      ? selectContentType(acceptHeader, connegEnabled, request.lwsEnabled)
-      : null;
-    const wantsTurtle = negotiated === RDF_TYPES.TURTLE
-      || negotiated === RDF_TYPES.N3
-      || negotiated === 'application/n-triples';
 
     // Profile conneg (DX-PROF-CONNEG cnpr:http) for the container's RDF
     // listing representations — mirrors the file-GET gate below. Only when
@@ -460,7 +549,7 @@ export async function handleGet(request, reply) {
       const lws = generateLwsContainer(resourceUrl, entries || []);
       const headers = getAllHeaders({
         isContainer: true,
-        etag: stats.etag,
+        etag: listingEtag,
         contentType: RDF_TYPES.LWS_JSON,
         origin,
         resourceUrl,
@@ -497,7 +586,7 @@ export async function handleGet(request, reply) {
       });
       const headers = getAllHeaders({
         isContainer: true,
-        etag: stats.etag,
+        etag: listingEtag,
         contentType: RDF_TYPES.LINKSET,
         origin,
         resourceUrl,
@@ -524,7 +613,7 @@ export async function handleGet(request, reply) {
         if (served.ok) {
           const headers = getAllHeaders({
             isContainer: true,
-            etag: stats.etag,
+            etag: listingEtag,
             contentType: served.contentType,
             origin,
             resourceUrl,
@@ -555,7 +644,7 @@ export async function handleGet(request, reply) {
 
         const headers = getAllHeaders({
           isContainer: true,
-          etag: stats.etag,
+          etag: listingEtag,
           contentType: 'text/turtle',
           origin,
           resourceUrl,
@@ -577,7 +666,7 @@ export async function handleGet(request, reply) {
 
     const headers = getAllHeaders({
       isContainer: true,
-      etag: stats.etag,
+      etag: listingEtag,
       contentType: 'application/ld+json',
       origin,
       resourceUrl,
@@ -595,7 +684,6 @@ export async function handleGet(request, reply) {
 
   // Handle resource
   const storedContentType = getContentType(storagePath);
-  const connegEnabled = request.connegEnabled || false;
 
   // Profile conneg (DX-PROF-CONNEG cnpr:http) — only when explicitly
   // enabled AND the client actually sent Accept-Profile. Gating on the
@@ -785,7 +873,7 @@ export async function handleGet(request, reply) {
     });
     const headers = getAllHeaders({
       isContainer: false,
-      etag: stats.etag,
+      etag: fileEtag,
       contentType: RDF_TYPES.LINKSET,
       origin,
       resourceUrl,
@@ -880,7 +968,7 @@ export async function handleGet(request, reply) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
           const headers = getAllHeaders({
             isContainer: false,
-            etag: stats.etag,
+            etag: fileEtag,
             contentType: served.ok ? served.contentType : 'application/problem+json',
             origin,
             resourceUrl,
@@ -1276,10 +1364,28 @@ export async function handleHead(request, reply) {
       contentType = 'text/html';
       isMashlibResponse = true;
       skipProfileNegotiation = true;
+    } else if (request.lwsEnabled) {
+      // Task 10 (probe-#6 F2): mirror GET's representation- and
+      // visibility-keyed listing ETag — same repKey-per-contentType map
+      // (`contentType` is already final above), same WAC-filtered
+      // visibility hash, so HEAD and GET agree byte-for-byte.
+      let entries = await storage.listContainer(storagePath);
+      let visKey = null;
+      if (!request.config?.public) {
+        const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+        entries = await filterReadableEntries({
+          entries: entries || [], containerUrl: resourceUrl, containerStoragePath: storagePath, agentWebId,
+        });
+        visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
+      }
+      headEtag = containerListingEtag(stats.etag, contentType, visKey);
     }
   } else {
     const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
-    headEtag = effectiveEtag;
+    // Task 10 (probe-#6 F2): same prediction GET uses — guarantees
+    // HEAD/GET emit identical ETags per variant, including the LWS
+    // linkset override applied further below (negotiationConverted block).
+    headEtag = predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled);
     isMashlibResponse = willServeMashlib;
     // contentType for files is negotiated AFTER the If-None-Match check
     // below — negotiation may read the file (#552), and GET 304s files
