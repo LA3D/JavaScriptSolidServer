@@ -64,3 +64,17 @@ test('QUADS_OUTPUTS maps text/n3 to Turtle (existing N3-serves-Turtle behavior)'
   assert.equal(QUADS_OUTPUTS[RDF_TYPES.N3], RDF_TYPES.TURTLE);
   assert.equal(QUADS_OUTPUTS[RDF_TYPES.JSON_LD], undefined);
 });
+
+test('serveStoredRdf: empty body → 406 whose detail states the real cause, no remote-@context claim', async () => {
+  const r = await serveStoredRdf({ bytes: Buffer.from(''), targetType: RDF_TYPES.TURTLE, baseIri: BASE });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 406);
+  assert.match(r.problem.detail, /empty JSON-LD body/);
+  assert.ok(!r.problem.detail.includes('remote @context'));
+});
+
+test('serveStoredRdf: malformed JSON → 406 stating the parse error, no remote-@context claim', async () => {
+  const r = await serveStoredRdf({ bytes: Buffer.from('{not json'), targetType: RDF_TYPES.TURTLE, baseIri: BASE });
+  assert.equal(r.ok, false);
+  assert.ok(!r.problem.detail.includes('remote @context'));
+});

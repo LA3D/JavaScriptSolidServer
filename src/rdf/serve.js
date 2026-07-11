@@ -63,8 +63,9 @@ async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) 
   try {
     dataset = await toDataset(bytes, sourceContentType, baseIri);
   } catch (e) {
+    const remoteCtx = e.message.includes('remote @context fetch disabled');
     return notAcceptable(baseIri, targetType,
-      `the stored document did not parse as ${sourceContentType} (${e.message}) — a remote @context cannot be fetched (offline document loader).`,
+      `the stored document did not parse as ${sourceContentType} (${e.message})${remoteCtx ? ' — a remote @context cannot be fetched (offline document loader).' : '.'}`,
       [RDF_TYPES.JSON_LD]);
   }
   if (!GRAPH_CAPABLE.has(targetType) && hasNamedGraphs(dataset)) {
@@ -86,5 +87,5 @@ export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON
 /** The same policy WITHOUT serializing — HEAD parity (#552 discipline). */
 export async function checkServable({ bytes, sourceContentType = RDF_TYPES.JSON_LD, targetType, baseIri }) {
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
-  return { ok: p.ok === true };
+  return { ok: p.ok };
 }
