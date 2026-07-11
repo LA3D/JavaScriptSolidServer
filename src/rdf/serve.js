@@ -25,6 +25,17 @@ const N3_FORMATS = {
 };
 const GRAPH_CAPABLE = new Set([RDF_TYPES.NQUADS]);
 
+// Serving-arm source gate (spec 2026-07-11 §2): what counts as an RDF SOURCE.
+// Deliberately narrower than utils/url.js isRdfContentType — plain application/json
+// is NOT RDF for serving (probe-#6: it parsed as JSON-LD to zero quads → empty
+// Turtle 200). The legacy predicate stays for --lws-off byte-identity.
+const RDF_SOURCE_TYPES = new Set([
+  RDF_TYPES.JSON_LD, RDF_TYPES.TURTLE, RDF_TYPES.N3, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS,
+]);
+export function isRdfSourceType(contentType) {
+  return RDF_SOURCE_TYPES.has((contentType || '').split(';')[0].trim().toLowerCase());
+}
+
 export function hasNamedGraphs(dataset) {
   for (const q of dataset) if (q.graph.termType !== 'DefaultGraph') return true;
   return false;
@@ -76,8 +87,17 @@ async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) 
   return { ok: true, dataset };
 }
 
+// Own format = bytes are bytes; conversions = parse or teach. N3 is excluded
+// because QUADS_OUTPUTS maps it to Turtle — serving N3 bytes labeled
+// text/turtle would mislabel; N3 sources still go through the parser.
+const isOwnFormat = (sourceContentType, targetType) =>
+  QUADS_OUTPUTS[sourceContentType] === targetType && sourceContentType !== RDF_TYPES.N3;
+
 /** Serve stored RDF bytes as a quads format under the 406-teaching policy. */
 export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON_LD, targetType, baseIri }) {
+  if (isOwnFormat(sourceContentType, targetType)) {
+    return { ok: true, content: bytes, contentType: sourceContentType };
+  }
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
   if (!p.ok) return p;
   const content = await datasetToFormat(p.dataset, targetType);
@@ -86,6 +106,7 @@ export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON
 
 /** The same policy WITHOUT serializing — HEAD parity (#552 discipline). */
 export async function checkServable({ bytes, sourceContentType = RDF_TYPES.JSON_LD, targetType, baseIri }) {
+  if (isOwnFormat(sourceContentType, targetType)) return { ok: true };
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
   return { ok: p.ok };
 }

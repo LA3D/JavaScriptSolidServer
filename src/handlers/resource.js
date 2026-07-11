@@ -26,7 +26,7 @@ import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
-import { serveStoredRdf, checkServable, QUADS_OUTPUTS } from '../rdf/serve.js';
+import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS } from '../rdf/serve.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -824,17 +824,22 @@ export async function handleGet(request, reply) {
         // Fall through to serve HTML if conversion fails
         console.error('Failed to convert HTML data island to Turtle:', err.message);
       }
-    } else if (isRdfContentType(storedContentType)) {
+    } else if (request.lwsEnabled ? isRdfSourceType(storedContentType) : isRdfContentType(storedContentType)) {
       // --lws serving arm (spec 2026-07-10 §2): real parser + n3 writer,
       // 406 teaching on lossy/failed conversion. The legacy hand-rolled arm
-      // below stays byte-identical for --lws-off pods.
+      // below stays byte-identical for --lws-off pods. Gate narrowed to
+      // isRdfSourceType under --lws (spec 2026-07-11 §2): plain application/json
+      // is not an RDF source — it falls through to generic byte serving below.
       if (request.lwsEnabled) {
-        const negotiatedLws = urlPath.endsWith('.ttl')
-          ? RDF_TYPES.TURTLE
-          : selectContentType(acceptHeader, connegEnabled, true);
+        // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
+        // an explicit Accept for a different negotiable quads format wins.
+        const negotiated = selectContentType(acceptHeader, connegEnabled, true);
+        const negotiatedLws = QUADS_OUTPUTS[negotiated]
+          ? negotiated
+          : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
         const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
         if (quadsTarget) {
-          const served = await serveStoredRdf({ bytes: content, targetType: quadsTarget, baseIri: resourceUrl });
+          const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
           const headers = getAllHeaders({
             isContainer: false,
             etag: stats.etag,
@@ -997,16 +1002,19 @@ async function negotiateHeadFileContentType({ storagePath, urlPath, stats, accep
     // --lws serving-arm parity (spec 2026-07-10 §2): HEAD answers the same
     // 406 a GET would, and the same converted content-type. Large files stay
     // on the optimistic path (docstring above) — same divergence budget.
-    if (lwsEnabled && isRdfContentType(storedContentType)) {
-      const negotiatedLws = urlPath.endsWith('.ttl')
-        ? RDF_TYPES.TURTLE
-        : selectContentType(acceptHeader, true, true);
+    if (lwsEnabled && isRdfSourceType(storedContentType)) {
+      // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
+      // an explicit Accept for a different negotiable quads format wins (GET parity above).
+      const negotiated = selectContentType(acceptHeader, true, true);
+      const negotiatedLws = QUADS_OUTPUTS[negotiated]
+        ? negotiated
+        : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
       const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
       if (quadsTarget) {
         if (!fitsFullRead) return { contentType: quadsTarget, converted: true };
         const content = await storage.read(storagePath);
         if (content !== null) {
-          const check = await checkServable({ bytes: content, targetType: quadsTarget, baseIri: resourceUrl || `https://head.invalid${urlPath}` });
+          const check = await checkServable({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl || `https://head.invalid${urlPath}` });
           if (!check.ok) return { notAcceptable: true };
         }
         return { contentType: quadsTarget, converted: true };
