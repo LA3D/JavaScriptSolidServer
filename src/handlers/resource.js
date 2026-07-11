@@ -1253,12 +1253,16 @@ export async function handleHead(request, reply) {
       contentType = 'application/ld+json';
     }
     // Mirror GET's LWS negotiation for containers: when lwsEnabled,
-    // lws+json and linkset override whatever conneg chose above.
-    // GET checks (connegEnabled || lwsEnabled); HEAD must do the same.
+    // lws+json/linkset/quads override whatever conneg chose above. GET
+    // checks (connegEnabled || lwsEnabled) and negotiates quads 3-arg
+    // (selectContentType's lwsEnabled param); HEAD must do the same (F7
+    // carryover) — membership graphs are default-graph-only, so there's
+    // no 406 risk on HEAD, just content-type parity with what GET serves.
     if (request.lwsEnabled) {
-      const lwsNeg = selectContentType(acceptHeader, connegEnabled);
+      const lwsNeg = selectContentType(acceptHeader, connegEnabled, request.lwsEnabled);
       if (lwsNeg === RDF_TYPES.LWS_JSON) contentType = RDF_TYPES.LWS_JSON;
       else if (lwsNeg === RDF_TYPES.LINKSET) contentType = RDF_TYPES.LINKSET;
+      else if (QUADS_OUTPUTS[lwsNeg]) contentType = QUADS_OUTPUTS[lwsNeg];
     }
 
     if (shadowActive) {
@@ -1674,7 +1678,8 @@ export async function handleOptions(request, reply) {
     isContainer: stats?.isDirectory || isContainer(urlPath),
     origin,
     resourceUrl,
-    connegEnabled
+    connegEnabled,
+    lwsEnabled: request.lwsEnabled
   });
 
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
