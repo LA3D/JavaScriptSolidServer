@@ -282,17 +282,33 @@ export async function handleGet(request, reply) {
   // is computed further down once entries are read.
   const fileEtag = stats.isDirectory ? null
     : predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled);
+  // Spec §3 (RFC 9110 §13.2.2): preconditions apply only to requests that
+  // would otherwise succeed — a 304 must never preempt a pending 406.
+  // storedContentType is a cheap sync lookup (file extension only, no I/O),
+  // safe to hoist here; the file-serving arm below reuses this same const
+  // instead of redeclaring it. wouldNotNegotiate mirrors the F3 media gate's
+  // predicate (~line 1069); hasAcceptProfile flags requests whose profile
+  // outcome isn't known yet (resolved later, at the Accept-Profile block) —
+  // both defer the 304 decision instead of guessing.
+  const storedContentType = stats.isDirectory ? null : getContentType(storagePath);
+  const wouldNotNegotiate = !stats.isDirectory && request.lwsEnabled
+    && !isRdfSourceType(storedContentType)
+    && !acceptSatisfiable(request.headers.accept || '', storedContentType);
+  const hasAcceptProfile = !!(request.lwsProfileConneg && request.headers['accept-profile']);
 
   // For non-containers, check If-None-Match early using the predicted
   // representation ETag (Task 10). For containers, defer the check until
   // we know which branch (index.html vs listing vs mashlib) will run —
-  // each uses a different ETag source (#456).
+  // each uses a different ETag source (#456). Deferred here too when a 406
+  // gate hasn't resolved yet (wouldNotNegotiate) or Accept-Profile was sent
+  // (hasAcceptProfile — the profile-negotiation block below decides; the
+  // deferred re-check sits right after it resolves, spec §3).
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !stats.isDirectory) {
+  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
-      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(304).send();
     }
   }
@@ -476,7 +492,12 @@ export async function handleGet(request, reply) {
     // the representation- and visibility-keyed ETag above (Task 10,
     // probe-#6 F2), not the bare container ETag, so a format-switching or
     // visibility-switching client can't 304-revalidate the wrong variant.
-    if (ifNoneMatch) {
+    // Spec §3: containers have no F3 (media) arm, but DO have a profile arm
+    // below — when willMashlib is false and Accept-Profile was sent, the
+    // outcome isn't known yet, so skip here and re-check once the profile
+    // block (below) resolves without a redirect/406. A mashlib response
+    // never reaches the profile block, so it's always safe to 304 here.
+    if (ifNoneMatch && !(hasAcceptProfile && !willMashlib)) {
       const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
       if (!check.ok && check.notModified) {
         reply.header('ETag', listingEtag);
@@ -537,6 +558,18 @@ export async function handleGet(request, reply) {
       const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
       const neg = negotiateProfile(request.headers['accept-profile'], reps);
       if (neg.outcome === 'redirect') {
+        // A redirect is not a 406 — the pre-existing "304 wins over 303"
+        // ordering (a cache-valid conditional short-circuits before any
+        // profile redirect) is unaffected by spec §3, which only closes the
+        // 406 case. Check here, inline, before committing to 303.
+        if (ifNoneMatch) {
+          const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
+          if (!check.ok && check.notModified) {
+            reply.header('ETag', listingEtag);
+            reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+            return reply.code(304).send();
+          }
+        }
         reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
         reply.header('Content-Profile', `<${neg.rep.profile}>`);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -545,6 +578,7 @@ export async function handleGet(request, reply) {
       if (neg.outcome === 'notacceptable') {
         // DX-PROF-CONNEG/IETF: the 406 advertises what IS available
         // (authz-filtered) so the client can discover supported profiles.
+        // Spec §3: 406 wins over 304 — no conditional check here, ever.
         const avail = representationLinks(reps);
         if (avail) reply.header('Link', avail);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -553,6 +587,19 @@ export async function handleGet(request, reply) {
       }
       chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
       advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+    }
+
+    // Deferred 304 (spec §3): reached only when the original check above
+    // skipped for hasAcceptProfile — redirect/notacceptable already
+    // returned, so the profile arm would succeed. willMashlib is guaranteed
+    // false here (that branch returns before this point).
+    if (ifNoneMatch && hasAcceptProfile) {
+      const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
+      if (!check.ok && check.notModified) {
+        reply.header('ETag', listingEtag);
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+        return reply.code(304).send();
+      }
     }
 
     // A1 (spec §4): container bare 200 gets the same un-negotiated
@@ -703,7 +750,8 @@ export async function handleGet(request, reply) {
   }
 
   // Handle resource
-  const storedContentType = getContentType(storagePath);
+  // storedContentType is hoisted above (spec §3 304/406 ordering) — reused
+  // here, not recomputed (still the same cheap sync lookup either way).
 
   // Profile conneg (DX-PROF-CONNEG cnpr:http) — only when explicitly
   // enabled AND the client actually sent Accept-Profile. Gating on the
@@ -720,6 +768,18 @@ export async function handleGet(request, reply) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
     const neg = negotiateProfile(request.headers['accept-profile'], reps);
     if (neg.outcome === 'redirect') {
+      // A redirect is not a 406 — the pre-existing "304 wins over 303"
+      // ordering (a cache-valid conditional short-circuits before any
+      // profile redirect) is unaffected by spec §3, which only closes the
+      // 406 case. Check here, inline, before committing to 303.
+      if (ifNoneMatch) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', fileEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
+      }
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
       reply.header('Content-Profile', `<${neg.rep.profile}>`);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -728,6 +788,7 @@ export async function handleGet(request, reply) {
     if (neg.outcome === 'notacceptable') {
       // DX-PROF-CONNEG/IETF: the 406 advertises what IS available
       // (authz-filtered in Task 9) so the client can discover supported profiles.
+      // Spec §3: 406 wins over 304 — no conditional check here, ever.
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -741,6 +802,20 @@ export async function handleGet(request, reply) {
     // that degrades to normal serving with no stamp instead of throwing.
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+  }
+
+  // Deferred 304 (spec §3): the early check above skipped when Accept-Profile
+  // was sent, because the profile outcome wasn't known yet. It's known now —
+  // redirect/notacceptable already returned above, so reaching here means the
+  // profile arm would succeed. wouldNotNegotiate (media F3 arm) still applies
+  // unconditionally: never 304 a request that F3 would 406 below.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+    const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+    if (!check.ok && check.notModified) {
+      reply.header('ETag', fileEtag);
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+      return reply.code(304).send();
+    }
   }
 
   // A1 (spec §4): advertise declared representations on the BARE 200 too —
@@ -1448,27 +1523,52 @@ export async function handleHead(request, reply) {
     // before any read, so HEAD must not pay I/O a 304 will discard.
   }
 
+  // Spec §3 (RFC 9110 §13.2.2): preconditions apply only to requests that
+  // would otherwise succeed — mirrors handleGet's guard. wouldNotNegotiate
+  // is the F3 media-406 predicate negotiateHeadFileContentType applies
+  // below (skipped entirely when isMashlibResponse, same as that call);
+  // hasAcceptProfile defers to the profile block's outcome (skipped when
+  // skipProfileNegotiation — index.html/mashlib containers never reach it).
+  const storedContentType = (!stats.isDirectory && !isMashlibResponse) ? getContentType(storagePath) : null;
+  const wouldNotNegotiate = !stats.isDirectory && !isMashlibResponse && request.lwsEnabled
+    && !isRdfSourceType(storedContentType)
+    && !acceptSatisfiable(request.headers.accept || '', storedContentType);
+  const hasAcceptProfile = !skipProfileNegotiation && !!(request.lwsProfileConneg && request.headers['accept-profile']);
+
   // Check If-None-Match using the final ETag (#456)
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch) {
+  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
-      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(304).send();
     }
   }
 
   // Profile conneg (DX-PROF-CONNEG cnpr:http) — mirrors the GET gate,
-  // placed after the 304 check (parity: a cache-valid conditional request
-  // short-circuits before any profile redirect/406, same as GET). Skipped
-  // for container representations that index.html/mashlib already shadow
-  // (skipProfileNegotiation); files are never skipped, matching GET's
+  // placed after the early 304 check, mirroring GET's guard: hasAcceptProfile
+  // deferred the early check above exactly when this block runs, so a
+  // cache-valid conditional request still short-circuits BEFORE a profile
+  // 406 (spec §3, via the deferred re-check below) while a profile redirect
+  // gets its own inline conditional check (304-wins-over-303 preserved).
+  // Skipped for container representations that index.html/mashlib already
+  // shadow (skipProfileNegotiation); files are never skipped, matching GET's
   // universal chosenProfile stamp across every file serve branch.
   if (!skipProfileNegotiation && request.lwsProfileConneg && request.headers['accept-profile']) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
     const neg = negotiateProfile(request.headers['accept-profile'], reps);
     if (neg.outcome === 'redirect') {
+      // A redirect is not a 406 — 304-wins-over-303 is unaffected by spec
+      // §3, which only closes the 406 case. Check inline before 303.
+      if (ifNoneMatch) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', headEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
+      }
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
       reply.header('Content-Profile', `<${neg.rep.profile}>`);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -1477,6 +1577,7 @@ export async function handleHead(request, reply) {
     if (neg.outcome === 'notacceptable') {
       // HEAD 406 parity: same alternate-list Link as GET, body empty (HEAD) —
       // but same problem+json Content-Type (F5, spec 2026-07-11 §3).
+      // Spec §3: 406 wins over 304 — no conditional check here, ever.
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -1484,6 +1585,19 @@ export async function handleHead(request, reply) {
     }
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+  }
+
+  // Deferred 304 (spec §3): reached only when the original check above
+  // skipped for hasAcceptProfile — redirect/notacceptable already returned,
+  // so the profile arm would succeed. wouldNotNegotiate still applies
+  // unconditionally: never 304 a request the F3 gate below would 406.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+    const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+    if (!check.ok && check.notModified) {
+      reply.header('ETag', headEtag);
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+      return reply.code(304).send();
+    }
   }
 
   // A1 (spec §4): bare-200 advertisement, GET parity — same exists() gate as
