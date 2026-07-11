@@ -1016,7 +1016,7 @@ function readFirstBytes(storagePath, bytes) {
  * >1 MiB RDF file (optimistic path above), and a >1 MiB HTML-looking
  * file carrying a data island (conservative path above).
  */
-async function negotiateHeadFileContentType({ storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null }) {
+async function negotiateHeadFileContentType({ request, storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null }) {
   const storedContentType = getContentType(storagePath);
   const fitsFullRead = stats.size <= HEAD_FULL_READ_MAX_BYTES;
 
@@ -1123,7 +1123,14 @@ async function negotiateHeadFileContentType({ storagePath, urlPath, stats, accep
     const head = await readFirstBytes(storagePath, HEAD_SNIFF_CHUNK_BYTES);
     const headTrimmed = head === null ? '' : head.trimStart();
     const looksHtml = headTrimmed.startsWith('<!DOCTYPE') || headTrimmed.startsWith('<html');
-    if (!looksHtml) return { notAcceptable: true };
+    if (!looksHtml) {
+      // HEAD 406 parity: same alternate-list Link as GET (resource.js's F3
+      // gate above), body empty (HEAD) — mirrors the sibling Accept-Profile
+      // HEAD 406 parity comment in handleHead.
+      const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
+      const link = representationLinks(reps);
+      return { notAcceptable: true, link };
+    }
   }
 
   // As-is path: GET sniffs extensionless files for HTML by content.
@@ -1280,6 +1287,7 @@ export async function handleHead(request, reply) {
       contentType = 'text/html';
     } else {
       const negotiation = await negotiateHeadFileContentType({
+        request,
         storagePath,
         urlPath,
         stats,
@@ -1289,6 +1297,7 @@ export async function handleHead(request, reply) {
         resourceUrl,
       });
       if (negotiation.notAcceptable) {
+        if (negotiation.link) reply.header('Link', negotiation.link);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(406).type('application/problem+json').send();
       }

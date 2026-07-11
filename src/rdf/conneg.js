@@ -107,12 +107,15 @@ function parseAcceptHeader(header) {
 
 // F3 (spec 2026-07-11 §3): can this Accept header be satisfied by the authored
 // content type at all? Absent/empty header always satisfies (serve authored).
+// q=0 is RFC 9110 §12.5.1's "explicitly not acceptable" — an entry carrying it
+// must not count toward satisfiability even if its type would otherwise match.
 export function acceptSatisfiable(acceptHeader, contentType) {
   if (!acceptHeader || !acceptHeader.trim()) return true;
   const main = (contentType || '').split(';')[0].trim().toLowerCase();
   const major = main.split('/')[0];
-  return parseAcceptHeader(acceptHeader).some(({ type }) =>
-    type === '*/*' || type === main || type === `${major}/*`);
+  return parseAcceptHeader(acceptHeader)
+    .filter(({ q }) => q !== 0)
+    .some(({ type }) => type === '*/*' || type === main || type === `${major}/*`);
 }
 
 /**
