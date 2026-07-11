@@ -137,10 +137,10 @@ export function representationLinks(representations) {
  * @param {object|null} [options.representations] - authz-filtered
  *   { default, alternates } set: when present, the DX-PROF-CONNEG §8.2.1
  *   list-profiles advertisement (rel="canonical"/"alternate" Link parts) is
- *   appended. Callers pass it only when the negotiation block already
- *   computed the set (Accept-Profile engaged) — never a bare-GET hot-path
- *   .meta read. Linkset responses carry the list in their BODY; their
- *   headers advertise only when Accept-Profile was also sent.
+ *   appended. Populated by the Accept-Profile negotiation blocks AND (A1,
+ *   spec §4) by the bare-200 path when a .meta exists — resources with no
+ *   .meta pay only a storage.exists() on the hot path. Linkset responses
+ *   carry the list in their BODY too.
  * @returns {object}
  */
 export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false, chosenProfile = null, representations = null }) {

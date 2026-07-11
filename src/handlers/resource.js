@@ -443,6 +443,15 @@ export async function handleGet(request, reply) {
       advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
     }
 
+    // A1 (spec §4): container bare 200 gets the same un-negotiated
+    // advertisement as files — see the file-GET arm below for the perf
+    // rationale. Same `storagePath + '.meta'` the Accept-Profile block
+    // above reads (via authorizedRepresentations), so bare and negotiated
+    // paths can never diverge on which .meta they resolve.
+    if (request.lwsEnabled && !advertisedReps && await storage.exists(storagePath + '.meta')) {
+      advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
+    }
+
     // LWS container representation — only when enabled AND explicitly negotiated.
     if (request.lwsEnabled && negotiated === RDF_TYPES.LWS_JSON) {
       const lws = generateLwsContainer(resourceUrl, entries || []);
@@ -474,7 +483,7 @@ export async function handleGet(request, reply) {
       const declaredTypes = await readDeclaredTypes(storage, storagePath);
       const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
       const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
-      const representations = await authorizedRepresentations(request, storagePath, resourceUrl);
+      const representations = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
       const ls = generateLinkset(resourceUrl, {
         parentUrl: parentContainerUrl(resourceUrl),
         isContainer: true,
@@ -623,6 +632,16 @@ export async function handleGet(request, reply) {
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
   }
 
+  // A1 (spec §4): advertise declared representations on the BARE 200 too —
+  // not just the Accept-Profile-negotiated response. A single exists() gate
+  // keeps a resource with no .meta at zero extra I/O (the common case); the
+  // full authz-filtered read only runs when a .meta is actually there. Every
+  // serve branch below (mashlib, range, RDF conneg arm, F3 406, plain-file
+  // 200) reads `advertisedReps` via `representations` in getAllHeaders.
+  if (request.lwsEnabled && !advertisedReps && await storage.exists(storagePath + '.meta')) {
+    advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
+  }
+
   // Check if we should serve Mashlib data browser
   // Only for RDF resources when Accept: text/html is requested
   if (shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
@@ -752,7 +771,7 @@ export async function handleGet(request, reply) {
     const declaredTypes = await readDeclaredTypes(storage, storagePath);
     const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
     const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
-    const representations = await authorizedRepresentations(request, storagePath, resourceUrl);
+    const representations = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
     const ls = generateLinkset(resourceUrl, {
       parentUrl: parentContainerUrl(resourceUrl),
       isContainer: false,
@@ -921,7 +940,9 @@ export async function handleGet(request, reply) {
     const trimmed = content.toString('utf8').trimStart();
     const looksHtml = trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html');
     if (!looksHtml) {
-      const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
+      // A1: `advertisedReps` is already populated above whenever a .meta
+      // exists — reuse it instead of reading + authz-filtering a second time.
+      const reps = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       const na = nonRdfNotAcceptable(resourceUrl, storedContentType, request.headers.accept,
@@ -1031,7 +1052,7 @@ function readFirstBytes(storagePath, bytes) {
  * >1 MiB RDF file (optimistic path above), and a >1 MiB HTML-looking
  * file carrying a data island (conservative path above).
  */
-async function negotiateHeadFileContentType({ request, storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null }) {
+async function negotiateHeadFileContentType({ request, storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null, advertisedReps = null }) {
   const storedContentType = getContentType(storagePath);
   const fitsFullRead = stats.size <= HEAD_FULL_READ_MAX_BYTES;
 
@@ -1141,8 +1162,9 @@ async function negotiateHeadFileContentType({ request, storagePath, urlPath, sta
     if (!looksHtml) {
       // HEAD 406 parity: same alternate-list Link as GET (resource.js's F3
       // gate above), body empty (HEAD) — mirrors the sibling Accept-Profile
-      // HEAD 406 parity comment in handleHead.
-      const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
+      // HEAD 406 parity comment in handleHead. A1: reuse `advertisedReps`
+      // when handleHead's bare-200 exists() gate already fetched it.
+      const reps = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
       const link = representationLinks(reps);
       return { notAcceptable: true, link };
     }
@@ -1294,6 +1316,14 @@ export async function handleHead(request, reply) {
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
   }
 
+  // A1 (spec §4): bare-200 advertisement, GET parity — same exists() gate as
+  // handleGet's file/container arms. Skipped where GET never advertises
+  // (index.html/mashlib-shadowed containers, skipProfileNegotiation above).
+  if (!skipProfileNegotiation && request.lwsEnabled && !advertisedReps
+      && await storage.exists(storagePath + '.meta')) {
+    advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
+  }
+
   let negotiationConverted = false;
   if (!stats.isDirectory) {
     // Mirror GET's content-type for files — including the negotiated
@@ -1311,6 +1341,7 @@ export async function handleHead(request, reply) {
         connegEnabled,
         lwsEnabled: request.lwsEnabled,
         resourceUrl,
+        advertisedReps,
       });
       if (negotiation.notAcceptable) {
         if (negotiation.link) reply.header('Link', negotiation.link);

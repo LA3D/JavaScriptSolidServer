@@ -286,8 +286,9 @@ describe('Accept-Profile malformed-but-present header (regression, no crash)', (
 
 describe('representation-list advertisement (DX-PROF-CONNEG §8.2.1 list-profiles)', () => {
   // Emitted whenever the negotiation block runs (Accept-Profile present — the
-  // DX Example-19 "send Accept-Profile just in case" discovery pattern); bare
-  // GETs stay zero-I/O, cold discovery rides the linkset + capability hint.
+  // DX Example-19 "send Accept-Profile just in case" discovery pattern), AND
+  // (A1, gateway spec §4) on the bare 200 whenever a .meta declares reps —
+  // .meta-less resources stay at one storage.exists() (test/lws-bare-alternates.test.js).
   before(async () => {
     await startTestServer({ lws: true, public: true });
     await createTestPod('alice');
@@ -327,11 +328,12 @@ describe('representation-list advertisement (DX-PROF-CONNEG §8.2.1 list-profile
     assert.equal(res.headers.get('content-profile'), null);
   });
 
-  it('bare GET still advertises nothing (zero-I/O additivity holds)', async () => {
+  it('bare GET advertises the declared reps (A1) but stamps no Content-Profile', async () => {
     const res = await request(RES_PATH);
     assertStatus(res, 200);
     const link = res.headers.get('link') || '';
-    assert.ok(!link.includes('rel="canonical"'), 'no canonical on bare GET');
+    assert.ok(link.includes('rel="canonical"'), `canonical on bare GET in: ${link}`);
+    assert.ok(link.includes(`formats="${LINKS_PROFILE}"`), `alternate on bare GET in: ${link}`);
     assert.equal(res.headers.get('content-profile'), null);
   });
 });
