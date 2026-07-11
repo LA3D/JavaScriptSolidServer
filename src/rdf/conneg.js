@@ -195,9 +195,12 @@ export function canAcceptInput(contentType, connegEnabled = false) {
  * @param {string} contentType - Content-Type header
  * @param {string} baseUri - Base URI
  * @param {boolean} connegEnabled - Whether conneg is enabled
+ * @param {{graphEnvelope?: boolean}} [opts] - graphEnvelope: store multi-
+ *   subject Turtle/N3 as {@context,@graph} (spec 2026-07-10 §3). Default
+ *   false keeps every existing caller byte-identical.
  * @returns {Promise<object>} JSON-LD document
  */
-export async function toJsonLd(content, contentType, baseUri, connegEnabled = false) {
+export async function toJsonLd(content, contentType, baseUri, connegEnabled = false, { graphEnvelope = false } = {}) {
   const type = (contentType || '').split(';')[0].trim().toLowerCase();
   const text = Buffer.isBuffer(content) ? content.toString() : content;
 
@@ -208,7 +211,7 @@ export async function toJsonLd(content, contentType, baseUri, connegEnabled = fa
 
   // Turtle/N3 - only if conneg enabled
   if (connegEnabled && (type === RDF_TYPES.TURTLE || type === RDF_TYPES.N3)) {
-    return turtleToJsonLd(text, baseUri);
+    return turtleToJsonLd(text, baseUri, { graphEnvelope });
   }
 
   throw new Error(`Unsupported content type: ${type}`);

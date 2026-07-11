@@ -35,4 +35,16 @@ describe('negative control: --lws off keeps the legacy serving arm', () => {
     assertStatus(res, 200);
     assert.match(res.headers.get('content-type'), /application\/ld\+json/);
   });
+
+  it('multi-subject Turtle PUT stores the LEGACY array form without --lws', async () => {
+    await request('/alice/public/multi-neg.jsonld', {
+      method: 'PUT', headers: { 'Content-Type': 'text/turtle' },
+      body: '@prefix schema: <https://schema.org/>.\n<#a> schema:name "A".\n<#b> schema:name "B".',
+      auth: 'alice',
+    });
+    const r = await request('/alice/public/multi-neg.jsonld', { headers: { Accept: 'application/ld+json' } });
+    assertStatus(r, 200);
+    const doc = await r.json();
+    assert.ok(Array.isArray(doc));                          // legacy array — byte-discipline held
+  });
 });

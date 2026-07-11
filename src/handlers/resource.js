@@ -1410,7 +1410,7 @@ export async function handlePut(request, reply) {
   const inputType = contentType.split(';')[0].trim().toLowerCase();
   if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
     try {
-      const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled);
+      const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: !!request.lwsEnabled });
       content = Buffer.from(JSON.stringify(jsonLd, null, 2));
     } catch (e) {
       return reply.code(400).send({
