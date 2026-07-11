@@ -15,6 +15,7 @@ export const RDF_TYPES = {
   TURTLE: 'text/turtle',
   N3: 'text/n3',
   NTRIPLES: 'application/n-triples',
+  NQUADS: 'application/n-quads',
   RDF_XML: 'application/rdf+xml',  // Not supported, but recognized
   LWS_JSON: 'application/lws+json',
   LINKSET: 'application/linkset+json'
@@ -30,9 +31,10 @@ const SUPPORTED_INPUT = [RDF_TYPES.JSON_LD, RDF_TYPES.TURTLE, RDF_TYPES.N3];
  * Parse Accept header and select best content type
  * @param {string} acceptHeader - Accept header value
  * @param {boolean} connegEnabled - Whether content negotiation is enabled
+ * @param {boolean} lwsEnabled - Whether quads formats (N-Triples/N-Quads) negotiate
  * @returns {string} Selected content type
  */
-export function selectContentType(acceptHeader, connegEnabled = false) {
+export function selectContentType(acceptHeader, connegEnabled = false, lwsEnabled = false) {
   // LWS container media type is always negotiable when explicitly requested
   // (it is JSON-LD with the lws/v1 context — no Turtle conneg required).
   if (acceptHeader && acceptHeader.toLowerCase().includes(RDF_TYPES.LWS_JSON)) {
@@ -57,12 +59,18 @@ export function selectContentType(acceptHeader, connegEnabled = false) {
   // Parse Accept header
   const accepts = parseAcceptHeader(acceptHeader);
 
+  // Quads formats (N-Triples/N-Quads) are negotiable only on an --lws pod —
+  // the --lws-off path must stay byte-identical (spec 2026-07-10 §1).
+  const supported = lwsEnabled
+    ? [...SUPPORTED_OUTPUT, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS]
+    : SUPPORTED_OUTPUT;
+
   // Find best match
   for (const { type } of accepts) {
     if (type === '*/*' || type === 'application/*') {
       return RDF_TYPES.JSON_LD;
     }
-    if (SUPPORTED_OUTPUT.includes(type)) {
+    if (supported.includes(type)) {
       return type;
     }
     // Handle text/* preference
