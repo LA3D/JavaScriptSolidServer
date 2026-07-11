@@ -160,7 +160,7 @@ test('GET /mcp answers 405 with Allow: POST (not a misleading 404)', async (t) =
   assert.match(body.hint, /POST JSON-RPC/);
 });
 
-test('index-shadowed container omits rel="linkset"; plain container keeps it (cold-probe defect c)', async (t) => {
+test('index-shadowed container ADVERTISES rel="linkset" again (A2, spec 2026-07-11 §4); plain container keeps it', async (t) => {
   const p = await startLwsPod(t);
   await putFile(p, `/${p.podName}/shadowed/index.html`, '<html></html>', { publicRead: true });
   await putFile(p, `/${p.podName}/plain/x.txt`, 'x', { publicRead: true });
@@ -173,7 +173,11 @@ test('index-shadowed container omits rel="linkset"; plain container keeps it (co
   await storage.write(`/${p.podName}/shadowed/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/shadowed/`)));
   await storage.write(`/${p.podName}/plain/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/plain/`)));
   const shadowed = await fetch(`${p.origin}/${p.podName}/shadowed/`);
-  assert.doesNotMatch(shadowed.headers.get('link') || '', /rel="linkset"/);
+  // A2 (spec 2026-07-11 §4): the cold-probe-defect-c suppression this test
+  // used to pin is gone — a non-HTML Accept now actually escapes the shadow
+  // and reaches the real linkset branch (test/lws-shadow-conneg.test.js), so
+  // advertising rel="linkset" here is no longer a false affordance.
+  assert.match(shadowed.headers.get('link') || '', /rel="linkset"/);
   assert.match(shadowed.headers.get('link') || '', /storageDescription/);   // still advertised
   const plain = await fetch(`${p.origin}/${p.podName}/plain/`);
   assert.match(plain.headers.get('link') || '', /rel="linkset"/);
@@ -196,14 +200,15 @@ test('pod-info hint primes RFC 9264 + read_resource', async (t) => {
   assert.match(info.hint, /read_resource/);
 });
 
-test('HEAD: index-shadowed container omits rel="linkset"; plain container keeps it', async (t) => {
+test('HEAD: index-shadowed container ADVERTISES rel="linkset" again (A2, spec 2026-07-11 §4); plain container keeps it', async (t) => {
   const p = await startLwsPod(t);
   await putFile(p, `/${p.podName}/shadowed/index.html`, '<html></html>', { publicRead: true });
   await putFile(p, `/${p.podName}/plain/x.txt`, 'x', { publicRead: true });
   await storage.write(`/${p.podName}/shadowed/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/shadowed/`)));
   await storage.write(`/${p.podName}/plain/.acl`, serializeAcl(generatePublicReadAcl(`${p.origin}/${p.podName}/plain/`)));
   const shadowed = await fetch(`${p.origin}/${p.podName}/shadowed/`, { method: 'HEAD' });
-  assert.doesNotMatch(shadowed.headers.get('link') || '', /rel="linkset"/);
+  // A2 (spec 2026-07-11 §4): see the GET test above — the suppression is gone.
+  assert.match(shadowed.headers.get('link') || '', /rel="linkset"/);
   const plain = await fetch(`${p.origin}/${p.podName}/plain/`, { method: 'HEAD' });
   assert.match(plain.headers.get('link') || '', /rel="linkset"/);
 });

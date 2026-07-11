@@ -15,7 +15,8 @@ import {
   RDF_TYPES,
   getVaryHeader,
   negotiateProfile,
-  acceptSatisfiable
+  acceptSatisfiable,
+  acceptsHtml
 } from '../rdf/conneg.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
@@ -219,8 +220,15 @@ export async function handleGet(request, reply) {
     // Check for index.html (serves as both profile and container representation)
     const indexPath = storagePath.endsWith('/') ? `${storagePath}index.html` : `${storagePath}/index.html`;
     const indexExists = await storage.exists(indexPath);
+    const acceptHeader = request.headers.accept || '';
 
-    if (indexExists) {
+    // A2 (spec 2026-07-11 §4): index.html shadows the listing only for
+    // requests that can accept an HTML answer. Under --lws, a non-HTML
+    // Accept escapes the shadow and falls through to the real listing
+    // branch below — lws+json/linkset/turtle/quads all become reachable
+    // there (including the WAC filter and A1 alternates), and rel="linkset"
+    // is no longer suppressed since the affordance is now honest.
+    if (indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader))) {
       // Serve index.html (contains JSON-LD structured data)
       const content = await storage.read(indexPath);
       const indexStats = await storage.stat(indexPath);
@@ -240,7 +248,6 @@ export async function handleGet(request, reply) {
       // naive `acceptHeader.includes('text/turtle')` we used to do here
       // ignored q-weights — `Accept: application/ld+json, text/turtle;q=0.1`
       // would still pick Turtle even though JSON-LD was preferred (#325).
-      const acceptHeader = request.headers.accept || '';
       const negotiated = connegEnabled
         ? selectContentType(acceptHeader, true)
         : null;
@@ -288,8 +295,7 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled,
-                suppressLinkset: true
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -304,8 +310,7 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled,
-                suppressLinkset: true
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -326,8 +331,7 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        lwsEnabled: request.lwsEnabled,
-        suppressLinkset: true
+        lwsEnabled: request.lwsEnabled
       });
 
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -402,7 +406,6 @@ export async function handleGet(request, reply) {
     // Pick the negotiated RDF type using q-aware Accept parsing (#325).
     // LWS media type negotiation is always active when lwsEnabled, even
     // without full conneg — selectContentType handles it independently.
-    const acceptHeader = request.headers.accept || '';
     const negotiated = (connegEnabled || request.lwsEnabled)
       ? selectContentType(acceptHeader, connegEnabled, request.lwsEnabled)
       : null;
@@ -1205,7 +1208,6 @@ export async function handleHead(request, reply) {
   let contentType;
   let headEtag = stats.etag;
   let isMashlibResponse = false;
-  let suppressLinkset = false;
   let chosenProfile = null;
   let advertisedReps = null;
   // Set when index.html or the mashlib wrapper shadows the container
@@ -1219,6 +1221,12 @@ export async function handleHead(request, reply) {
     const indexPath = storagePath.endsWith('/') ? `${storagePath}index.html` : `${storagePath}/index.html`;
     const indexExists = await storage.exists(indexPath);
     const acceptHeader = request.headers.accept || '';
+    // A2 (spec 2026-07-11 §4): mirrors GET's shadow-escape gate — index.html
+    // shadows the listing only for requests that can accept an HTML answer.
+    // A non-HTML Accept under --lws reports as if indexExists were false
+    // (real listing's content-type/etag/rel="linkset"), matching what GET
+    // actually serves once it falls through to the real listing branch.
+    const shadowActive = indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader));
 
     if (connegEnabled) {
       // HEAD must mirror what GET would emit; otherwise client caches and
@@ -1235,11 +1243,11 @@ export async function handleHead(request, reply) {
         contentType = 'text/turtle';
       } else if (wantsJsonLd) {
         const explicitJson = EXPLICIT_JSON_RE.test(acceptHeader);
-        contentType = (indexExists && !explicitJson) ? 'text/html' : 'application/ld+json';
+        contentType = (shadowActive && !explicitJson) ? 'text/html' : 'application/ld+json';
       } else {
-        contentType = indexExists ? 'text/html' : 'application/ld+json';
+        contentType = shadowActive ? 'text/html' : 'application/ld+json';
       }
-    } else if (indexExists) {
+    } else if (shadowActive) {
       contentType = 'text/html';
     } else {
       contentType = 'application/ld+json';
@@ -1253,14 +1261,10 @@ export async function handleHead(request, reply) {
       else if (lwsNeg === RDF_TYPES.LINKSET) contentType = RDF_TYPES.LINKSET;
     }
 
-    if (indexExists) {
+    if (shadowActive) {
       // Mirror GET: containers with index.html use the index file's ETag
       const indexStats = await storage.stat(indexPath);
       headEtag = indexStats?.etag || stats.etag;
-      // Mirror GET's rel="linkset" suppression: index.html shadows every
-      // Accept with text/html, so advertising linkset conneg here is a
-      // false affordance (cold-probe defect c).
-      suppressLinkset = true;
       skipProfileNegotiation = true;
     } else if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
       // Container listing via mashlib — suffix the ETag (#456)
@@ -1369,7 +1373,6 @@ export async function handleHead(request, reply) {
     resourceUrl,
     connegEnabled,
     mashlibEnabled: request.mashlibEnabled,
-    suppressLinkset,
     lwsEnabled: request.lwsEnabled,
     chosenProfile,
     representations: advertisedReps
