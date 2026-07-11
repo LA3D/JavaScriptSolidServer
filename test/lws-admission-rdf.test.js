@@ -1,7 +1,7 @@
 // test/lws-admission-rdf.test.js
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { toDataset, isRdfBody } from '../src/lws/admission-rdf.js';
+import { toDataset, isRdfBody } from '../src/rdf/dataset.js';
 
 const B = 'http://localhost:3000/alice/';
 

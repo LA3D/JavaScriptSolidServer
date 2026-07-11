@@ -8,7 +8,7 @@
 // 'admit'  = constraint resolved, conforms or only Warning/Info results
 // 'reject' = ≥1 Violation result
 import { resolveShapeUrl } from './constraint.js';
-import { toDataset, isRdfBody } from './admission-rdf.js';
+import { toDataset, isRdfBody } from '../rdf/dataset.js';
 import { validate } from './shacl.js';
 
 const pass = () => ({ decision: 'pass', shapeUrl: null, violations: [], advisories: [] });

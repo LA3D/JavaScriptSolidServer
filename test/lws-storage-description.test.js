@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateStorageDescription } from '../src/lws/storage-description.js';
+import { generateStorageDescription, buildStorageDescription } from '../src/lws/storage-description.js';
 
 const ROOT = 'http://localhost:3000/';
 const DESC = 'http://localhost:3000/.well-known/lws-storage';
@@ -26,4 +26,13 @@ test('storage description: every service has type + serviceEndpoint', () => {
   }
   assert.ok(d.service.some(s => s.type === 'StorageDescription' && s.serviceEndpoint === DESC));
   assert.ok(d.service.some(s => s.type === 'NotificationService'));
+});
+
+test('McpService advertised iff MCP is enabled (S5 — /mcp was invisible to HTTP-cold agents)', () => {
+  const on = buildStorageDescription('https://pod.example', { mcpEnabled: true });
+  const svc = on.service.find(s => s.type === 'McpService');
+  assert.ok(svc);
+  assert.equal(svc.serviceEndpoint, 'https://pod.example/mcp');
+  const off = buildStorageDescription('https://pod.example', {});
+  assert.ok(!off.service.some(s => s.type === 'McpService'));
 });

@@ -117,6 +117,14 @@ export function createServer(options = {}) {
   // Subdomain mode is OFF by default - use path-based pods
   const subdomainsEnabled = options.subdomains ?? false;
   const baseDomain = options.baseDomain || null;
+  // --lws is path-mode only for now: urlToStoragePath (src/lws/admission.js)
+  // maps URLs to storage via bare URL.pathname, which drops the pod-name
+  // prefix under --subdomains — SHACL shape admission (src/lws/write.js) and
+  // the conneg authz filter (src/lws/representations.js) would silently
+  // misresolve. Refuse loudly rather than misresolve (spec 2026-07-10 S6).
+  if (lwsEnabled && subdomainsEnabled) {
+    throw new Error('--lws cannot be combined with --subdomains yet: LWS resolves shape/alternate URLs in path mode only. Disable one of the two flags.');
+  }
   // Mashlib data browser is OFF by default
   // mashlibCdn: load from CDN; mashlibModule: URL to ES module entry point
   const mashlibModule = options.mashlibModule ?? false;
@@ -1051,7 +1059,7 @@ export function createServer(options = {}) {
       // storage-description resource ctx (src/mcp/index.js) — otherwise HTTP
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, profileConnegEnabled });
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, profileConnegEnabled, mcpEnabled });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

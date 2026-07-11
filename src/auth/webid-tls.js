@@ -56,11 +56,12 @@ export function extractWebIdFromSAN(subjectaltname) {
  * @param {string} webId - The WebID to find keys for
  * @returns {Array<{modulus: string, exponent: string}>} Array of keys
  */
-function extractCertKeys(jsonLd, webId) {
+export function extractCertKeys(jsonLd, webId) {
   const keys = [];
 
-  // Normalize to array
-  const nodes = Array.isArray(jsonLd) ? jsonLd : [jsonLd];
+  // Normalize: bare node, top-level array, or {@context,@graph} envelope —
+  // the same unwrap wac/parser.js parseAcl uses.
+  const nodes = Array.isArray(jsonLd) ? jsonLd : (jsonLd['@graph'] || [jsonLd]);
 
   for (const node of nodes) {
     // Check if this node is the WebID subject

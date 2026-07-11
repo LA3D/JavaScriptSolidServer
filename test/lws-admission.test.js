@@ -89,21 +89,25 @@ test('admit: declared shape resource missing → pass (opt-in miss), no throw', 
   assert.equal(r.violations.length, 0);
 });
 
-test('admit: shape stored as ARRAY-form JSON-LD (JSS multi-subject store format) still validates', async () => {
+test('admit: shape stored as legacy ARRAY-form JSON-LD parses without 500 but degrades to vacuous admit (shim removed, spec 2026-07-10 §3)', async () => {
   // A text/turtle shape PUT through the conneg-enabled write path is stored as
   // JSON-LD; multi-subject docs (any realistic SHACL file) serialize as a
-  // TOP-LEVEL ARRAY. The media-type sniff must recognize '[' as JSON-LD, or the
-  // JSON bytes go to the n3 Turtle parser and every write into the bound
-  // container 500s ("Expected entity but got { on line 2" — the ld+json-500
-  // bug, FOLLOWUP 2026-07-04; SHACL never ran there).
+  // TOP-LEVEL ARRAY with @context on element 0 only. Still pinned here: the
+  // media-type sniff recognizes '[' as JSON-LD — the bytes must not reach the
+  // n3 Turtle parser ("Expected entity but got { on line 2" — the ld+json-500
+  // bug, FOLLOWUP 2026-07-04). But the store-array shim that hoisted element
+  // 0's context onto elements 1..n is retired (spec 2026-07-10 §3, decision
+  // log #3: no migration): under standard JSON-LD the sh:property restriction
+  // elements orphan, validation is vacuous, and the write is ADMITTED, not
+  // rejected. The serializer round moves the store form to {@context,@graph}.
   const { toJsonLd } = await import('../src/rdf/conneg.js');
   const stored = Buffer.from(JSON.stringify(
     await toJsonLd(Buffer.from(SHAPE), 'text/turtle', 'http://h/shapes/X', true), null, 2));
   assert.equal(stored.toString('utf8').trimStart()[0], '[',
-    'precondition: the multi-subject store form is a top-level array');
+    'precondition: the legacy multi-subject store form is a top-level array');
   const o = opts(TTL('; ex:desc "d"'));
   o.storage.files['/shapes/X'] = stored;
-  const r = await admit(o);                                  // was: throws via n3
-  assert.equal(r.decision, 'reject');
-  assert.equal(r.violations[0].message, 'title required');   // restrictions not orphaned
+  const r = await admit(o);                                  // no n3 throw — JSON-LD arm
+  assert.equal(r.decision, 'admit');                         // was reject under the shim
+  assert.equal(r.violations.length, 0);                      // restrictions orphaned — vacuous
 });
