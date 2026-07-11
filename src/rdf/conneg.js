@@ -105,6 +105,16 @@ function parseAcceptHeader(header) {
   return types.sort((a, b) => b.q - a.q);
 }
 
+// F3 (spec 2026-07-11 §3): can this Accept header be satisfied by the authored
+// content type at all? Absent/empty header always satisfies (serve authored).
+export function acceptSatisfiable(acceptHeader, contentType) {
+  if (!acceptHeader || !acceptHeader.trim()) return true;
+  const main = (contentType || '').split(';')[0].trim().toLowerCase();
+  const major = main.split('/')[0];
+  return parseAcceptHeader(acceptHeader).some(({ type }) =>
+    type === '*/*' || type === main || type === `${major}/*`);
+}
+
 /**
  * Parse an Accept-Profile header (DX-PROF-CONNEG cnpr:http). Values are
  * angle-bracketed profile URIs with optional ;q= weights. Returns profile

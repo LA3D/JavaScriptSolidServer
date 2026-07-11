@@ -22,4 +22,10 @@ describe('negative control: --lws off, .json serving unchanged', () => {
     assert.equal(r.status, 200);
     assert.equal(r.headers.get('content-type').split(';')[0], 'text/turtle');
   });
+
+  it('markdown + specific RDF Accept still 200s the authored format when --lws is off', async () => {
+    await request(`${base}/seamneg/card.md`, { method: 'PUT', headers: { 'Content-Type': 'text/markdown' }, auth: 'seamneg', body: '# x\n' });
+    const r = await request(`${base}/seamneg/card.md`, { headers: { Accept: 'text/turtle' }, auth: 'seamneg' });
+    assert.equal(r.status, 200);
+  });
 });

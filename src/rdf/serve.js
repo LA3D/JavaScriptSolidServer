@@ -69,6 +69,18 @@ function notAcceptable(instance, targetType, why, works) {
   };
 }
 
+/** F3: a non-RDF source cannot satisfy a specific media Accept — teach, never lie. */
+export function nonRdfNotAcceptable(instance, storedType, requestedAccept, hasAlternates) {
+  const route = hasAlternates
+    ? ' Its declared alternate representations are in the Link header (rel="alternate"), or send Accept-Profile: <profile-uri> to negotiate one.'
+    : ' If this resource has profile-negotiated representations, send Accept-Profile: <profile-uri> to negotiate one (its linkset, Accept: application/linkset+json, lists what is declared).';
+  return { ok: false, status: 406, problem: {
+    type: 'about:blank', title: 'Not Acceptable', status: 406,
+    detail: `this resource is ${storedType} and has no representation matching "${requestedAccept}".${route} Formats that work directly: ${storedType}.`,
+    instance,
+  } };
+}
+
 async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) {
   let dataset;
   try {

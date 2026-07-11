@@ -46,9 +46,11 @@ describe('lws serving arm: sourceContentType threading', () => {
     assert.equal(r.headers.get('content-type').split(';')[0], 'application/json');
   });
 
-  it('stored plain .json requested as Turtle NEVER yields empty-Turtle 200 (406 comes in Task 2)', async () => {
+  it('stored plain .json requested as Turtle NEVER yields empty-Turtle 200 (406 landed in Task 2, F3)', async () => {
     const r = await request(`${base}/seamsrc/d.json`, { headers: { Accept: 'text/turtle' }, auth: 'seamsrc' });
-    // Task 1 pins only the seam: no 200-with-text/turtle-and-zero-triples.
+    // Task 1 pinned only the seam (no 200-with-text/turtle-and-zero-triples);
+    // Task 2's teaching 406 (test/lws-nonrdf-teaching.test.js) is now the
+    // actual outcome here, still covered by this same assertion.
     const ct = (r.headers.get('content-type') || '').split(';')[0];
     assert.ok(!(r.status === 200 && ct === 'text/turtle'), `got the probe-#6 signature: 200 ${ct}`);
   });

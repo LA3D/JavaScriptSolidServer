@@ -14,7 +14,8 @@ import {
   fromJsonLd,
   RDF_TYPES,
   getVaryHeader,
-  negotiateProfile
+  negotiateProfile,
+  acceptSatisfiable
 } from '../rdf/conneg.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
@@ -26,7 +27,7 @@ import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
-import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS } from '../rdf/serve.js';
+import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable } from '../rdf/serve.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -894,6 +895,27 @@ export async function handleGet(request, reply) {
     }
   }
 
+  // F3 (spec 2026-07-11 §3): teach a 406 when a non-RDF source can't satisfy
+  // a specific Accept, instead of silently serving the authored bytes under
+  // a mismatched label. Independent of connegEnabled — Accept satisfiability
+  // isn't a conversion decision. HTML-looking content is excluded (same
+  // sniff as the data-island arm above) — it keeps the existing
+  // degrade-to-serve-HTML fallback.
+  if (request.lwsEnabled && !isRdfSourceType(storedContentType)
+      && !acceptSatisfiable(request.headers.accept || '', storedContentType)) {
+    const trimmed = content.toString('utf8').trimStart();
+    const looksHtml = trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html');
+    if (!looksHtml) {
+      const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
+      const avail = representationLinks(reps);
+      if (avail) reply.header('Link', avail);
+      const na = nonRdfNotAcceptable(resourceUrl, storedContentType, request.headers.accept,
+        !!(reps?.default || reps?.alternates?.length));
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+      return reply.code(406).type('application/problem+json').send(JSON.stringify(na.problem, null, 2));
+    }
+  }
+
   // Serve content as-is (no conneg or non-RDF resource)
   // For extensionless files (like profile/card), detect HTML by content
   let actualContentType = storedContentType;
@@ -1089,6 +1111,19 @@ async function negotiateHeadFileContentType({ storagePath, urlPath, stats, accep
       // No island conversion → fall through to the as-is path below
       // (HTML-looking extensionless files still get the relabel sniff).
     }
+  }
+
+  // F3 (spec 2026-07-11 §3): HEAD mirror of GET's teaching 406 — same
+  // predicate, independent of connegEnabled. A bounded O(1) sniff (any file
+  // size, mirrors the HEAD_SNIFF_CHUNK_BYTES sniffs above) decides
+  // HTML-ness so this path never pays a full read; HTML-looking content
+  // keeps the existing degrade-to-serve-HTML fallback.
+  if (lwsEnabled && !isRdfSourceType(storedContentType)
+      && !acceptSatisfiable(acceptHeader, storedContentType)) {
+    const head = await readFirstBytes(storagePath, HEAD_SNIFF_CHUNK_BYTES);
+    const headTrimmed = head === null ? '' : head.trimStart();
+    const looksHtml = headTrimmed.startsWith('<!DOCTYPE') || headTrimmed.startsWith('<html');
+    if (!looksHtml) return { notAcceptable: true };
   }
 
   // As-is path: GET sniffs extensionless files for HTML by content.
