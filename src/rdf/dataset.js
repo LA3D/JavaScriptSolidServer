@@ -44,6 +44,9 @@ export async function toDataset(buffer, contentType, baseIri) {
   if (t === RDF_TYPES.TURTLE || t === RDF_TYPES.N3) {
     return datasetFromTurtle(buffer.toString('utf8'), baseIri);
   }
+  const text = buffer.toString('utf8');
+  // Fail loud: empty body must not become a vacuous empty dataset (violates the contract).
+  if (!text.trim()) throw new Error('empty JSON-LD body');
   const parser = new ParserJsonld({ documentLoader, baseIRI: baseIri });
-  return rdf.dataset().import(parser.import(Readable.from([buffer.toString('utf8')])));
+  return rdf.dataset().import(parser.import(Readable.from([text])));
 }

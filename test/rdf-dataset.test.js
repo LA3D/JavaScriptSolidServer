@@ -32,6 +32,11 @@ test('toDataset: Turtle arm unchanged', async () => {
   assert.equal(ds.size, 1);
 });
 
+test('toDataset: empty/whitespace JSON-LD body THROWS (fail loud — never a vacuous empty dataset)', async () => {
+  await assert.rejects(() => toDataset(Buffer.from(''), 'application/ld+json', BASE));
+  await assert.rejects(() => toDataset(Buffer.from('  \n'), 'application/ld+json', BASE));
+});
+
 test('isRdfBody: RDF media types recognized', () => {
   assert.equal(isRdfBody('application/ld+json; charset=utf-8'), true);
   assert.equal(isRdfBody('image/png'), false);
