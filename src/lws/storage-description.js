@@ -35,10 +35,10 @@ export function generateStorageDescription(storageRootUrl, services = []) {
  * resource (read at /.well-known/lws-storage) both call this so the advertised
  * service set can never drift between the two surfaces.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, profileConnegEnabled?:boolean}} flags
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, profileConnegEnabled?:boolean, mcpEnabled?:boolean}} flags
  * @returns {object}
  */
-export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, profileConnegEnabled = false } = {}) {
+export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, profileConnegEnabled = false, mcpEnabled = false } = {}) {
   const lwsStoragePath = '/.well-known/lws-storage';
   const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
   if (typeIndexEnabled) {
@@ -50,6 +50,15 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
   }
   if (profileIndexPath) {
     services.push({ type: 'ProfileIndexService', serviceEndpoint: `${origin}${profileIndexPath}` });
+  }
+  if (mcpEnabled) {
+    services.push({
+      type: 'McpService',
+      serviceEndpoint: `${origin}/mcp`,
+      // Steering (unmapped, like the linkset hint): the endpoint 405s GETs,
+      // so a cold agent needs told HOW to speak to it.
+      hint: 'Model Context Protocol gateway — JSON-RPC 2.0 over Streamable HTTP: POST initialize to this endpoint, then notifications/initialized; the read loop is the read_resource/list_resources tools.',
+    });
   }
   const base = {
     ...generateStorageDescription(`${origin}/`, services),

@@ -78,6 +78,16 @@ test('the storage-description resource mirrors /.well-known/lws-storage', async 
 
   assert.deepEqual(resourceBody.service, httpBody.service);
   assert.equal(resourceBody.type, 'Storage');
+
+  // S5: both surfaces advertise McpService when mcp is on — this is the one
+  // service entry an HTTP-cold agent has no other way to discover, so both
+  // sides carrying it (not just deepEqual on the whole array) is the point.
+  const httpMcp = httpBody.service.find((s) => s.type === 'McpService');
+  const mcpMcp = resourceBody.service.find((s) => s.type === 'McpService');
+  assert.ok(httpMcp, 'HTTP route must advertise McpService when mcp is on');
+  assert.ok(mcpMcp, 'MCP resource must advertise McpService when mcp is on');
+  assert.equal(httpMcp.serviceEndpoint, `${base}/mcp`);
+  assert.deepEqual(mcpMcp, httpMcp);
 });
 
 // Same drift-guard as above, for profileConnegEnabled (Task 6 review fix):
