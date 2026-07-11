@@ -63,7 +63,10 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
       // Wording is load-bearing: an unprimed cold agent inferred (2026-07-06
       // probe) that members carry describedby/conformsTo — they live on the
       // CONTAINER linkset; a member's affordance for them is its `up` edge.
-      hint: 'This storage speaks RFC 9264: every resource serves a linkset of its typed links — request the resource URL with Accept: application/linkset+json (rel="linkset"). A member linkset carries up/type; the governing describedby (SHACL shape) and conformsTo (profile) edges live on its CONTAINER\'s linkset — follow up.',
+      // Reworded 2026-07-10 (probe #4b/#5): the old "every resource" over-promised
+      // on shadowed containers, and a linkset-only client concluded containers were empty
+      // — membership steering added.
+      hint: 'This storage speaks RFC 9264: resources serve a linkset of their typed links — request the resource URL with Accept: application/linkset+json (rel="linkset"); a container shadowed by its index.html serves the HTML instead, so descend to a member. A member linkset carries up/type; the governing describedby (SHACL shape) and conformsTo (profile) edges live on its CONTAINER\'s linkset — follow up. Linksets carry governance, not membership: list members by GETting the container itself (ldp:contains, or items[] via Accept: application/lws+json); search by type via the TypeSearchService.',
     },
   };
   if (profileConnegEnabled) {
