@@ -4,24 +4,38 @@
 // an extension-less name that would serve as octet-stream) is refused with a teaching
 // 400 — so the stored bytes, the served Content-Type, and items[].mediaType all agree.
 //
-// JSON-LD is deliberately EXCLUDED: it's JSS's native on-disk format and the write
-// path never transformed it (the B1 defect this gate closes is specific to the
-// Turtle/N3→JSON-LD conversion that silently changed bytes while keeping the
-// client's chosen extension). Extensionless JSON-LD is JSS's standard resource-
-// creation idiom (POST slug-less create, MCP shape/typed-resource writes, ACL/.meta) —
-// getContentType() already falls back to content-sniffing for it at read time, so
-// there's no name/type lie to catch here the way there is for Turtle/N3/N-Triples/N-Quads.
+// JSON-LD stays IN the gate (B1 fix round 1 review): the write path stores it verbatim
+// like every other RDF type now, so a JSON-LD body at a Turtle/N3/N-Triples/N-Quads-
+// named path is the exact name/type lie this gate exists to catch. Two shapes are
+// legitimate and pass: extensionless (application/octet-stream — JSS's standard
+// resource-creation idiom: POST slug-less create, MCP shape/typed-resource writes,
+// ACL/.meta) and `.jsonld` (application/ld+json) — getContentType() maps both .acl
+// and .meta basenames straight to application/ld+json too, so those fall into the
+// second shape rather than needing a special case.
 import { getContentType } from '../utils/url.js';
 import { RDF_TYPES } from '../rdf/conneg.js';
 
-const RDF = new Set([RDF_TYPES.TURTLE, RDF_TYPES.N3, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS]);
+// The other RDF serializations — the only names a JSON-LD body may NOT sit at.
+const OTHER_RDF = new Set([RDF_TYPES.TURTLE, RDF_TYPES.N3, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS]);
+const RDF = new Set([...OTHER_RDF, RDF_TYPES.JSON_LD]);
 const main = (t) => (t || '').split(';')[0].trim().toLowerCase();
 
 export function writeTypeConsistency({ urlPath, submittedType, lwsEnabled }) {
   if (!lwsEnabled) return { ok: true };
   const sub = main(submittedType);
-  if (!RDF.has(sub)) return { ok: true };                 // non-RDF bodies (incl. JSON-LD): not our concern
+  if (!RDF.has(sub)) return { ok: true };                 // non-RDF bodies: not our concern
   const nameType = main(getContentType(urlPath));         // extension-derived (octet-stream if none)
+
+  if (sub === RDF_TYPES.JSON_LD) {
+    // Only reject when the name implies a DIFFERENT RDF serialization — that's the
+    // lie (B1). Extensionless and .jsonld/.acl/.meta (nameType === application/ld+json)
+    // are both legitimate and fall through to ok below.
+    if (OTHER_RDF.has(nameType)) {
+      return problem(urlPath, sub, `the resource name implies ${nameType} but the body is ${sub}; rename to match the body's type or submit the body as ${nameType}`);
+    }
+    return { ok: true };
+  }
+
   if (nameType === 'application/octet-stream') {
     return problem(urlPath, sub, `the resource name has no extension, so it would be served as application/octet-stream; name it with an extension matching ${sub} (e.g. .ttl for text/turtle, .n3 for text/n3)`);
   }

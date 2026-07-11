@@ -6,6 +6,7 @@
 // teaching problem+json — never a silent 200 with empty or mislabeled bytes
 // (the probe-#4 family). LWS mandates media conneg be lossless.
 import { Writer } from 'n3';
+import jsonld from 'jsonld';
 import { toDataset } from './dataset.js';
 import { RDF_TYPES } from './conneg.js';
 import { COMMON_PREFIXES, applyTerminatorSpacing } from './turtle.js';
@@ -55,30 +56,16 @@ export function datasetToFormat(dataset, targetType) {
   });
 }
 
-const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
-
 // Dataset (default graph only — callers gate named graphs via GRAPH_CAPABLE)
 // → expanded JSON-LD (spec JSON-LD 1.1 §"Expanded Document Form"): no
 // @context, every predicate a full IRI, every value an array of value
-// objects. No compaction — this is the honest, dependency-free shape a raw
-// RDF/JS dataset maps to (no serializer-jsonld dependency in the tree).
-function datasetToJsonLd(dataset) {
-  const bySubject = new Map();
-  for (const q of dataset) {
-    const s = q.subject.termType === 'BlankNode' ? `_:${q.subject.value}` : q.subject.value;
-    if (!bySubject.has(s)) bySubject.set(s, { '@id': s });
-    const node = bySubject.get(s);
-    let val;
-    if (q.object.termType === 'Literal') {
-      val = { '@value': q.object.value };
-      if (q.object.language) val['@language'] = q.object.language;
-      else if (q.object.datatype && q.object.datatype.value !== XSD_STRING) val['@type'] = q.object.datatype.value;
-    } else {
-      val = { '@id': q.object.termType === 'BlankNode' ? `_:${q.object.value}` : q.object.value };
-    }
-    (node[q.predicate.value] ??= []).push(val);
-  }
-  return [...bySubject.values()];
+// objects. Real conversion via the `jsonld` library's fromRDF (the spec's
+// RDF-to-JSON-LD algorithm) — not a hand-rolled quad walk. The dataset seam
+// already produces N-Quads for the n-quads serving arm (the n3 Writer via
+// datasetToFormat); reuse that string as jsonld.fromRDF's input.
+async function datasetToJsonLd(dataset) {
+  const nquads = await datasetToFormat(dataset, RDF_TYPES.NQUADS);
+  return jsonld.fromRDF(nquads, { format: 'application/n-quads' });
 }
 
 function notAcceptable(instance, targetType, why, works) {
@@ -140,7 +127,8 @@ export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
   if (!p.ok) return p;
   if (targetType === RDF_TYPES.JSON_LD) {
-    return { ok: true, content: JSON.stringify(datasetToJsonLd(p.dataset), null, 2), contentType: RDF_TYPES.JSON_LD };
+    const doc = await datasetToJsonLd(p.dataset);
+    return { ok: true, content: JSON.stringify(doc, null, 2), contentType: RDF_TYPES.JSON_LD };
   }
   const content = await datasetToFormat(p.dataset, targetType);
   return { ok: true, content, contentType: targetType };

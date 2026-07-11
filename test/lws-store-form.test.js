@@ -1,8 +1,14 @@
 // test/lws-store-form.test.js
-// The self-describing store form (spec 2026-07-10 §3): under --lws a
-// multi-subject Turtle write stores {@context,@graph} (JSS's own generated-
-// ACL envelope) instead of the legacy top-level array with @context on
-// element 0 only. Single-subject docs and --lws-off pods are unchanged.
+// B1 root fix (spec 2026-07-11 §2) superseded the store-form-conversion design
+// this file originally pinned: under --lws a Turtle write now stores exactly
+// what the client submitted (raw Turtle on disk), never a JSON-LD envelope —
+// see test/lws-representation-preservation.test.js for that behavior. The
+// {@context,@graph} envelope form (JSS's own generated-ACL shape) still exists,
+// but only for a JSON-LD-submitted write (the client's own choice, stored
+// verbatim) — the unit test below exercises turtleToJsonLd(graphEnvelope:true)
+// directly (the function itself is still live — the --lws-off legacy write
+// path calls it with graphEnvelope:false, src/handlers/resource.js), not a
+// live Turtle-PUT write path under --lws.
 import { describe, it, before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {

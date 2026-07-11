@@ -54,6 +54,17 @@ describe('representation preservation (--lws)', () => {
     assert.match((await r.json()).detail, /text\/turtle|\.ttl|application\/ld\+json/);
   });
 
+  // B1 gate hole (fix round 1): a JSON-LD body at a .ttl name is the same
+  // name/type lie in the other direction — it would store JSON-LD bytes yet
+  // serve them as text/turtle. Rejected with the teaching 400.
+  it('JSON-LD body at a .ttl name → teaching 400', async () => {
+    const JLD = JSON.stringify({ '@id': 'http://ex/s', 'http://ex/p': 'o' });
+    const r = await request(`${base}/rp/lie.ttl`, { method: 'PUT', headers: H('application/ld+json'), body: JLD });
+    assert.equal(r.status, 400);
+    assert.equal(r.headers.get('content-type').split(';')[0], 'application/problem+json');
+    assert.match((await r.json()).detail, /text\/turtle|\.ttl|application\/ld\+json/);
+  });
+
   it('extension-less RDF write → teaching 400 (would serve octet-stream)', async () => {
     const r = await request(`${base}/rp/noext`, { method: 'PUT', headers: H('text/turtle'), body: TTL });
     assert.equal(r.status, 400);
