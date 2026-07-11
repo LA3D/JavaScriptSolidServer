@@ -92,6 +92,19 @@ async function authorizedRepresentations(request, storagePath, resourceUrl) {
   });
 }
 
+// F5 (spec 2026-07-11 §3): the profile-406 body — same RFC 9457 problem+json
+// grammar as the media-406 (nonRdfNotAcceptable, src/rdf/serve.js), but
+// listing the profiles that WOULD conform so the client can retry correctly.
+function profileNotAcceptableProblem(reps, instance) {
+  const conforming = [reps?.default, ...(reps?.alternates || [])].filter(Boolean)
+    .map((r) => r.profile).filter(Boolean);
+  return {
+    type: 'about:blank', title: 'Not Acceptable', status: 406,
+    detail: `no representation conforms to the requested profile(s). Profiles that conform: ${conforming.length ? conforming.join(', ') : '(none declared)'}.`,
+    instance,
+  };
+}
+
 /**
  * Parse HTTP Range header
  * @param {string} rangeHeader - The Range header value (e.g., "bytes=0-1023")
@@ -423,7 +436,8 @@ export async function handleGet(request, reply) {
         const avail = representationLinks(reps);
         if (avail) reply.header('Link', avail);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-        return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
+        return reply.code(406).type('application/problem+json')
+          .send(JSON.stringify(profileNotAcceptableProblem(reps, resourceUrl), null, 2));
       }
       chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
       advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
@@ -597,7 +611,8 @@ export async function handleGet(request, reply) {
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-      return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
+      return reply.code(406).type('application/problem+json')
+        .send(JSON.stringify(profileNotAcceptableProblem(reps, resourceUrl), null, 2));
     }
     // 'none' can still occur here: the gate above only checks the header is
     // truthy, but parseAcceptProfile can yield an empty array for a
@@ -1268,11 +1283,12 @@ export async function handleHead(request, reply) {
       return reply.code(303).header('Location', neg.rep.href).send();
     }
     if (neg.outcome === 'notacceptable') {
-      // HEAD 406 parity: same alternate-list Link as GET, body empty (HEAD).
+      // HEAD 406 parity: same alternate-list Link as GET, body empty (HEAD) —
+      // but same problem+json Content-Type (F5, spec 2026-07-11 §3).
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-      return reply.code(406).send();
+      return reply.code(406).type('application/problem+json').send();
     }
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
