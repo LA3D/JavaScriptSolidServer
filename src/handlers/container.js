@@ -42,10 +42,12 @@ export async function handlePost(request, reply) {
   }
 
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
   const contentType = request.headers['content-type'] || '';
 
   // Check if we can accept this input type
-  if (!canAcceptInput(contentType, connegEnabled)) {
+  if (!canAcceptInput(contentType, negotiate)) {
     const acceptValue = connegEnabled
       ? 'application/ld+json, application/json, text/turtle, text/n3'
       : 'application/ld+json, application/json';

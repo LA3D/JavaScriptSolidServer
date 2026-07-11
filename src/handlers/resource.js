@@ -268,6 +268,8 @@ export async function handleGet(request, reply) {
   }
 
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
   const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
   // Task 10 (probe-#6 F2): the representation-specific ETag a FILE GET will
   // actually emit, predicted up front (see predictFileEtag) — unused for
@@ -907,7 +909,7 @@ export async function handleGet(request, reply) {
   }
 
   // Content negotiation for RDF resources (including HTML with JSON-LD data islands)
-  if (connegEnabled) {
+  if (negotiate) {
     const contentStr = content.toString();
     const acceptHeader = request.headers.accept || '';
     // Serve Turtle if: URL ends with .ttl OR Accept's q-weighted top
@@ -972,7 +974,9 @@ export async function handleGet(request, reply) {
       if (request.lwsEnabled) {
         // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
         // an explicit Accept for a different negotiable quads format wins.
-        const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
+        // negotiate (not connegEnabled): the real serving arm below must be
+        // reachable under --lws alone, same as the outer gate (spec §4a).
+        const quadsTarget = negotiateQuadsTarget(acceptHeader, negotiate, true, urlPath);
         if (quadsTarget) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
           const headers = getAllHeaders({
@@ -1155,8 +1159,10 @@ function readFirstBytes(storagePath, bytes) {
 async function negotiateHeadFileContentType({ request, storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null, advertisedReps = null }) {
   const storedContentType = getContentType(storagePath);
   const fitsFullRead = stats.size <= HEAD_FULL_READ_MAX_BYTES;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || lwsEnabled;
 
-  if (connegEnabled) {
+  if (negotiate) {
     // --lws serving-arm parity (spec 2026-07-10 §2): HEAD answers the same
     // 406 a GET would, and the same converted content-type. Large files stay
     // on the optimistic path (docstring above) — same divergence budget.
@@ -1302,6 +1308,8 @@ export async function handleHead(request, reply) {
 
   const origin = request.headers.origin;
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
   let contentType;
   let headEtag = stats.etag;
   let isMashlibResponse = false;
@@ -1325,7 +1333,7 @@ export async function handleHead(request, reply) {
     // actually serves once it falls through to the real listing branch.
     const shadowActive = indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader));
 
-    if (connegEnabled) {
+    if (negotiate) {
       // HEAD must mirror what GET would emit; otherwise client caches and
       // RDF-aware tooling key off a content-type that doesn't match the
       // body they'll see on the next GET (#325). Use q-aware Accept
@@ -1528,6 +1536,8 @@ export async function handlePut(request, reply) {
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
 
   // Handle container creation via PUT
   if (isContainer(urlPath)) {
@@ -1587,7 +1597,7 @@ export async function handlePut(request, reply) {
   }
 
   // Check if we can accept this input type
-  if (!canAcceptInput(contentType, connegEnabled)) {
+  if (!canAcceptInput(contentType, negotiate)) {
     const acceptValue = connegEnabled
       ? 'application/ld+json, application/json, text/turtle, text/n3'
       : 'application/ld+json, application/json';
