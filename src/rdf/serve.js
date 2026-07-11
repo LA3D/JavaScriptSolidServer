@@ -55,6 +55,32 @@ export function datasetToFormat(dataset, targetType) {
   });
 }
 
+const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+
+// Dataset (default graph only — callers gate named graphs via GRAPH_CAPABLE)
+// → expanded JSON-LD (spec JSON-LD 1.1 §"Expanded Document Form"): no
+// @context, every predicate a full IRI, every value an array of value
+// objects. No compaction — this is the honest, dependency-free shape a raw
+// RDF/JS dataset maps to (no serializer-jsonld dependency in the tree).
+function datasetToJsonLd(dataset) {
+  const bySubject = new Map();
+  for (const q of dataset) {
+    const s = q.subject.termType === 'BlankNode' ? `_:${q.subject.value}` : q.subject.value;
+    if (!bySubject.has(s)) bySubject.set(s, { '@id': s });
+    const node = bySubject.get(s);
+    let val;
+    if (q.object.termType === 'Literal') {
+      val = { '@value': q.object.value };
+      if (q.object.language) val['@language'] = q.object.language;
+      else if (q.object.datatype && q.object.datatype.value !== XSD_STRING) val['@type'] = q.object.datatype.value;
+    } else {
+      val = { '@id': q.object.termType === 'BlankNode' ? `_:${q.object.value}` : q.object.value };
+    }
+    (node[q.predicate.value] ??= []).push(val);
+  }
+  return [...bySubject.values()];
+}
+
 function notAcceptable(instance, targetType, why, works) {
   return {
     ok: false,
@@ -106,13 +132,16 @@ async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) 
 const isOwnFormat = (sourceContentType, targetType) =>
   QUADS_OUTPUTS[sourceContentType] === targetType && sourceContentType !== RDF_TYPES.N3;
 
-/** Serve stored RDF bytes as a quads format under the 406-teaching policy. */
+/** Serve stored RDF bytes as a quads format (or JSON-LD) under the 406-teaching policy. */
 export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON_LD, targetType, baseIri }) {
   if (isOwnFormat(sourceContentType, targetType)) {
     return { ok: true, content: bytes, contentType: sourceContentType };
   }
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
   if (!p.ok) return p;
+  if (targetType === RDF_TYPES.JSON_LD) {
+    return { ok: true, content: JSON.stringify(datasetToJsonLd(p.dataset), null, 2), contentType: RDF_TYPES.JSON_LD };
+  }
   const content = await datasetToFormat(p.dataset, targetType);
   return { ok: true, content, contentType: targetType };
 }

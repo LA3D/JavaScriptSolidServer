@@ -28,6 +28,7 @@ import { turtleToJsonLd } from '../rdf/turtle.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { writeTypeConsistency } from '../lws/write-consistency.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable } from '../rdf/serve.js';
 
@@ -230,9 +231,13 @@ function containerListingEtag(etag, contentType, visKey) {
 // callers fall through to their own arm.
 function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) {
   const negotiated = selectContentType(acceptHeader, connegEnabled, lwsEnabled);
+  // B1: an explicit application/ld+json (or application/json) Accept always wins
+  // over the .ttl-extension default — the default applies only when Accept is
+  // absent/generic, never as an override of an explicit JSON-LD request.
+  const explicitJson = EXPLICIT_JSON_RE.test(acceptHeader || '');
   const negotiatedLws = QUADS_OUTPUTS[negotiated]
     ? negotiated
-    : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
+    : (urlPath.endsWith('.ttl') && !explicitJson ? RDF_TYPES.TURTLE : negotiated);
   return QUADS_OUTPUTS[negotiatedLws];
 }
 
@@ -996,8 +1001,30 @@ export async function handleGet(request, reply) {
           if (!served.ok) return reply.code(406).send(JSON.stringify(served.problem, null, 2));
           return reply.send(served.content);
         }
-        // JSON-LD target: the stored bytes ARE JSON-LD — the legacy arm
-        // below already serves them (JSON.parse→stringify), unchanged.
+        // JSON-LD target: when the stored bytes are a genuine non-JSON-LD RDF
+        // source (B1 — a .ttl/.n3/.nt/.nq resource stores its own bytes,
+        // never a JSON-LD envelope), real-convert through the same dataset
+        // seam + 406-teaching policy as the quads branch above. The legacy
+        // arm below assumes JSON-parseable bytes, which no longer holds.
+        if (storedContentType !== RDF_TYPES.JSON_LD) {
+          const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: RDF_TYPES.JSON_LD, baseIri: resourceUrl });
+          const headers = getAllHeaders({
+            isContainer: false,
+            etag: fileEtag,
+            contentType: served.ok ? served.contentType : 'application/problem+json',
+            origin,
+            resourceUrl,
+            connegEnabled,
+            mashlibEnabled: request.mashlibEnabled,
+            lwsEnabled: request.lwsEnabled,
+            chosenProfile,
+            representations: advertisedReps
+          });
+          headers['Cache-Control'] = RDF_CACHE_CONTROL;
+          Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+          if (!served.ok) return reply.code(406).send(JSON.stringify(served.problem, null, 2));
+          return reply.send(served.content);
+        }
       }
       // Plain JSON-LD file (legacy arm — reached always when --lws off)
       try {
@@ -1179,7 +1206,19 @@ async function negotiateHeadFileContentType({ request, storagePath, urlPath, sta
         }
         return { contentType: quadsTarget, converted: true };
       }
-      // JSON-LD target: legacy body below already handles it, unchanged.
+      // JSON-LD target: when the stored bytes are a genuine non-JSON-LD RDF
+      // source, GET real-converts through the dataset seam (parity above) —
+      // verify parseability (not full serialize) and report application/ld+json;
+      // never the legacy 'text/turtle'-by-extension guess below.
+      if (storedContentType !== RDF_TYPES.JSON_LD) {
+        if (!fitsFullRead) return { contentType: RDF_TYPES.JSON_LD, converted: true };
+        const content = await storage.read(storagePath);
+        if (content !== null) {
+          const check = await checkServable({ bytes: content, sourceContentType: storedContentType, targetType: RDF_TYPES.JSON_LD, baseIri: resourceUrl || `https://head.invalid${urlPath}` });
+          if (!check.ok) return { notAcceptable: true };
+        }
+        return { contentType: RDF_TYPES.JSON_LD, converted: true };
+      }
     }
 
     // Same negotiation as handleGet's file branch (#325 q-aware).
@@ -1648,11 +1687,16 @@ export async function handlePut(request, reply) {
     content = Buffer.from('');
   }
 
-  // Convert Turtle/N3 to JSON-LD if conneg enabled
+  // Spec §2: under --lws, store the submitted bytes verbatim; enforce
+  // write-time name/type consistency instead of converting (B1 root fix).
+  // --lws-off keeps the byte-identical legacy Turtle/N3→JSON-LD conversion.
   const inputType = contentType.split(';')[0].trim().toLowerCase();
-  if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
+  if (request.lwsEnabled) {
+    const c = writeTypeConsistency({ urlPath, submittedType: contentType, lwsEnabled: true });
+    if (!c.ok) return reply.code(400).type('application/problem+json').send(JSON.stringify(c.problem, null, 2));
+  } else if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
     try {
-      const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: !!request.lwsEnabled });
+      const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: false });
       content = Buffer.from(JSON.stringify(jsonLd, null, 2));
     } catch (e) {
       return reply.code(400).send({
@@ -1679,7 +1723,7 @@ export async function handlePut(request, reply) {
   const w = await applyLwsWrite({
     storage, storagePath, resourceUrl,
     content,
-    contentType: (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
+    contentType: (!request.lwsEnabled && connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
       ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
     declaredTypes: declared,
     lwsEnabled: request.lwsEnabled,

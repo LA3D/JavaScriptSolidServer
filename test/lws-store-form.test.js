@@ -43,20 +43,37 @@ describe('store form over HTTP (--lws pod)', () => {
   });
   after(async () => { await stopTestServer(); });
 
-  it('multi-subject Turtle PUT stores the {@context,@graph} envelope', async () => {
-    await request('/alice/public/multi.jsonld', {
+  // Spec 2026-07-11 §2 (B1 root fix): under --lws the write path no longer
+  // converts Turtle to a JSON-LD envelope — the pod stores exactly what the
+  // client submitted. A .ttl PUT stays raw Turtle on disk; the envelope
+  // {@context,@graph} form (pinned by the unit test above) now only ever
+  // shows up for a JSON-LD-submitted write, never as a Turtle-write side effect.
+  it('multi-subject Turtle PUT is stored AS Turtle (no envelope conversion)', async () => {
+    await request('/alice/public/multi.ttl', {
       method: 'PUT', headers: { 'Content-Type': 'text/turtle' }, body: TTL, auth: 'alice',
     });
-    const r = await request('/alice/public/multi.jsonld', { headers: { Accept: 'application/ld+json' } });
+    const r = await request('/alice/public/multi.ttl', { headers: { Accept: 'text/turtle' } });
     assertStatus(r, 200);
+    assert.equal(r.headers.get('content-type').split(';')[0], 'text/turtle');
+    const body = await r.text();
+    assert.ok(!body.trimStart().startsWith('{') && !body.trimStart().startsWith('['), 'stored as Turtle, not JSON');
+    assert.match(body, /"A"/);
+    assert.match(body, /"B"/);
+  });
+
+  it('the stored Turtle negotiates to real JSON-LD via the dataset seam on Accept: application/ld+json', async () => {
+    const r = await request('/alice/public/multi.ttl', { headers: { Accept: 'application/ld+json' } });
+    assertStatus(r, 200);
+    assert.equal(r.headers.get('content-type').split(';')[0], 'application/ld+json');
     const doc = await r.json();
-    assert.ok(Array.isArray(doc['@graph']));
-    assert.equal(doc['@graph'].length, 2);
-    assert.ok(!Array.isArray(doc));                        // never the legacy top-level array
+    assert.ok(Array.isArray(doc));                          // expanded form: array of nodes, no envelope
+    assert.equal(doc.length, 2);
+    const names = doc.flatMap((n) => (n['https://schema.org/name'] || []).map((v) => v['@value']));
+    assert.ok(names.includes('A') && names.includes('B'));
   });
 
   it('round-trip: Turtle PUT then Turtle GET returns both subjects (isomorphic content)', async () => {
-    const r = await request('/alice/public/multi.jsonld', { headers: { Accept: 'text/turtle' } });
+    const r = await request('/alice/public/multi.ttl', { headers: { Accept: 'text/turtle' } });
     assertStatus(r, 200);
     const body = await r.text();
     assert.match(body, /"A"/);
