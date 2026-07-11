@@ -379,7 +379,7 @@ export async function handleGet(request, reply) {
     // without full conneg — selectContentType handles it independently.
     const acceptHeader = request.headers.accept || '';
     const negotiated = (connegEnabled || request.lwsEnabled)
-      ? selectContentType(acceptHeader, connegEnabled)
+      ? selectContentType(acceptHeader, connegEnabled, request.lwsEnabled)
       : null;
     const wantsTurtle = negotiated === RDF_TYPES.TURTLE
       || negotiated === RDF_TYPES.N3
@@ -472,6 +472,37 @@ export async function handleGet(request, reply) {
       headers['Cache-Control'] = RDF_CACHE_CONTROL;
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
       return reply.send(JSON.stringify(ls, null, 2));
+    }
+
+    // --lws serving arm for the container listing (spec 2026-07-10 §2). The
+    // listing is pod-built JSON-LD (prefixed context, default graph only) so
+    // the 406 arms are unreachable; the catch keeps the JSON-LD fallback.
+    const quadsTarget = request.lwsEnabled ? QUADS_OUTPUTS[negotiated] : null;
+    if (quadsTarget) {
+      try {
+        const served = await serveStoredRdf({
+          bytes: Buffer.from(JSON.stringify(jsonLd)), targetType: quadsTarget, baseIri: resourceUrl,
+        });
+        if (served.ok) {
+          const headers = getAllHeaders({
+            isContainer: true,
+            etag: stats.etag,
+            contentType: served.contentType,
+            origin,
+            resourceUrl,
+            connegEnabled,
+            mashlibEnabled: request.mashlibEnabled,
+            lwsEnabled: request.lwsEnabled,
+            chosenProfile,
+            representations: advertisedReps
+          });
+          headers['Cache-Control'] = RDF_CACHE_CONTROL;
+          Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+          return reply.send(served.content);
+        }
+      } catch (err) {
+        console.error('Failed to convert container listing:', err.message);
+      }
     }
 
     if (wantsTurtle) {

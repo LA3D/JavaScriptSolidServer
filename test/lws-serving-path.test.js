@@ -72,4 +72,21 @@ describe('LWS serving path (dataset seam + 406 teaching)', () => {
     const body = await res.json();
     assert.ok(body['@graph']);
   });
+
+  it('container listing as Turtle carries member IRIs (via the dataset arm)', async () => {
+    const res = await request('/alice/public/', { headers: { Accept: 'text/turtle' } });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type'), /text\/turtle/);
+    const body = await res.text();
+    assert.match(body, /servepath-graphdoc\.jsonld/);
+    assert.match(body, /ldp#contains|ldp:contains/);
+  });
+
+  it('container listing negotiates application/n-quads under --lws', async () => {
+    const res = await request('/alice/public/', { headers: { Accept: 'application/n-quads' } });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type'), /application\/n-quads/);
+    const body = await res.text();
+    assert.match(body, /servepath-graphdoc\.jsonld/);
+  });
 });
