@@ -33,6 +33,28 @@ describe('lws: teaching 406 on non-RDF sources', () => {
     assert.equal(r.status, 406);
   });
 
+  // Reviewer-reproduced bug (final whole-round review, Important #1): the
+  // legacy HEAD branch gated on bare isRdfContentType (includes plain JSON),
+  // so a stored .json HEAD lied 200 where GET correctly 406-teaches. Fixed
+  // by mirroring GET's lwsEnabled ? isRdfSourceType : isRdfContentType ternary.
+  it('HEAD parity: plain JSON + Accept: text/turtle → 406, matches GET, problem+json', async () => {
+    const getRes = await request(`${base}/f3/d.json`, { headers: { Accept: 'text/turtle' }, auth: 'f3' });
+    const headRes = await request(`${base}/f3/d.json`, { method: 'HEAD', headers: { Accept: 'text/turtle' }, auth: 'f3' });
+    assert.equal(getRes.status, 406);
+    assert.equal(headRes.status, getRes.status);
+    assert.equal(headRes.headers.get('content-type').split(';')[0], 'application/problem+json');
+    assert.equal(await headRes.text(), '');
+  });
+
+  it('HEAD parity: plain JSON + Accept: application/ld+json → 406, matches GET, problem+json', async () => {
+    const getRes = await request(`${base}/f3/d.json`, { headers: { Accept: 'application/ld+json' }, auth: 'f3' });
+    const headRes = await request(`${base}/f3/d.json`, { method: 'HEAD', headers: { Accept: 'application/ld+json' }, auth: 'f3' });
+    assert.equal(getRes.status, 406);
+    assert.equal(headRes.status, getRes.status);
+    assert.equal(headRes.headers.get('content-type').split(';')[0], 'application/problem+json');
+    assert.equal(await headRes.text(), '');
+  });
+
   it('markdown + Accept: */* → 200 markdown, unchanged', async () => {
     const r = await request(`${base}/f3/card.md`, { headers: { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' }, auth: 'f3' });
     assert.equal(r.status, 200);

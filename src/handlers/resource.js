@@ -1183,7 +1183,11 @@ async function negotiateHeadFileContentType({ request, storagePath, urlPath, sta
       || negotiated === RDF_TYPES.N3
       || negotiated === 'application/n-triples';
 
-    if (isRdfContentType(storedContentType)) {
+    // Legacy JSON-LD gate mirrors GET's ternary (spec 2026-07-11 §2 parity):
+    // under --lws, narrowed to isRdfSourceType so plain application/json
+    // falls through to the F3 406-teaching gate below instead of a lying
+    // 200; --lws-off keeps the old bare isRdfContentType predicate.
+    if (lwsEnabled ? isRdfSourceType(storedContentType) : isRdfContentType(storedContentType)) {
       const targetType = wantsTurtle ? 'text/turtle' : selectContentType(acceptHeader, connegEnabled);
       if (!fitsFullRead) {
         // Optimistic large-file path — see docstring.
