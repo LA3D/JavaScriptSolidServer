@@ -98,6 +98,7 @@ program
   .option('--lws-profile-index <path>', 'Advertise a ProfileIndexService at this pod path in the storage description (requires --lws)')
   .option('--lws-profile-conneg', 'Enable content negotiation by profile (default on when --lws)')
   .option('--no-lws-profile-conneg', 'Disable content negotiation by profile')
+  .option('--lws-void <path>', 'Serve /.well-known/void as a 303 to this pod path and advertise a VoidService in the storage description (requires --lws)')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -232,6 +233,7 @@ program
         lwsTypeIndex: config.lwsTypeIndex,
         lwsProfileIndex: config.lwsProfileIndex,
         lwsProfileConneg: config.lwsProfileConneg,
+        lwsVoid: config.lwsVoid,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,

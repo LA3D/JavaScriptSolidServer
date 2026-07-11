@@ -40,6 +40,9 @@ export const defaults = {
   // ON by default whenever --lws is on (mirrors lwsTypeIndex, not
   // lwsProfileIndex's opt-in-path null) — see task-6-report.md for why.
   lwsProfileConneg: true,
+  // Opt-in path, same shape as lwsProfileIndex (task-7-brief.md): the fork
+  // only routes to a configured pod resource, never generates VoID content.
+  lwsVoid: null,
   notifications: false,
 
   // Identity Provider
@@ -182,6 +185,7 @@ const envMap = {
   JSS_LWS_TYPE_INDEX: 'lwsTypeIndex',
   JSS_LWS_PROFILE_INDEX: 'lwsProfileIndex',
   JSS_LWS_PROFILE_CONNEG: 'lwsProfileConneg',
+  JSS_LWS_VOID: 'lwsVoid',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',

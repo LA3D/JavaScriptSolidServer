@@ -35,10 +35,10 @@ export function generateStorageDescription(storageRootUrl, services = []) {
  * resource (read at /.well-known/lws-storage) both call this so the advertised
  * service set can never drift between the two surfaces.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, profileConnegEnabled?:boolean, mcpEnabled?:boolean}} flags
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, mcpEnabled?:boolean}} flags
  * @returns {object}
  */
-export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, profileConnegEnabled = false, mcpEnabled = false } = {}) {
+export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, mcpEnabled = false } = {}) {
   const lwsStoragePath = '/.well-known/lws-storage';
   const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
   if (typeIndexEnabled) {
@@ -59,6 +59,12 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
   }
   if (profileIndexPath) {
     services.push({ type: 'ProfileIndexService', serviceEndpoint: `${origin}${profileIndexPath}` });
+  }
+  if (voidPath) {
+    services.push({ type: 'VoidService', serviceEndpoint: `${origin}/.well-known/void`,
+      // Steering (unmapped, like the TypeSearchService/McpService hints):
+      // the endpoint is a 303, so a cold agent needs told what's behind it.
+      hint: 'VoID description of the datasets this storage serves — the vocabularies in use (each with a pod-served copy), root resources, and the subject URI space. GET follows a 303 to the description document.' });
   }
   if (mcpEnabled) {
     services.push({

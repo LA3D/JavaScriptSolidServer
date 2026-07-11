@@ -105,6 +105,10 @@ export function createServer(options = {}) {
   const typeIndexEnabled = lwsEnabled && (options.lwsTypeIndex ?? true);
   // ProfileIndexService advertisement is OFF by default (opt-in path, --lws-gated)
   const profileIndexPath = lwsEnabled ? (options.lwsProfileIndex ?? null) : null;
+  // VoID rung is OFF by default (opt-in path, --lws-gated, same shape as
+  // profileIndexPath): /.well-known/void 303s to this pod resource — the
+  // server never generates VoID content, the document is pod data.
+  const voidPath = lwsEnabled ? (options.lwsVoid ?? null) : null;
   // Content Negotiation by Profile is ON by default whenever --lws is on;
   // --no-lws-profile-conneg is a per-deployment safety valve to disable just
   // the capability advertisement without disabling the rest of --lws.
@@ -391,6 +395,7 @@ export function createServer(options = {}) {
   fastify.decorateRequest('lwsEnabled', null);
   fastify.decorateRequest('typeIndexEnabled', null);
   fastify.decorateRequest('profileIndexPath', null);
+  fastify.decorateRequest('voidPath', null);
   fastify.decorateRequest('lwsProfileConneg', null);
   fastify.decorateRequest('notificationsEnabled', null);
   fastify.decorateRequest('idpEnabled', null);
@@ -412,6 +417,7 @@ export function createServer(options = {}) {
     request.lwsEnabled = lwsEnabled;
     request.typeIndexEnabled = typeIndexEnabled;
     request.profileIndexPath = profileIndexPath;
+    request.voidPath = voidPath;
     request.lwsProfileConneg = profileConnegEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
     request.idpEnabled = idpEnabled;
@@ -1059,12 +1065,25 @@ export function createServer(options = {}) {
       // storage-description resource ctx (src/mcp/index.js) — otherwise HTTP
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, profileConnegEnabled, mcpEnabled });
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, voidPath, profileConnegEnabled, mcpEnabled });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.
     for (const m of ['put', 'post', 'patch', 'delete']) {
       fastify[m](lwsStoragePath, methodNotAllowed);
+    }
+
+    // VoID rung — /.well-known/void 303s to the configured pod resource
+    // (--lws-void). Pure routing (P13): the document itself is pod data,
+    // written by the publish pipeline; the server never generates it.
+    // Route absent entirely when unconfigured → wildcard 404.
+    if (voidPath) {
+      fastify.get('/.well-known/void', async (request, reply) => {
+        const origin = `${request.protocol}://${request.hostname}`;
+        reply.header('Cache-Control', 'public, max-age=3600');
+        return reply.code(303).header('Location', `${origin}${voidPath}`).send();
+      });
+      for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/.well-known/void', methodNotAllowed);
     }
 
     if (typeIndexEnabled) {

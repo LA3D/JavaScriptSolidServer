@@ -69,7 +69,8 @@ async function readSkills(ctx, uri) {
 async function readStorageDescription(ctx, uri) {
   const sd = buildStorageDescription(ctx.origin, {
     typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
-    profileIndexPath: ctx.profileIndexPath, profileConnegEnabled: ctx.profileConnegEnabled,
+    profileIndexPath: ctx.profileIndexPath, voidPath: ctx.voidPath,
+    profileConnegEnabled: ctx.profileConnegEnabled,
     mcpEnabled: true,
   });
   return jsonContents(uri, withInlineContext(sd), 'application/lws+json');
