@@ -450,5 +450,17 @@ async function authorizeAclAccess(request, urlPath, method, webId, authError) {
     requiredMode: AccessMode.CONTROL
   });
 
-  return { authorized: allowed, webId, wacAllow, authError };
+  // WAC-Allow must describe the REQUESTED resource (the .acl), not the
+  // protected resource — control-holders may read+write the acl; everyone
+  // else gets nothing (probe-#6 F1: a 401 wearing the protected resource's
+  // public="read" is retry-loop bait for WAC-aware clients). If public
+  // CONTROL is actually granted on the protected resource (rare), this
+  // under-reports public="" for the .acl — acceptable and safe, never
+  // over-grants. --lws-gated (2026-07-11 decision): the --lws-off path
+  // keeps the upstream (misleading) header byte-identical.
+  const aclWacAllow = request.lwsEnabled
+    ? (allowed ? 'user="read write", public=""' : 'user="", public=""')
+    : wacAllow;
+
+  return { authorized: allowed, webId, wacAllow: aclWacAllow, authError };
 }

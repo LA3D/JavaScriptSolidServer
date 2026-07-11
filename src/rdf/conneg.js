@@ -105,6 +105,31 @@ function parseAcceptHeader(header) {
   return types.sort((a, b) => b.q - a.q);
 }
 
+// F3 (spec 2026-07-11 §3): can this Accept header be satisfied by the authored
+// content type at all? Absent/empty header always satisfies (serve authored).
+// q=0 is RFC 9110 §12.5.1's "explicitly not acceptable" — an entry carrying it
+// must not count toward satisfiability even if its type would otherwise match.
+export function acceptSatisfiable(acceptHeader, contentType) {
+  if (!acceptHeader || !acceptHeader.trim()) return true;
+  const main = (contentType || '').split(';')[0].trim().toLowerCase();
+  const major = main.split('/')[0];
+  return parseAcceptHeader(acceptHeader)
+    .filter(({ q }) => q !== 0)
+    .some(({ type }) => type === '*/*' || type === main || type === `${major}/*`);
+}
+
+// A2 (spec 2026-07-11 §4): does this request accept an HTML answer at all?
+// Absent header = yes (curl, browsers without Accept). Only a header naming
+// specific non-HTML types refuses the shadow. Same q=0 exclusion as
+// acceptSatisfiable — RFC 9110 §12.5.1 (Task 2 precedent).
+export function acceptsHtml(acceptHeader) {
+  if (!acceptHeader || !acceptHeader.trim()) return true;
+  return parseAcceptHeader(acceptHeader)
+    .filter(({ q }) => q !== 0)
+    .some(({ type }) => type === 'text/html' || type === 'application/xhtml+xml'
+      || type === '*/*' || type === 'text/*');
+}
+
 /**
  * Parse an Accept-Profile header (DX-PROF-CONNEG cnpr:http). Values are
  * angle-bracketed profile URIs with optional ;q= weights. Returns profile

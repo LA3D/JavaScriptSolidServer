@@ -61,7 +61,7 @@ There's no per-kind scheme to pick from — the resource's own shape decides wha
 
 | Resource | Returns | WAC |
 |---|---|---|
-| A container URL (trailing `/`) | `application/lws+json` container listing (`items[]`) | Read |
+| A container URL (trailing `/`) | `application/lws+json` container listing (`items[]`, WAC-filtered per member, no-oracle) | Read |
 | `<X>.acl` | structured ACL view (agents, agentClasses, modes, isDefault) | **Control** |
 | `<X>.meta` | resource metadata (size/modified) | Read |
 | Any other resource | its body | Read |
@@ -104,7 +104,7 @@ Ten tools: eight core + two convenience.
 | `write_acl` | persist a structured ACL to the resource's `.acl` | Control + anti-lockout |
 | `lws_type_search` | CNF `type` (+ `describedby`) query, WAC-filtered, no-oracle | reuses the authorized-resources walk |
 | `subscribe` | SSE stream of `resource_changed` events, WAC-filtered per event | Read per event |
-| `read_resource` | Read any resource by its real `https://` URL — one-Web: this pod's own uri dispatches as a local read (same resolver as `resources/read`), any other origin is a federation-gated remote GET (incl. that pod's storage description). Returns two content blocks: body, then metadata `{ uri, mimeType, links }`. Local `links`: `up` (parent container), `storageDescription`, `describedby` (optional, from `.meta`). Remote `links`: `context`, `alternate`, `linkset` (from Link headers, passed through verbatim). | local: Read; remote: caller needs `acl:Write` on `<pod>/private/federation/`, depth-capped at 3 |
+| `read_resource` | Read any resource by its real `https://` URL — one-Web: this pod's own uri dispatches as a local read (same resolver as `resources/read`), any other origin is a federation-gated remote GET (incl. that pod's storage description). Returns two content blocks: body, then metadata `{ uri, mimeType, links }`. Local `links`: `up` (parent container, omitted for `/.well-known/*` — those have no parent to walk to), `storageDescription`, `describedby` (optional, from `.meta`). Remote `links`: `context`, `alternate`, `linkset` (from Link headers, passed through verbatim). | local: Read; remote: caller needs `acl:Write` on `<pod>/private/federation/`, depth-capped at 3 |
 | `list_resources` | The model-callable twin of `resources/list` — this pod's fixed entry resources + the real-URI template. Returns metadata object with `resources` array (fixed entries like `storage-description`, `pod-info`, `skills`) and `templates` array (the real-URI template). | none (fixed, public shape) |
 
 Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) route through the shared LWS admission core (SHACL validation → write → type-capture) — the same enforcement path as HTTP PUT/POST. Pass a `types` array (the `Link: rel="type"` equivalent) to declare server-managed types.
@@ -114,7 +114,7 @@ Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) rout
 | Tool | Composes |
 |---|---|
 | `put_typed_resource` | write body + capture `types` + optionally declare a `describedby` shape into the target `.meta`, in one call |
-| `describe_resource` | one read returning body + declared types + linkset together |
+| `describe_resource` | one read returning body + declared types + linkset together; takes `path` or `uri` — when both are given, `path` wins and `uri` is ignored |
 
 ### ACL editing
 

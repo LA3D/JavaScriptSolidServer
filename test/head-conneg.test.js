@@ -23,6 +23,9 @@ import { createServer } from '../src/server.js';
 import { createServer as createNetServer } from 'net';
 import fs from 'fs-extra';
 import path from 'path';
+import {
+  startTestServer, stopTestServer, request, createTestPod, assertStatus,
+} from './helpers.js';
 
 const TEST_HOST = 'localhost';
 const DATA_DIR = './test-data-head-conneg';
@@ -245,5 +248,71 @@ describe('HEAD/GET content-type parity (#552)', () => {
       headers: { 'If-None-Match': etag },
     });
     assert.strictEqual(res.status, 304);
+  });
+});
+
+// F7 carryover: the container HEAD branch negotiated lws+json/linkset
+// (request.lwsEnabled) but called selectContentType 2-arg for everything
+// else — so a quads Accept (application/n-quads etc.) fell through HEAD's
+// content-type decision unrecognized while GET's container path (3-arg,
+// same call) served the real negotiated quads type. Membership listings are
+// default-graph-only, so there's no 406 risk here — this is pure
+// content-type parity between HEAD and GET on the same Accept.
+describe('lws: container HEAD negotiates quads types like GET (F7 carryover)', () => {
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true });
+    await createTestPod('headquads');
+    // No index.html in this container — the real listing branch, not the
+    // index.html shadow, is what's under test.
+    await request('/headquads/thing.ttl', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/turtle' },
+      auth: 'headquads',
+      body: '<#it> a <http://example.org/Thing> .',
+    });
+  });
+  after(stopTestServer);
+
+  // Compare MEDIA TYPES (parameters stripped) — same rationale as the
+  // outer describe's mediaType(): fastify appends `; charset=utf-8` when
+  // it serializes a string BODY, which HEAD never has.
+  const mediaType = (res) => (res.headers.get('content-type') || '').split(';')[0].trim();
+
+  const QUADS_ACCEPTS = [
+    ['application/n-quads', 'application/n-quads'],
+    ['application/n-triples', 'application/n-triples'],
+    ['text/turtle', 'text/turtle'],
+  ];
+
+  for (const [accept, expectedType] of QUADS_ACCEPTS) {
+    it(`HEAD /headquads/ Accept: ${accept} → content-type matches GET's (${expectedType})`, async () => {
+      const getRes = await request('/headquads/', { headers: { Accept: accept }, auth: 'headquads' });
+      const headRes = await request('/headquads/', { method: 'HEAD', headers: { Accept: accept }, auth: 'headquads' });
+      assertStatus(getRes, 200, `prereq: GET must 200 for ${accept}`);
+      assertStatus(headRes, 200, `HEAD must 200 for ${accept}`);
+      assert.equal(mediaType(getRes), expectedType, `prereq: GET must negotiate ${expectedType}`);
+      assert.equal(mediaType(headRes), mediaType(getRes),
+        `HEAD content-type must equal GET's for Accept: ${accept}`);
+    });
+  }
+
+  it('--lws-off: container HEAD quads Accept unaffected (negative)', async () => {
+    await stopTestServer();
+    await startTestServer({ conneg: true });
+    await createTestPod('headquadsoff');
+    await request('/headquadsoff/thing.ttl', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/turtle' },
+      auth: 'headquadsoff',
+      body: '<#it> a <http://example.org/Thing> .',
+    });
+    const getRes = await request('/headquadsoff/', { headers: { Accept: 'application/n-quads' }, auth: 'headquadsoff' });
+    const headRes = await request('/headquadsoff/', { method: 'HEAD', headers: { Accept: 'application/n-quads' }, auth: 'headquadsoff' });
+    assertStatus(getRes, 200);
+    assertStatus(headRes, 200);
+    // --lws-off never negotiates n-quads — both fall back to JSON-LD, and
+    // must still agree with each other.
+    assert.equal(mediaType(headRes), mediaType(getRes));
+    assert.doesNotMatch(mediaType(getRes), /n-quads/);
   });
 });

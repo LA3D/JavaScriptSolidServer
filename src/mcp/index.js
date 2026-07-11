@@ -236,6 +236,7 @@ export async function mcpPlugin(fastify, options = {}) {
       lwsEnabled: request.lwsEnabled || false,
       typeIndexEnabled: request.typeIndexEnabled || false,
       profileIndexPath: request.profileIndexPath || null,
+      voidPath: request.voidPath || null,
       notificationsEnabled: request.notificationsEnabled || false,
       profileConnegEnabled: request.lwsProfileConneg || false
     };

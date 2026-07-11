@@ -36,3 +36,18 @@ test('McpService advertised iff MCP is enabled (S5 — /mcp was invisible to HTT
   const off = buildStorageDescription('https://pod.example', {});
   assert.ok(!off.service.some(s => s.type === 'McpService'));
 });
+
+// A3 (spec 2026-07-11 §4): Task 5 made the shadowed-container escape TRUE
+// (a specific non-HTML Accept now reaches the real listing, root included),
+// so the linkset hint must teach the escape instead of a bare "descend".
+test('linkset hint teaches the shadow escape (root is listable by conneg)', () => {
+  const sd = buildStorageDescription('https://pod.example', {});
+  assert.match(sd.linkset.hint, /non-HTML Accept/);
+  assert.match(sd.linkset.hint, /application\/lws\+json/);
+});
+
+test('TypeSearchService carries a query-syntax hint', () => {
+  const sd = buildStorageDescription('https://pod.example', { typeIndexEnabled: true });
+  const ts = sd.service.find(s => s.type === 'TypeSearchService');
+  assert.match(ts.hint, /\?type=/);
+});

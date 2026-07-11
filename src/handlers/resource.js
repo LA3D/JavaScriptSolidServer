@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders, representationLinks } from '../ldp/headers.js';
@@ -14,7 +15,9 @@ import {
   fromJsonLd,
   RDF_TYPES,
   getVaryHeader,
-  negotiateProfile
+  negotiateProfile,
+  acceptSatisfiable,
+  acceptsHtml
 } from '../rdf/conneg.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
@@ -26,7 +29,7 @@ import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
-import { serveStoredRdf, checkServable, QUADS_OUTPUTS } from '../rdf/serve.js';
+import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable } from '../rdf/serve.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -89,6 +92,19 @@ async function authorizedRepresentations(request, storagePath, resourceUrl) {
     agentWebId,
     public: !!request.config?.public,
   });
+}
+
+// F5 (spec 2026-07-11 §3): the profile-406 body — same RFC 9457 problem+json
+// grammar as the media-406 (nonRdfNotAcceptable, src/rdf/serve.js), but
+// listing the profiles that WOULD conform so the client can retry correctly.
+function profileNotAcceptableProblem(reps, instance) {
+  const conforming = [reps?.default, ...(reps?.alternates || [])].filter(Boolean)
+    .map((r) => r.profile).filter(Boolean);
+  return {
+    type: 'about:blank', title: 'Not Acceptable', status: 406,
+    detail: `no representation conforms to the requested profile(s). Profiles that conform: ${conforming.length ? conforming.join(', ') : '(none declared)'}.`,
+    instance,
+  };
 }
 
 /**
@@ -165,6 +181,77 @@ function getMashlibEtag(request, stats, storagePath) {
   return { willServeMashlib, effectiveEtag };
 }
 
+// Task 10 (probe-#6 F2): one strong ETag covering every representation of a
+// resource let a format-switching client 304-revalidate a wrong-format
+// cache entry, and a WAC-filtered listing varied by requester under one
+// shared ETag. variantEtag suffixes the mashlib '-html' precedent above
+// for RDF representations that DIFFER from what's stored — own-format
+// reads (Task 1's short-circuit: bytes are bytes) keep the bare
+// stats.etag. --lws-gated everywhere it's applied below.
+const VARIANT_KEYS = {
+  [RDF_TYPES.TURTLE]: 'ttl',
+  [RDF_TYPES.NTRIPLES]: 'nt',
+  [RDF_TYPES.NQUADS]: 'nq',
+  [RDF_TYPES.LWS_JSON]: 'lws',
+  [RDF_TYPES.LINKSET]: 'ls',
+};
+
+function variantEtag(etag, key) {
+  return etag.replace(/"$/, `-${key}"`);
+}
+
+// Container-listing ETag: representation variant (per the served content
+// type) + an 8-char md5 of the sorted VISIBLE member names. WAC-filtered
+// listings vary by requester (S1) — an anon and an owner listing of the
+// same container must not share one ETag. `visKey` is null when the
+// caller didn't filter (public mode, or --lws off).
+function containerListingEtag(etag, contentType, visKey) {
+  const repKey = VARIANT_KEYS[contentType];
+  const e = repKey ? variantEtag(etag, repKey) : etag;
+  return visKey ? variantEtag(e, visKey) : e;
+}
+
+// Predicts a FILE GET's eventual representation ETag from sync,
+// content-independent inputs only (stored type / Accept / URL) — the same
+// derivation the real --lws serving arm below runs (algebraically
+// equivalent to serve.js's own-format check: a real conversion happens
+// exactly when the negotiated target differs from the stored type — see
+// isOwnFormat in src/rdf/serve.js). Lets the early If-None-Match check
+// compare against the right variant before the file is read, so a
+// format-switching client can't 304-revalidate a wrong-format cache entry;
+// the real branches below reuse this same value, so the header and the
+// 304 comparison never drift apart.
+// The negotiation algebra shared by predictFileEtag, the --lws quads
+// serving arm, and negotiateHeadFileContentType (was triplicated — Task 13
+// hygiene): negotiate a target quads format from Accept via selectContentType's
+// 3-arg (lws) form, applying the `.ttl`-as-DEFAULT-not-override fallback (an
+// explicit Accept for another negotiable quads format still wins). Returns
+// undefined when the negotiated type isn't a quads target (e.g. JSON-LD) —
+// callers fall through to their own arm.
+function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) {
+  const negotiated = selectContentType(acceptHeader, connegEnabled, lwsEnabled);
+  const negotiatedLws = QUADS_OUTPUTS[negotiated]
+    ? negotiated
+    : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
+  return QUADS_OUTPUTS[negotiatedLws];
+}
+
+function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
+  if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
+  const acceptHeader = request.headers.accept || '';
+  if (selectContentType(acceptHeader, connegEnabled) === RDF_TYPES.LINKSET) {
+    return variantEtag(stats.etag, 'ls');
+  }
+  const storedContentType = getContentType(storagePath);
+  if (connegEnabled && isRdfSourceType(storedContentType)) {
+    const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
+    if (quadsTarget && quadsTarget !== storedContentType) {
+      return variantEtag(stats.etag, VARIANT_KEYS[quadsTarget]);
+    }
+  }
+  return stats.etag;
+}
+
 /**
  * Handle GET request
  */
@@ -180,18 +267,25 @@ export async function handleGet(request, reply) {
     return reply.code(404).send({ error: 'Not Found' });
   }
 
+  const connegEnabled = request.connegEnabled || false;
   const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
+  // Task 10 (probe-#6 F2): the representation-specific ETag a FILE GET will
+  // actually emit, predicted up front (see predictFileEtag) — unused for
+  // containers, whose listing ETag depends on WAC-filtered membership and
+  // is computed further down once entries are read.
+  const fileEtag = stats.isDirectory ? null
+    : predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled);
 
-  // For non-containers, check If-None-Match early using the effective
-  // ETag. For containers, defer the check until we know which branch
-  // (index.html vs listing vs mashlib) will run — each uses a
-  // different ETag source (#456).
+  // For non-containers, check If-None-Match early using the predicted
+  // representation ETag (Task 10). For containers, defer the check until
+  // we know which branch (index.html vs listing vs mashlib) will run —
+  // each uses a different ETag source (#456).
   const ifNoneMatch = request.headers['if-none-match'];
   if (ifNoneMatch && !stats.isDirectory) {
-    const check = checkIfNoneMatchForGet(ifNoneMatch, effectiveEtag);
+    const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
-      reply.header('ETag', effectiveEtag);
-      reply.header('Vary', getVaryHeader(request.connegEnabled, request.mashlibEnabled));
+      reply.header('ETag', fileEtag);
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
       return reply.code(304).send();
     }
   }
@@ -200,13 +294,18 @@ export async function handleGet(request, reply) {
 
   // Handle container
   if (stats.isDirectory) {
-    const connegEnabled = request.connegEnabled || false;
-
     // Check for index.html (serves as both profile and container representation)
     const indexPath = storagePath.endsWith('/') ? `${storagePath}index.html` : `${storagePath}/index.html`;
     const indexExists = await storage.exists(indexPath);
+    const acceptHeader = request.headers.accept || '';
 
-    if (indexExists) {
+    // A2 (spec 2026-07-11 §4): index.html shadows the listing only for
+    // requests that can accept an HTML answer. Under --lws, a non-HTML
+    // Accept escapes the shadow and falls through to the real listing
+    // branch below — lws+json/linkset/turtle/quads all become reachable
+    // there (including the WAC filter and A1 alternates), and rel="linkset"
+    // is no longer suppressed since the affordance is now honest.
+    if (indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader))) {
       // Serve index.html (contains JSON-LD structured data)
       const content = await storage.read(indexPath);
       const indexStats = await storage.stat(indexPath);
@@ -226,7 +325,6 @@ export async function handleGet(request, reply) {
       // naive `acceptHeader.includes('text/turtle')` we used to do here
       // ignored q-weights — `Accept: application/ld+json, text/turtle;q=0.1`
       // would still pick Turtle even though JSON-LD was preferred (#325).
-      const acceptHeader = request.headers.accept || '';
       const negotiated = connegEnabled
         ? selectContentType(acceptHeader, true)
         : null;
@@ -274,8 +372,7 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled,
-                suppressLinkset: true
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -290,8 +387,7 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled,
-                suppressLinkset: true
+                lwsEnabled: request.lwsEnabled
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -312,8 +408,7 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        lwsEnabled: request.lwsEnabled,
-        suppressLinkset: true
+        lwsEnabled: request.lwsEnabled
       });
 
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -327,31 +422,66 @@ export async function handleGet(request, reply) {
     }
 
     // No index.html, return JSON-LD container listing
-    // Deferred 304 check for container listings (#456)
-    if (ifNoneMatch) {
-      const check = checkIfNoneMatchForGet(ifNoneMatch, effectiveEtag);
-      if (!check.ok && check.notModified) {
-        reply.header('ETag', effectiveEtag);
-        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-        return reply.code(304).send();
-      }
-    }
-
     let entries = await storage.listContainer(storagePath);
     // S1 (spec 2026-07-10 §4): WAC-filter the membership per requester
     // before ANY rendering (ldp:contains, lws+json items[], Turtle, mashlib
     // embed all flow from `entries`/`jsonLd`). --public mode has no WAC to
     // filter by; --lws off keeps the upstream unfiltered listing.
+    let visKey = null;
     if (request.lwsEnabled && !request.config?.public) {
       const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       entries = await filterReadableEntries({
         entries: entries || [], containerUrl: resourceUrl, containerStoragePath: storagePath, agentWebId,
       });
+      // Task 10 (probe-#6 F2): visibility hash — an anon and an owner
+      // listing of the same container must not share one strong ETag.
+      visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
     }
+
+    // Pick the negotiated RDF type using q-aware Accept parsing (#325).
+    // LWS media type negotiation is always active when lwsEnabled, even
+    // without full conneg — selectContentType handles it independently.
+    // Computed here (before the mashlib check and the 304 check below) so
+    // Task 10's representation- and visibility-keyed listing ETag is known
+    // before either needs it.
+    const negotiated = (connegEnabled || request.lwsEnabled)
+      ? selectContentType(acceptHeader, connegEnabled, request.lwsEnabled)
+      : null;
+    const wantsTurtle = negotiated === RDF_TYPES.TURTLE
+      || negotiated === RDF_TYPES.N3
+      || negotiated === 'application/n-triples';
+    const willMashlib = shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json');
+    const listingContentType = willMashlib ? 'text/html'
+      : negotiated === RDF_TYPES.LWS_JSON ? RDF_TYPES.LWS_JSON
+      : negotiated === RDF_TYPES.LINKSET ? RDF_TYPES.LINKSET
+      : (request.lwsEnabled && QUADS_OUTPUTS[negotiated]) ? QUADS_OUTPUTS[negotiated]
+      : wantsTurtle ? RDF_TYPES.TURTLE
+      : RDF_TYPES.JSON_LD;
+    // --lws-off / mashlib-HTML keep the pre-Task-10 etag source (bare or
+    // the mashlib '-html' suffix) — mashlib's embedded listing isn't part
+    // of the altr: representation family this task scopes (brief: lws+json/
+    // linkset/quads/turtle/ld+json).
+    const listingEtag = (request.lwsEnabled && !willMashlib)
+      ? containerListingEtag(stats.etag, listingContentType, visKey)
+      : effectiveEtag;
+
+    // Deferred 304 check for container listings (#456) — compared against
+    // the representation- and visibility-keyed ETag above (Task 10,
+    // probe-#6 F2), not the bare container ETag, so a format-switching or
+    // visibility-switching client can't 304-revalidate the wrong variant.
+    if (ifNoneMatch) {
+      const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
+      if (!check.ok && check.notModified) {
+        reply.header('ETag', listingEtag);
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+        return reply.code(304).send();
+      }
+    }
+
     const jsonLd = generateContainerJsonLd(resourceUrl, entries || []);
 
     // Check if we should serve Mashlib data browser for containers
-    if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
+    if (willMashlib) {
       // Phase 1 of #7: also embed the container's JSON-LD listing as a
       // data island so consumers that look for `<script
       // type="application/ld+json">` (search-engine rich-results,
@@ -385,17 +515,6 @@ export async function handleGet(request, reply) {
       return reply.type('text/html').send(html);
     }
 
-    // Pick the negotiated RDF type using q-aware Accept parsing (#325).
-    // LWS media type negotiation is always active when lwsEnabled, even
-    // without full conneg — selectContentType handles it independently.
-    const acceptHeader = request.headers.accept || '';
-    const negotiated = (connegEnabled || request.lwsEnabled)
-      ? selectContentType(acceptHeader, connegEnabled, request.lwsEnabled)
-      : null;
-    const wantsTurtle = negotiated === RDF_TYPES.TURTLE
-      || negotiated === RDF_TYPES.N3
-      || negotiated === 'application/n-triples';
-
     // Profile conneg (DX-PROF-CONNEG cnpr:http) for the container's RDF
     // listing representations — mirrors the file-GET gate below. Only when
     // explicitly enabled AND the client sent Accept-Profile. index.html and
@@ -422,10 +541,20 @@ export async function handleGet(request, reply) {
         const avail = representationLinks(reps);
         if (avail) reply.header('Link', avail);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-        return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
+        return reply.code(406).type('application/problem+json')
+          .send(JSON.stringify(profileNotAcceptableProblem(reps, resourceUrl), null, 2));
       }
       chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
       advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+    }
+
+    // A1 (spec §4): container bare 200 gets the same un-negotiated
+    // advertisement as files — see the file-GET arm below for the perf
+    // rationale. Same `storagePath + '.meta'` the Accept-Profile block
+    // above reads (via authorizedRepresentations), so bare and negotiated
+    // paths can never diverge on which .meta they resolve.
+    if (request.lwsEnabled && !advertisedReps && await storage.exists(storagePath + '.meta')) {
+      advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
     }
 
     // LWS container representation — only when enabled AND explicitly negotiated.
@@ -433,7 +562,7 @@ export async function handleGet(request, reply) {
       const lws = generateLwsContainer(resourceUrl, entries || []);
       const headers = getAllHeaders({
         isContainer: true,
-        etag: stats.etag,
+        etag: listingEtag,
         contentType: RDF_TYPES.LWS_JSON,
         origin,
         resourceUrl,
@@ -459,7 +588,7 @@ export async function handleGet(request, reply) {
       const declaredTypes = await readDeclaredTypes(storage, storagePath);
       const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
       const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
-      const representations = await authorizedRepresentations(request, storagePath, resourceUrl);
+      const representations = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
       const ls = generateLinkset(resourceUrl, {
         parentUrl: parentContainerUrl(resourceUrl),
         isContainer: true,
@@ -470,7 +599,7 @@ export async function handleGet(request, reply) {
       });
       const headers = getAllHeaders({
         isContainer: true,
-        etag: stats.etag,
+        etag: listingEtag,
         contentType: RDF_TYPES.LINKSET,
         origin,
         resourceUrl,
@@ -497,7 +626,7 @@ export async function handleGet(request, reply) {
         if (served.ok) {
           const headers = getAllHeaders({
             isContainer: true,
-            etag: stats.etag,
+            etag: listingEtag,
             contentType: served.contentType,
             origin,
             resourceUrl,
@@ -528,7 +657,7 @@ export async function handleGet(request, reply) {
 
         const headers = getAllHeaders({
           isContainer: true,
-          etag: stats.etag,
+          etag: listingEtag,
           contentType: 'text/turtle',
           origin,
           resourceUrl,
@@ -550,7 +679,7 @@ export async function handleGet(request, reply) {
 
     const headers = getAllHeaders({
       isContainer: true,
-      etag: stats.etag,
+      etag: listingEtag,
       contentType: 'application/ld+json',
       origin,
       resourceUrl,
@@ -568,7 +697,6 @@ export async function handleGet(request, reply) {
 
   // Handle resource
   const storedContentType = getContentType(storagePath);
-  const connegEnabled = request.connegEnabled || false;
 
   // Profile conneg (DX-PROF-CONNEG cnpr:http) — only when explicitly
   // enabled AND the client actually sent Accept-Profile. Gating on the
@@ -596,7 +724,8 @@ export async function handleGet(request, reply) {
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-      return reply.code(406).send({ error: 'no representation conforms to the requested profile(s)' });
+      return reply.code(406).type('application/problem+json')
+        .send(JSON.stringify(profileNotAcceptableProblem(reps, resourceUrl), null, 2));
     }
     // 'none' can still occur here: the gate above only checks the header is
     // truthy, but parseAcceptProfile can yield an empty array for a
@@ -605,6 +734,16 @@ export async function handleGet(request, reply) {
     // that degrades to normal serving with no stamp instead of throwing.
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+  }
+
+  // A1 (spec §4): advertise declared representations on the BARE 200 too —
+  // not just the Accept-Profile-negotiated response. A single exists() gate
+  // keeps a resource with no .meta at zero extra I/O (the common case); the
+  // full authz-filtered read only runs when a .meta is actually there. Every
+  // serve branch below (mashlib, range, RDF conneg arm, F3 406, plain-file
+  // 200) reads `advertisedReps` via `representations` in getAllHeaders.
+  if (request.lwsEnabled && !advertisedReps && await storage.exists(storagePath + '.meta')) {
+    advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
   }
 
   // Check if we should serve Mashlib data browser
@@ -736,7 +875,7 @@ export async function handleGet(request, reply) {
     const declaredTypes = await readDeclaredTypes(storage, storagePath);
     const describedByShapes = await describedbyTargets(storage, storagePath + '.meta', resourceUrl);
     const conformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
-    const representations = await authorizedRepresentations(request, storagePath, resourceUrl);
+    const representations = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
     const ls = generateLinkset(resourceUrl, {
       parentUrl: parentContainerUrl(resourceUrl),
       isContainer: false,
@@ -747,7 +886,7 @@ export async function handleGet(request, reply) {
     });
     const headers = getAllHeaders({
       isContainer: false,
-      etag: stats.etag,
+      etag: fileEtag,
       contentType: RDF_TYPES.LINKSET,
       origin,
       resourceUrl,
@@ -824,20 +963,21 @@ export async function handleGet(request, reply) {
         // Fall through to serve HTML if conversion fails
         console.error('Failed to convert HTML data island to Turtle:', err.message);
       }
-    } else if (isRdfContentType(storedContentType)) {
+    } else if (request.lwsEnabled ? isRdfSourceType(storedContentType) : isRdfContentType(storedContentType)) {
       // --lws serving arm (spec 2026-07-10 §2): real parser + n3 writer,
       // 406 teaching on lossy/failed conversion. The legacy hand-rolled arm
-      // below stays byte-identical for --lws-off pods.
+      // below stays byte-identical for --lws-off pods. Gate narrowed to
+      // isRdfSourceType under --lws (spec 2026-07-11 §2): plain application/json
+      // is not an RDF source — it falls through to generic byte serving below.
       if (request.lwsEnabled) {
-        const negotiatedLws = urlPath.endsWith('.ttl')
-          ? RDF_TYPES.TURTLE
-          : selectContentType(acceptHeader, connegEnabled, true);
-        const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+        // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
+        // an explicit Accept for a different negotiable quads format wins.
+        const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
         if (quadsTarget) {
-          const served = await serveStoredRdf({ bytes: content, targetType: quadsTarget, baseIri: resourceUrl });
+          const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
           const headers = getAllHeaders({
             isContainer: false,
-            etag: stats.etag,
+            etag: fileEtag,
             contentType: served.ok ? served.contentType : 'application/problem+json',
             origin,
             resourceUrl,
@@ -886,6 +1026,29 @@ export async function handleGet(request, reply) {
       } catch (e) {
         // If not valid JSON-LD, serve as-is
       }
+    }
+  }
+
+  // F3 (spec 2026-07-11 §3): teach a 406 when a non-RDF source can't satisfy
+  // a specific Accept, instead of silently serving the authored bytes under
+  // a mismatched label. Independent of connegEnabled — Accept satisfiability
+  // isn't a conversion decision. HTML-looking content is excluded (same
+  // sniff as the data-island arm above) — it keeps the existing
+  // degrade-to-serve-HTML fallback.
+  if (request.lwsEnabled && !isRdfSourceType(storedContentType)
+      && !acceptSatisfiable(request.headers.accept || '', storedContentType)) {
+    const trimmed = content.toString('utf8').trimStart();
+    const looksHtml = trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html');
+    if (!looksHtml) {
+      // A1: `advertisedReps` is already populated above whenever a .meta
+      // exists — reuse it instead of reading + authz-filtering a second time.
+      const reps = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
+      const avail = representationLinks(reps);
+      if (avail) reply.header('Link', avail);
+      const na = nonRdfNotAcceptable(resourceUrl, storedContentType, request.headers.accept,
+        !!(reps?.default || reps?.alternates?.length));
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+      return reply.code(406).type('application/problem+json').send(JSON.stringify(na.problem, null, 2));
     }
   }
 
@@ -989,7 +1152,7 @@ function readFirstBytes(storagePath, bytes) {
  * >1 MiB RDF file (optimistic path above), and a >1 MiB HTML-looking
  * file carrying a data island (conservative path above).
  */
-async function negotiateHeadFileContentType({ storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null }) {
+async function negotiateHeadFileContentType({ request, storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null, advertisedReps = null }) {
   const storedContentType = getContentType(storagePath);
   const fitsFullRead = stats.size <= HEAD_FULL_READ_MAX_BYTES;
 
@@ -997,16 +1160,15 @@ async function negotiateHeadFileContentType({ storagePath, urlPath, stats, accep
     // --lws serving-arm parity (spec 2026-07-10 §2): HEAD answers the same
     // 406 a GET would, and the same converted content-type. Large files stay
     // on the optimistic path (docstring above) — same divergence budget.
-    if (lwsEnabled && isRdfContentType(storedContentType)) {
-      const negotiatedLws = urlPath.endsWith('.ttl')
-        ? RDF_TYPES.TURTLE
-        : selectContentType(acceptHeader, true, true);
-      const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+    if (lwsEnabled && isRdfSourceType(storedContentType)) {
+      // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
+      // an explicit Accept for a different negotiable quads format wins (GET parity above).
+      const quadsTarget = negotiateQuadsTarget(acceptHeader, true, true, urlPath);
       if (quadsTarget) {
         if (!fitsFullRead) return { contentType: quadsTarget, converted: true };
         const content = await storage.read(storagePath);
         if (content !== null) {
-          const check = await checkServable({ bytes: content, targetType: quadsTarget, baseIri: resourceUrl || `https://head.invalid${urlPath}` });
+          const check = await checkServable({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl || `https://head.invalid${urlPath}` });
           if (!check.ok) return { notAcceptable: true };
         }
         return { contentType: quadsTarget, converted: true };
@@ -1083,6 +1245,27 @@ async function negotiateHeadFileContentType({ storagePath, urlPath, stats, accep
     }
   }
 
+  // F3 (spec 2026-07-11 §3): HEAD mirror of GET's teaching 406 — same
+  // predicate, independent of connegEnabled. A bounded O(1) sniff (any file
+  // size, mirrors the HEAD_SNIFF_CHUNK_BYTES sniffs above) decides
+  // HTML-ness so this path never pays a full read; HTML-looking content
+  // keeps the existing degrade-to-serve-HTML fallback.
+  if (lwsEnabled && !isRdfSourceType(storedContentType)
+      && !acceptSatisfiable(acceptHeader, storedContentType)) {
+    const head = await readFirstBytes(storagePath, HEAD_SNIFF_CHUNK_BYTES);
+    const headTrimmed = head === null ? '' : head.trimStart();
+    const looksHtml = headTrimmed.startsWith('<!DOCTYPE') || headTrimmed.startsWith('<html');
+    if (!looksHtml) {
+      // HEAD 406 parity: same alternate-list Link as GET (resource.js's F3
+      // gate above), body empty (HEAD) — mirrors the sibling Accept-Profile
+      // HEAD 406 parity comment in handleHead. A1: reuse `advertisedReps`
+      // when handleHead's bare-200 exists() gate already fetched it.
+      const reps = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
+      const link = representationLinks(reps);
+      return { notAcceptable: true, link };
+    }
+  }
+
   // As-is path: GET sniffs extensionless files for HTML by content.
   // Only the first bytes matter, so the sniff runs at any file size
   // via a bounded ranged read. Relabel only — no conversion.
@@ -1118,7 +1301,6 @@ export async function handleHead(request, reply) {
   let contentType;
   let headEtag = stats.etag;
   let isMashlibResponse = false;
-  let suppressLinkset = false;
   let chosenProfile = null;
   let advertisedReps = null;
   // Set when index.html or the mashlib wrapper shadows the container
@@ -1132,6 +1314,12 @@ export async function handleHead(request, reply) {
     const indexPath = storagePath.endsWith('/') ? `${storagePath}index.html` : `${storagePath}/index.html`;
     const indexExists = await storage.exists(indexPath);
     const acceptHeader = request.headers.accept || '';
+    // A2 (spec 2026-07-11 §4): mirrors GET's shadow-escape gate — index.html
+    // shadows the listing only for requests that can accept an HTML answer.
+    // A non-HTML Accept under --lws reports as if indexExists were false
+    // (real listing's content-type/etag/rel="linkset"), matching what GET
+    // actually serves once it falls through to the real listing branch.
+    const shadowActive = indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader));
 
     if (connegEnabled) {
       // HEAD must mirror what GET would emit; otherwise client caches and
@@ -1148,32 +1336,32 @@ export async function handleHead(request, reply) {
         contentType = 'text/turtle';
       } else if (wantsJsonLd) {
         const explicitJson = EXPLICIT_JSON_RE.test(acceptHeader);
-        contentType = (indexExists && !explicitJson) ? 'text/html' : 'application/ld+json';
+        contentType = (shadowActive && !explicitJson) ? 'text/html' : 'application/ld+json';
       } else {
-        contentType = indexExists ? 'text/html' : 'application/ld+json';
+        contentType = shadowActive ? 'text/html' : 'application/ld+json';
       }
-    } else if (indexExists) {
+    } else if (shadowActive) {
       contentType = 'text/html';
     } else {
       contentType = 'application/ld+json';
     }
     // Mirror GET's LWS negotiation for containers: when lwsEnabled,
-    // lws+json and linkset override whatever conneg chose above.
-    // GET checks (connegEnabled || lwsEnabled); HEAD must do the same.
+    // lws+json/linkset/quads override whatever conneg chose above. GET
+    // checks (connegEnabled || lwsEnabled) and negotiates quads 3-arg
+    // (selectContentType's lwsEnabled param); HEAD must do the same (F7
+    // carryover) — membership graphs are default-graph-only, so there's
+    // no 406 risk on HEAD, just content-type parity with what GET serves.
     if (request.lwsEnabled) {
-      const lwsNeg = selectContentType(acceptHeader, connegEnabled);
+      const lwsNeg = selectContentType(acceptHeader, connegEnabled, request.lwsEnabled);
       if (lwsNeg === RDF_TYPES.LWS_JSON) contentType = RDF_TYPES.LWS_JSON;
       else if (lwsNeg === RDF_TYPES.LINKSET) contentType = RDF_TYPES.LINKSET;
+      else if (QUADS_OUTPUTS[lwsNeg]) contentType = QUADS_OUTPUTS[lwsNeg];
     }
 
-    if (indexExists) {
+    if (shadowActive) {
       // Mirror GET: containers with index.html use the index file's ETag
       const indexStats = await storage.stat(indexPath);
       headEtag = indexStats?.etag || stats.etag;
-      // Mirror GET's rel="linkset" suppression: index.html shadows every
-      // Accept with text/html, so advertising linkset conneg here is a
-      // false affordance (cold-probe defect c).
-      suppressLinkset = true;
       skipProfileNegotiation = true;
     } else if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
       // Container listing via mashlib — suffix the ETag (#456)
@@ -1181,10 +1369,28 @@ export async function handleHead(request, reply) {
       contentType = 'text/html';
       isMashlibResponse = true;
       skipProfileNegotiation = true;
+    } else if (request.lwsEnabled) {
+      // Task 10 (probe-#6 F2): mirror GET's representation- and
+      // visibility-keyed listing ETag — same repKey-per-contentType map
+      // (`contentType` is already final above), same WAC-filtered
+      // visibility hash, so HEAD and GET agree byte-for-byte.
+      let entries = await storage.listContainer(storagePath);
+      let visKey = null;
+      if (!request.config?.public) {
+        const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+        entries = await filterReadableEntries({
+          entries: entries || [], containerUrl: resourceUrl, containerStoragePath: storagePath, agentWebId,
+        });
+        visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
+      }
+      headEtag = containerListingEtag(stats.etag, contentType, visKey);
     }
   } else {
     const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
-    headEtag = effectiveEtag;
+    // Task 10 (probe-#6 F2): same prediction GET uses — guarantees
+    // HEAD/GET emit identical ETags per variant, including the LWS
+    // linkset override applied further below (negotiationConverted block).
+    headEtag = predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled);
     isMashlibResponse = willServeMashlib;
     // contentType for files is negotiated AFTER the If-None-Match check
     // below — negotiation may read the file (#552), and GET 304s files
@@ -1218,14 +1424,23 @@ export async function handleHead(request, reply) {
       return reply.code(303).header('Location', neg.rep.href).send();
     }
     if (neg.outcome === 'notacceptable') {
-      // HEAD 406 parity: same alternate-list Link as GET, body empty (HEAD).
+      // HEAD 406 parity: same alternate-list Link as GET, body empty (HEAD) —
+      // but same problem+json Content-Type (F5, spec 2026-07-11 §3).
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
-      return reply.code(406).send();
+      return reply.code(406).type('application/problem+json').send();
     }
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+  }
+
+  // A1 (spec §4): bare-200 advertisement, GET parity — same exists() gate as
+  // handleGet's file/container arms. Skipped where GET never advertises
+  // (index.html/mashlib-shadowed containers, skipProfileNegotiation above).
+  if (!skipProfileNegotiation && request.lwsEnabled && !advertisedReps
+      && await storage.exists(storagePath + '.meta')) {
+    advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
   }
 
   let negotiationConverted = false;
@@ -1237,6 +1452,7 @@ export async function handleHead(request, reply) {
       contentType = 'text/html';
     } else {
       const negotiation = await negotiateHeadFileContentType({
+        request,
         storagePath,
         urlPath,
         stats,
@@ -1244,8 +1460,10 @@ export async function handleHead(request, reply) {
         connegEnabled,
         lwsEnabled: request.lwsEnabled,
         resourceUrl,
+        advertisedReps,
       });
       if (negotiation.notAcceptable) {
+        if (negotiation.link) reply.header('Link', negotiation.link);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(406).type('application/problem+json').send();
       }
@@ -1270,7 +1488,6 @@ export async function handleHead(request, reply) {
     resourceUrl,
     connegEnabled,
     mashlibEnabled: request.mashlibEnabled,
-    suppressLinkset,
     lwsEnabled: request.lwsEnabled,
     chosenProfile,
     representations: advertisedReps
@@ -1572,7 +1789,8 @@ export async function handleOptions(request, reply) {
     isContainer: stats?.isDirectory || isContainer(urlPath),
     origin,
     resourceUrl,
-    connegEnabled
+    connegEnabled,
+    lwsEnabled: request.lwsEnabled
   });
 
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));

@@ -56,4 +56,26 @@ describe('WAC-filtered container listing (--lws)', () => {
     const r = await request(PRIV, { headers: { Accept: 'application/ld+json' } });
     assert.ok([401, 403].includes(r.status));
   });
+
+  // Bare `.acl` (the container's OWN acl, not a `name.acl` sidecar for a
+  // member) is Control-gated on the container it protects (authorized-
+  // listing.js `e.name === '.acl'` branch) — untested until now. `.acl` is
+  // an ALLOWED_DOTFILE for ldp:contains (src/ldp/container.js) but is
+  // stripped from lws+json items[] regardless of WAC, so this only shows
+  // up on the `application/ld+json` representation. `/alice/public/.acl`
+  // already exists from pod creation (generatePublicFolderAcl: owner gets
+  // Control, public gets Read only) — no extra fixture needed.
+  it('CONTROL holder (owner) sees the container\'s own bare .acl in the listing', async () => {
+    const r = await request('/alice/public/', { headers: { Accept: 'application/ld+json' }, auth: 'alice' });
+    assertStatus(r, 200);
+    const body = await r.text();
+    assert.ok(body.includes(`${getBaseUrl()}/alice/public/.acl"`));
+  });
+
+  it('a non-CONTROL agent (anonymous, read-only) does not see the container\'s own bare .acl', async () => {
+    const r = await request('/alice/public/', { headers: { Accept: 'application/ld+json' } });
+    assertStatus(r, 200);
+    const body = await r.text();
+    assert.ok(!body.includes(`${getBaseUrl()}/alice/public/.acl"`));
+  });
 });

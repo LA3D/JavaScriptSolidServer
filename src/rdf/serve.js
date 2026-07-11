@@ -25,6 +25,17 @@ const N3_FORMATS = {
 };
 const GRAPH_CAPABLE = new Set([RDF_TYPES.NQUADS]);
 
+// Serving-arm source gate (spec 2026-07-11 §2): what counts as an RDF SOURCE.
+// Deliberately narrower than utils/url.js isRdfContentType — plain application/json
+// is NOT RDF for serving (probe-#6: it parsed as JSON-LD to zero quads → empty
+// Turtle 200). The legacy predicate stays for --lws-off byte-identity.
+const RDF_SOURCE_TYPES = new Set([
+  RDF_TYPES.JSON_LD, RDF_TYPES.TURTLE, RDF_TYPES.N3, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS,
+]);
+export function isRdfSourceType(contentType) {
+  return RDF_SOURCE_TYPES.has((contentType || '').split(';')[0].trim().toLowerCase());
+}
+
 export function hasNamedGraphs(dataset) {
   for (const q of dataset) if (q.graph.termType !== 'DefaultGraph') return true;
   return false;
@@ -58,14 +69,27 @@ function notAcceptable(instance, targetType, why, works) {
   };
 }
 
+/** F3: a non-RDF source cannot satisfy a specific media Accept — teach, never lie. */
+export function nonRdfNotAcceptable(instance, storedType, requestedAccept, hasAlternates) {
+  const route = hasAlternates
+    ? ' Its declared representations are in the Link header (rel="canonical"/"alternate"), or send Accept-Profile: <profile-uri> to negotiate one.'
+    : ' If this resource has profile-negotiated representations, send Accept-Profile: <profile-uri> to negotiate one (its linkset, Accept: application/linkset+json, lists what is declared).';
+  return { ok: false, status: 406, problem: {
+    type: 'about:blank', title: 'Not Acceptable', status: 406,
+    detail: `this resource is ${storedType} and has no representation matching "${requestedAccept}".${route} Formats that work directly: ${storedType}.`,
+    instance,
+  } };
+}
+
 async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) {
   let dataset;
   try {
     dataset = await toDataset(bytes, sourceContentType, baseIri);
   } catch (e) {
-    const remoteCtx = e.message.includes('remote @context fetch disabled');
+    const msg = String(e?.message ?? e);
+    const remoteCtx = msg.includes('remote @context fetch disabled');
     return notAcceptable(baseIri, targetType,
-      `the stored document did not parse as ${sourceContentType} (${e.message})${remoteCtx ? ' — a remote @context cannot be fetched (offline document loader).' : '.'}`,
+      `the stored document did not parse as ${sourceContentType} (${msg})${remoteCtx ? ' — a remote @context cannot be fetched (offline document loader).' : '.'}`,
       [RDF_TYPES.JSON_LD]);
   }
   if (!GRAPH_CAPABLE.has(targetType) && hasNamedGraphs(dataset)) {
@@ -76,8 +100,17 @@ async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) 
   return { ok: true, dataset };
 }
 
+// Own format = bytes are bytes; conversions = parse or teach. N3 is excluded
+// because QUADS_OUTPUTS maps it to Turtle — serving N3 bytes labeled
+// text/turtle would mislabel; N3 sources still go through the parser.
+const isOwnFormat = (sourceContentType, targetType) =>
+  QUADS_OUTPUTS[sourceContentType] === targetType && sourceContentType !== RDF_TYPES.N3;
+
 /** Serve stored RDF bytes as a quads format under the 406-teaching policy. */
 export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON_LD, targetType, baseIri }) {
+  if (isOwnFormat(sourceContentType, targetType)) {
+    return { ok: true, content: bytes, contentType: sourceContentType };
+  }
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
   if (!p.ok) return p;
   const content = await datasetToFormat(p.dataset, targetType);
@@ -86,6 +119,7 @@ export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON
 
 /** The same policy WITHOUT serializing — HEAD parity (#552 discipline). */
 export async function checkServable({ bytes, sourceContentType = RDF_TYPES.JSON_LD, targetType, baseIri }) {
+  if (isOwnFormat(sourceContentType, targetType)) return { ok: true };
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
   return { ok: p.ok };
 }
