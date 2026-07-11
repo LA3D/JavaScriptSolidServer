@@ -25,6 +25,7 @@ import { turtleToJsonLd } from '../rdf/turtle.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, QUADS_OUTPUTS } from '../rdf/serve.js';
 
 /**
@@ -336,7 +337,17 @@ export async function handleGet(request, reply) {
       }
     }
 
-    const entries = await storage.listContainer(storagePath);
+    let entries = await storage.listContainer(storagePath);
+    // S1 (spec 2026-07-10 §4): WAC-filter the membership per requester
+    // before ANY rendering (ldp:contains, lws+json items[], Turtle, mashlib
+    // embed all flow from `entries`/`jsonLd`). --public mode has no WAC to
+    // filter by; --lws off keeps the upstream unfiltered listing.
+    if (request.lwsEnabled && !request.config?.public) {
+      const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+      entries = await filterReadableEntries({
+        entries: entries || [], containerUrl: resourceUrl, containerStoragePath: storagePath, agentWebId,
+      });
+    }
     const jsonLd = generateContainerJsonLd(resourceUrl, entries || []);
 
     // Check if we should serve Mashlib data browser for containers
