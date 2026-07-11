@@ -151,6 +151,28 @@ test('read_resource local: a declared describedby shape surfaces in links', asyn
   assert.deepEqual(meta.links.describedby, ['https://ex.org/shape']);
 });
 
+test('read_resource TOOL: bare origin (no trailing slash) reads the root container (regression after resolver dedup)', async (t) => {
+  const p = await startLwsPod(t);
+  const res = await callTool('read_resource', { uri: p.origin }, { ...ownerCtx(p), lwsEnabled: true });
+  assert.equal(res.isError ?? false, false, JSON.stringify(res));
+  const body = JSON.parse(res.content[0].text);
+  assert.equal(body.type, 'Container');
+});
+
+test('resources/read: bare origin behaves identically (resolver-level normalization) — was "not a local resource" before', async (t) => {
+  const p = await startLwsPod(t);
+  const out = await readResource(p.origin, { ...ownerCtx(p), lwsEnabled: true });
+  const body = JSON.parse(out.contents[0].text);
+  assert.equal(body.type, 'Container');
+});
+
+test('localLinks on a .well-known resource carries no up link', async (t) => {
+  const p = await startLwsPod(t);
+  const links = await localLinks('/.well-known/lws-storage', { ...ownerCtx(p), lwsEnabled: true });
+  assert.equal(links.up, undefined);
+  assert.ok(links.storageDescription);
+});
+
 test('GET /mcp answers 405 with Allow: POST (not a misleading 404)', async (t) => {
   const p = await startLwsPod(t);
   const r = await fetch(`${p.origin}/mcp`);

@@ -61,7 +61,7 @@ There's no per-kind scheme to pick from — the resource's own shape decides wha
 
 | Resource | Returns | WAC |
 |---|---|---|
-| A container URL (trailing `/`) | `application/lws+json` container listing (`items[]`) | Read |
+| A container URL (trailing `/`) | `application/lws+json` container listing (`items[]`, WAC-filtered per member, no-oracle) | Read |
 | `<X>.acl` | structured ACL view (agents, agentClasses, modes, isDefault) | **Control** |
 | `<X>.meta` | resource metadata (size/modified) | Read |
 | Any other resource | its body | Read |
@@ -114,7 +114,7 @@ Writes (`write_resource`/`create_resource`, and `put_typed_resource` below) rout
 | Tool | Composes |
 |---|---|
 | `put_typed_resource` | write body + capture `types` + optionally declare a `describedby` shape into the target `.meta`, in one call |
-| `describe_resource` | one read returning body + declared types + linkset together |
+| `describe_resource` | one read returning body + declared types + linkset together; takes `path` or `uri` — when both are given, `path` wins and `uri` is ignored |
 
 ### ACL editing
 

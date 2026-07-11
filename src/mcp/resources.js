@@ -15,6 +15,7 @@ import { sanitizeBody, sanitizeField, sanitizeJsonLeaves } from './sanitize.js';
 import { readPodSkill, discoverSkills } from './skills.js';
 import * as storage from '../storage/filesystem.js';
 import { generateLwsContainer } from '../ldp/container.js';
+import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { buildStorageDescription } from '../lws/storage-description.js';
 import { LWS_CONTEXT_OBJECT, LWS_VOCAB, withInlineContext } from '../lws/context.js';
 import { getContentType, isRdfContentType } from '../utils/url.js';
@@ -99,10 +100,22 @@ const FIXED_SUFFIX = {
 async function readContainerView(path, ctx, uri) {
   await requireRead(ctx, path, uri);
   requireExists(await storage.exists(path), uri);
-  const entries = await storage.listContainer(path);
+  const raw = await storage.listContainer(path);
+  // S1 parity (task-12): WAC-filter the membership per requester — same
+  // choke point the HTTP listing path uses (src/lws/authorized-listing.js).
+  // Unconditional, unlike the HTTP call site's `lwsEnabled && !public` gate:
+  // MCP's own wac() (src/mcp/wac.js) has no --lws/--public bypass — every
+  // MCP read already enforces real WAC regardless of those flags — and this
+  // view always renders the lws+json items[] shape, so neither of the HTTP
+  // site's two exceptions ("--public has no WAC to filter by", "--lws off
+  // keeps the upstream unfiltered listing") has an analogue here.
+  const entries = await filterReadableEntries({
+    entries: raw || [], containerUrl: buildUrl(ctx, path), containerStoragePath: path,
+    agentWebId: ctx.webId ?? null,
+  });
   // Entry names are client-controlled — neutralize hidden chars before they
   // enter the model's context, then build via the shared HTTP builder.
-  const clean = (entries || []).map(e => ({ ...e, name: sanitizeField(e.name) }));
+  const clean = entries.map(e => ({ ...e, name: sanitizeField(e.name) }));
   const rep = generateLwsContainer(buildUrl(ctx, path), clean);
   return jsonContents(uri, withInlineContext(rep), 'application/lws+json');
 }
@@ -197,6 +210,11 @@ export async function readResource(uri, ctx) {
   // `origin + '/'` locality match (uri.js) can't be broken by wiring.
   const origin = typeof ctx?.origin === 'string' ? ctx.origin.replace(/\/+$/, '') : ctx?.origin;
   if (origin !== ctx?.origin) ctx = { ...ctx, origin };
+  // Bare origin (no trailing slash) = the root container. The ONE
+  // normalization point (task-12): the read_resource tool used to duplicate
+  // this check before delegating here (src/mcp/read-tools.js) — deleted, so
+  // resources/read and the tool both funnel through this single spot.
+  if (uri === origin) uri = origin + '/';
   if (!isLocalUri(ctx.origin, uri)) {
     throw new ResourceError(RPC_ERRORS.INVALID_PARAMS,
       `not a local resource: ${uri}. Use the read_resource tool for another pod.`);

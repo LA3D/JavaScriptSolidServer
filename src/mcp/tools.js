@@ -544,7 +544,7 @@ export const TOOLS = {
     handler: put_typed_resource,
   },
   describe_resource: {
-    description: "One-shot orientation on a local resource (by path or real URL): its body, declared types, and RFC 9264 linkset together.",
+    description: "One-shot orientation on a local resource (by path or real URL): its body, declared types, and RFC 9264 linkset together. When both are given, path wins and uri is ignored.",
     inputSchema: {
       type: 'object',
       properties: {

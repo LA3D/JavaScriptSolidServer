@@ -53,7 +53,10 @@ export function parseRemoteLinks(header) {
 // one source, no drift. describedby omitted when no shape is declared.
 export async function localLinks(path, ctx) {
   const links = { storageDescription: storageDescriptionUrl(buildUrl(ctx, path)) };
-  if (path !== '/') links.up = buildUrl(ctx, parentPath(path));
+  // .well-known/* fixed resources have no meaningful pod-tree parent — an
+  // `up` link there would point at the synthetic /.well-known/ "container",
+  // which is not a real navigable resource (task-12).
+  if (path !== '/' && !path.startsWith('/.well-known/')) links.up = buildUrl(ctx, parentPath(path));
   const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   if (shapes.length) links.describedby = shapes;
   return links;
@@ -127,7 +130,10 @@ export async function read_resource({ uri }, ctx) {
   if (!uri || typeof uri !== 'string' || !/^https?:\/\//.test(uri)) {
     return toolError('absolute http(s) uri required');
   }
-  if (uri === ctx.origin) uri = uri + '/';           // bare origin = the root container
+  // Bare-origin normalization now lives in one place: isLocalUri/uriToPath
+  // (uri.js) recognize `uri === ctx.origin` as the root container, and the
+  // resources.js resolver normalizes it to `origin + '/'` for dispatch —
+  // this tool no longer needs its own copy of the patch (task-12 dedup).
   if (!isLocalUri(ctx.origin, uri)) return readRemote(uri, ctx);
 
   let out;
