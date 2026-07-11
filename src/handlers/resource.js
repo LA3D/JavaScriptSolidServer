@@ -25,6 +25,7 @@ import { turtleToJsonLd } from '../rdf/turtle.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { serveStoredRdf, checkServable, QUADS_OUTPUTS } from '../rdf/serve.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -251,13 +252,19 @@ export async function handleGet(request, reply) {
             const jsonLd = safeJsonParse(jsonLdMatch[1]);
 
             if (wantsTurtle) {
-              // Convert to Turtle
-              const { content: turtleContent } = await fromJsonLd(
-                jsonLd,
-                'text/turtle',
-                resourceUrl,
-                true
-              );
+              // Convert to Turtle — under --lws ride the dataset serving arm
+              // (real parser + n3 writer); the island is already parsed, so
+              // re-encode it. Legacy fromJsonLd stays for --lws-off pods.
+              let turtleContent;
+              if (request.lwsEnabled) {
+                const served = await serveStoredRdf({
+                  bytes: Buffer.from(JSON.stringify(jsonLd)), targetType: RDF_TYPES.TURTLE, baseIri: resourceUrl,
+                });
+                if (!served.ok) throw new Error(served.problem.detail);   // existing catch falls through to HTML — islands degrade, never 406
+                turtleContent = served.content;
+              } else {
+                ({ content: turtleContent } = await fromJsonLd(jsonLd, 'text/turtle', resourceUrl, true));
+              }
 
               const headers = getAllHeaders({
                 isContainer: true,
@@ -741,7 +748,18 @@ export async function handleGet(request, reply) {
         const jsonLdMatch = contentStr.match(/<script\s+type=["']application\/ld\+json["']\s*>([\s\S]*?)<\/script>/i);
         if (jsonLdMatch) {
           const jsonLd = safeJsonParse(jsonLdMatch[1]);
-          const { content: turtleContent } = await fromJsonLd(jsonLd, 'text/turtle', resourceUrl, true);
+          // Under --lws ride the dataset serving arm (real parser + n3
+          // writer); the island is already parsed, so re-encode it.
+          let turtleContent;
+          if (request.lwsEnabled) {
+            const served = await serveStoredRdf({
+              bytes: Buffer.from(JSON.stringify(jsonLd)), targetType: RDF_TYPES.TURTLE, baseIri: resourceUrl,
+            });
+            if (!served.ok) throw new Error(served.problem.detail);   // existing catch falls through to HTML — islands degrade, never 406
+            turtleContent = served.content;
+          } else {
+            ({ content: turtleContent } = await fromJsonLd(jsonLd, 'text/turtle', resourceUrl, true));
+          }
 
           const headers = getAllHeaders({
             isContainer: false,
@@ -765,7 +783,37 @@ export async function handleGet(request, reply) {
         console.error('Failed to convert HTML data island to Turtle:', err.message);
       }
     } else if (isRdfContentType(storedContentType)) {
-      // Plain JSON-LD file
+      // --lws serving arm (spec 2026-07-10 §2): real parser + n3 writer,
+      // 406 teaching on lossy/failed conversion. The legacy hand-rolled arm
+      // below stays byte-identical for --lws-off pods.
+      if (request.lwsEnabled) {
+        const negotiatedLws = urlPath.endsWith('.ttl')
+          ? RDF_TYPES.TURTLE
+          : selectContentType(acceptHeader, connegEnabled, true);
+        const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+        if (quadsTarget) {
+          const served = await serveStoredRdf({ bytes: content, targetType: quadsTarget, baseIri: resourceUrl });
+          const headers = getAllHeaders({
+            isContainer: false,
+            etag: stats.etag,
+            contentType: served.ok ? served.contentType : 'application/problem+json',
+            origin,
+            resourceUrl,
+            connegEnabled,
+            mashlibEnabled: request.mashlibEnabled,
+            lwsEnabled: request.lwsEnabled,
+            chosenProfile,
+            representations: advertisedReps
+          });
+          headers['Cache-Control'] = RDF_CACHE_CONTROL;
+          Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+          if (!served.ok) return reply.code(406).send(JSON.stringify(served.problem, null, 2));
+          return reply.send(served.content);
+        }
+        // JSON-LD target: the stored bytes ARE JSON-LD — the legacy arm
+        // below already serves them (JSON.parse→stringify), unchanged.
+      }
+      // Plain JSON-LD file (legacy arm — reached always when --lws off)
       try {
         const jsonLd = safeJsonParse(contentStr);
         // Use Turtle if URL ends with .ttl, otherwise use Accept header preference
@@ -899,11 +947,31 @@ function readFirstBytes(storagePath, bytes) {
  * >1 MiB RDF file (optimistic path above), and a >1 MiB HTML-looking
  * file carrying a data island (conservative path above).
  */
-async function negotiateHeadFileContentType({ storagePath, urlPath, stats, acceptHeader, connegEnabled }) {
+async function negotiateHeadFileContentType({ storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null }) {
   const storedContentType = getContentType(storagePath);
   const fitsFullRead = stats.size <= HEAD_FULL_READ_MAX_BYTES;
 
   if (connegEnabled) {
+    // --lws serving-arm parity (spec 2026-07-10 §2): HEAD answers the same
+    // 406 a GET would, and the same converted content-type. Large files stay
+    // on the optimistic path (docstring above) — same divergence budget.
+    if (lwsEnabled && isRdfContentType(storedContentType)) {
+      const negotiatedLws = urlPath.endsWith('.ttl')
+        ? RDF_TYPES.TURTLE
+        : selectContentType(acceptHeader, true, true);
+      const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+      if (quadsTarget) {
+        if (!fitsFullRead) return { contentType: quadsTarget, converted: true };
+        const content = await storage.read(storagePath);
+        if (content !== null) {
+          const check = await checkServable({ bytes: content, targetType: quadsTarget, baseIri: resourceUrl || `https://head.invalid${urlPath}` });
+          if (!check.ok) return { notAcceptable: true };
+        }
+        return { contentType: quadsTarget, converted: true };
+      }
+      // JSON-LD target: legacy body below already handles it, unchanged.
+    }
+
     // Same negotiation as handleGet's file branch (#325 q-aware).
     const negotiated = selectContentType(acceptHeader, true);
     const wantsTurtle = urlPath.endsWith('.ttl')
@@ -1132,7 +1200,13 @@ export async function handleHead(request, reply) {
         stats,
         acceptHeader: request.headers.accept || '',
         connegEnabled,
+        lwsEnabled: request.lwsEnabled,
+        resourceUrl,
       });
+      if (negotiation.notAcceptable) {
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+        return reply.code(406).type('application/problem+json').send();
+      }
       contentType = negotiation.contentType;
       negotiationConverted = negotiation.converted;
     }
