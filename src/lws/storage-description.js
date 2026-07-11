@@ -43,7 +43,16 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
   const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
   if (typeIndexEnabled) {
     services.push({ type: 'TypeIndexService', serviceEndpoint: `${origin}/types/index` });
-    services.push({ type: 'TypeSearchService', serviceEndpoint: `${origin}/types/search` });
+    services.push({
+      type: 'TypeSearchService',
+      serviceEndpoint: `${origin}/types/search`,
+      // Steering (unmapped, like the McpService/linkset hints): verified 2026-07-11
+      // against src/handlers/type-index.js handleTypeSearch + src/lws/type-index.js
+      // parseFilter/matchesTypeFilter — `type` is the CNF filter param (comma =
+      // OR within a group, repeated param = AND across groups); `describedby`
+      // and `conformsTo` are the other two indexed relations, same CNF syntax.
+      hint: 'GET with ?type=<uri> returns instances of that type; comma-separate values in one param for OR, repeat the parameter for AND. A bare GET returns the full inventory. The same CNF syntax also filters by indexed relations: ?describedby=<uri> and ?conformsTo=<uri>.',
+    });
   }
   if (notificationsEnabled) {
     services.push({ type: 'NotificationService', serviceEndpoint: `${origin}/notification/api` });
@@ -75,7 +84,11 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
       // Reworded 2026-07-10 (probe #4b/#5): the old "every resource" over-promised
       // on shadowed containers, and a linkset-only client concluded containers were empty
       // — membership steering added.
-      hint: 'This storage speaks RFC 9264: resources serve a linkset of their typed links — request the resource URL with Accept: application/linkset+json (rel="linkset"); a container shadowed by its index.html serves the HTML instead, so descend to a member. A member linkset carries up/type; the governing describedby (SHACL shape) and conformsTo (profile) edges live on its CONTAINER\'s linkset — follow up. Linksets carry governance, not membership: list members by GETting the container itself (ldp:contains, or items[] via Accept: application/lws+json); search by type via the TypeSearchService.',
+      // Reworded 2026-07-11 (spec §4, A3): Task 5 made the shadowed-container
+      // escape TRUE (a specific non-HTML Accept, including on the root, now
+      // reaches the real listing) — "descend to a member" was no longer the
+      // only escape and had gone stale; teach the conneg escape instead.
+      hint: 'This storage speaks RFC 9264: resources serve a linkset of their typed links — request the resource URL with Accept: application/linkset+json (rel="linkset"); a container shadowed by its index.html serves the HTML only to HTML-accepting requests — request it with a specific non-HTML Accept (application/lws+json, text/turtle, application/linkset+json) for the real container view; this includes the root: GET / with Accept: application/lws+json lists the top-level containers. A member linkset carries up/type; the governing describedby (SHACL shape) and conformsTo (profile) edges live on its CONTAINER\'s linkset — follow up. Linksets carry governance, not membership: list members by GETting the container itself (ldp:contains, or items[] via Accept: application/lws+json); search by type via the TypeSearchService.',
     },
   };
   if (profileConnegEnabled) {
