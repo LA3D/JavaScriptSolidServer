@@ -51,7 +51,7 @@ export function extractWebIdFromSAN(subjectaltname) {
 
 /**
  * Parse certificate keys from WebID profile (JSON-LD format)
- * Handles both inline objects and arrays
+ * Handles bare nodes, top-level arrays, and {@context,@graph} envelopes
  * @param {object|Array} jsonLd - Parsed JSON-LD profile
  * @param {string} webId - The WebID to find keys for
  * @returns {Array<{modulus: string, exponent: string}>} Array of keys

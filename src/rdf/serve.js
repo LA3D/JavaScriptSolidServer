@@ -86,9 +86,10 @@ async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) 
   try {
     dataset = await toDataset(bytes, sourceContentType, baseIri);
   } catch (e) {
-    const remoteCtx = e.message.includes('remote @context fetch disabled');
+    const msg = String(e?.message ?? e);
+    const remoteCtx = msg.includes('remote @context fetch disabled');
     return notAcceptable(baseIri, targetType,
-      `the stored document did not parse as ${sourceContentType} (${e.message})${remoteCtx ? ' — a remote @context cannot be fetched (offline document loader).' : '.'}`,
+      `the stored document did not parse as ${sourceContentType} (${msg})${remoteCtx ? ' — a remote @context cannot be fetched (offline document loader).' : '.'}`,
       [RDF_TYPES.JSON_LD]);
   }
   if (!GRAPH_CAPABLE.has(targetType) && hasNamedGraphs(dataset)) {

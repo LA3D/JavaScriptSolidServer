@@ -143,18 +143,16 @@ export function representationLinks(representations) {
  *   carry the list in their BODY too.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, suppressLinkset = false, chosenProfile = null, representations = null }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
   };
   if (lwsEnabled && resourceUrl) {
-    // An index.html-shadowed container serves text/html for every Accept, so
-    // advertising linkset conneg there is a false affordance (cold-probe
-    // defect c) — suppress the rel where conneg won't be honored. The
-    // storage-description rel points at a DIFFERENT URL and stays.
-    const parts = [`<${storageDescriptionUrl(resourceUrl)}>; rel="${LWS_STORAGE_DESC_REL}"`];
-    if (!suppressLinkset) parts.push(`<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`);
+    const parts = [
+      `<${storageDescriptionUrl(resourceUrl)}>; rel="${LWS_STORAGE_DESC_REL}"`,
+      `<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`
+    ];
     const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
   }

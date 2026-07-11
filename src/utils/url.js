@@ -270,7 +270,10 @@ export function getContentType(filePath) {
 }
 
 /**
- * Check if content type is RDF
+ * Check if content type is RDF (legacy, `--lws`-off predicate — includes
+ * plain `application/json`). The `--lws` serving arm uses the narrower
+ * `isRdfSourceType` (`src/rdf/serve.js`) instead: plain JSON is not an RDF
+ * source there (probe-#6 — it parsed as JSON-LD to zero quads).
  * @param {string} contentType
  * @returns {boolean}
  */

@@ -13,6 +13,7 @@ const ALTR = 'http://www.w3.org/ns/dx/connegp/altr#';
 const DCT = 'http://purl.org/dc/terms/';
 const CONTENT_PROFILE = 'https://ex.org/profiles/content';
 const ALT_PROFILE = 'https://ex.org/profiles/links';
+const CONTAINER_ALT_PROFILE = 'https://ex.org/profiles/container-links';
 const UNKNOWN_PROFILE = 'https://ex.org/profiles/nope';
 
 describe('lws: unified profile-406 (file GET + container + HEAD parity)', () => {
@@ -45,7 +46,9 @@ describe('lws: unified profile-406 (file GET + container + HEAD parity)', () => 
       }),
     });
 
-    // Container also declares its own representation set.
+    // Container also declares its own representation set — TWO profiles
+    // (default + an alternate) so the 406 detail's join is actually
+    // exercised (item 8 hygiene: pins conforming.join(', ') across >1 entry).
     await request('/f5/.meta', {
       method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'f5',
       body: JSON.stringify({
@@ -53,6 +56,10 @@ describe('lws: unified profile-406 (file GET + container + HEAD parity)', () => 
         '@id': CONTAINER,
         'altr:hasDefaultRepresentation': {
           '@id': CONTAINER, 'dct:format': 'application/ld+json', 'dct:conformsTo': { '@id': CONTENT_PROFILE },
+        },
+        'altr:hasRepresentation': {
+          '@id': `${base}/f5/index.links.jsonld`, 'dct:format': 'application/ld+json',
+          'dct:conformsTo': { '@id': CONTAINER_ALT_PROFILE },
         },
       }),
     });
@@ -99,7 +106,12 @@ describe('lws: unified profile-406 (file GET + container + HEAD parity)', () => 
     assert.equal(p.type, 'about:blank');
     assert.equal(p.title, 'Not Acceptable');
     assert.equal(p.status, 406);
+    // Two profiles are declared on /f5/.meta (default + an alternate) —
+    // both must appear, pinning conforming.join(', ') across >1 entry
+    // (item 8 hygiene: a single-profile fixture can't distinguish a join
+    // from a bare interpolation).
     assert.match(p.detail, /https:\/\/ex\.org\/profiles\/content/);
+    assert.match(p.detail, /https:\/\/ex\.org\/profiles\/container-links/);
     assert.equal(p.instance, CONTAINER);
   });
 
@@ -107,6 +119,9 @@ describe('lws: unified profile-406 (file GET + container + HEAD parity)', () => 
     const getRes = await request(RES, { headers: { 'Accept-Profile': `<${UNKNOWN_PROFILE}>` }, auth: 'f5' });
     const headRes = await request(RES, { method: 'HEAD', headers: { 'Accept-Profile': `<${UNKNOWN_PROFILE}>` }, auth: 'f5' });
     assertStatus(headRes, 406);
+    // Literal check (item 8 hygiene) — GET-equality alone would also pass
+    // if BOTH sides regressed to the same wrong content-type.
+    assert.equal(headRes.headers.get('content-type').split(';')[0], 'application/problem+json');
     assert.equal(headRes.headers.get('content-type').split(';')[0], getRes.headers.get('content-type').split(';')[0]);
     assert.equal(await headRes.text(), '');
   });
@@ -115,6 +130,8 @@ describe('lws: unified profile-406 (file GET + container + HEAD parity)', () => 
     const getRes = await request(CONTAINER, { headers: { 'Accept-Profile': `<${UNKNOWN_PROFILE}>` }, auth: 'f5' });
     const headRes = await request(CONTAINER, { method: 'HEAD', headers: { 'Accept-Profile': `<${UNKNOWN_PROFILE}>` }, auth: 'f5' });
     assertStatus(headRes, 406);
+    // Literal check (item 8 hygiene) — see the file-GET HEAD-parity test above.
+    assert.equal(headRes.headers.get('content-type').split(';')[0], 'application/problem+json');
     assert.equal(headRes.headers.get('content-type').split(';')[0], getRes.headers.get('content-type').split(';')[0]);
     assert.equal(await headRes.text(), '');
   });

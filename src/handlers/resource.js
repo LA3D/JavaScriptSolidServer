@@ -221,6 +221,21 @@ function containerListingEtag(etag, contentType, visKey) {
 // format-switching client can't 304-revalidate a wrong-format cache entry;
 // the real branches below reuse this same value, so the header and the
 // 304 comparison never drift apart.
+// The negotiation algebra shared by predictFileEtag, the --lws quads
+// serving arm, and negotiateHeadFileContentType (was triplicated — Task 13
+// hygiene): negotiate a target quads format from Accept via selectContentType's
+// 3-arg (lws) form, applying the `.ttl`-as-DEFAULT-not-override fallback (an
+// explicit Accept for another negotiable quads format still wins). Returns
+// undefined when the negotiated type isn't a quads target (e.g. JSON-LD) —
+// callers fall through to their own arm.
+function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) {
+  const negotiated = selectContentType(acceptHeader, connegEnabled, lwsEnabled);
+  const negotiatedLws = QUADS_OUTPUTS[negotiated]
+    ? negotiated
+    : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
+  return QUADS_OUTPUTS[negotiatedLws];
+}
+
 function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
   if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
   const acceptHeader = request.headers.accept || '';
@@ -229,9 +244,7 @@ function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storag
   }
   const storedContentType = getContentType(storagePath);
   if (connegEnabled && isRdfSourceType(storedContentType)) {
-    const negotiated = selectContentType(acceptHeader, connegEnabled, true);
-    const negotiatedLws = QUADS_OUTPUTS[negotiated] ? negotiated : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
-    const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+    const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
     if (quadsTarget && quadsTarget !== storedContentType) {
       return variantEtag(stats.etag, VARIANT_KEYS[quadsTarget]);
     }
@@ -959,11 +972,7 @@ export async function handleGet(request, reply) {
       if (request.lwsEnabled) {
         // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
         // an explicit Accept for a different negotiable quads format wins.
-        const negotiated = selectContentType(acceptHeader, connegEnabled, true);
-        const negotiatedLws = QUADS_OUTPUTS[negotiated]
-          ? negotiated
-          : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
-        const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+        const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
         if (quadsTarget) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
           const headers = getAllHeaders({
@@ -1154,11 +1163,7 @@ async function negotiateHeadFileContentType({ request, storagePath, urlPath, sta
     if (lwsEnabled && isRdfSourceType(storedContentType)) {
       // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
       // an explicit Accept for a different negotiable quads format wins (GET parity above).
-      const negotiated = selectContentType(acceptHeader, true, true);
-      const negotiatedLws = QUADS_OUTPUTS[negotiated]
-        ? negotiated
-        : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
-      const quadsTarget = QUADS_OUTPUTS[negotiatedLws];
+      const quadsTarget = negotiateQuadsTarget(acceptHeader, true, true, urlPath);
       if (quadsTarget) {
         if (!fitsFullRead) return { contentType: quadsTarget, converted: true };
         const content = await storage.read(storagePath);
