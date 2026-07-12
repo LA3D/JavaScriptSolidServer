@@ -2205,10 +2205,12 @@ export async function handlePatch(request, reply) {
     && contentType.split(';')[0].trim().toLowerCase() === 'application/merge-patch+json';
 
   if (!isN3Patch && !isSparqlUpdate && !isMergePatch) {
+    // task-6 review #2: the --lws-off base string is byte-identical to the
+    // pre-round wording; the merge-patch clause is appended only under --lws.
     return reply.code(415).send({
       error: 'Unsupported Media Type',
-      message: 'PATCH requires Content-Type: text/n3 (N3 Patch), application/sparql-update (SPARQL Update)'
-        + (request.lwsEnabled ? ', or application/merge-patch+json (JSON Merge Patch)' : '')
+      message: 'PATCH requires Content-Type: text/n3 (N3 Patch) or application/sparql-update (SPARQL Update)'
+        + (request.lwsEnabled ? ' or application/merge-patch+json (JSON Merge Patch)' : '')
     });
   }
 

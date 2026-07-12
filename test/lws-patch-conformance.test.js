@@ -154,6 +154,22 @@ test('Accept-Patch stays byte-identical without --lws', async (t) => {
   assert.equal(r.headers.get('accept-patch'), 'text/n3, application/sparql-update');
 });
 
+test('PATCH 415 message stays byte-identical without --lws (review #2)', async (t) => {
+  await startTestServer({ conneg: true });
+  t.after(stopTestServer);
+  await createTestPod('patch415off');
+  await request('/patch415off/d.ttl', { method: 'PUT', auth: 'patch415off',
+    headers: { 'Content-Type': 'text/turtle' }, body: '<#s> <http://ex/p> "v".' });
+  const r = await request('/patch415off/d.ttl', { method: 'PATCH', auth: 'patch415off',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'add' }) });
+  assertStatus(r, 415);
+  const body = await r.json();
+  assert.deepEqual(body, {
+    error: 'Unsupported Media Type',
+    message: 'PATCH requires Content-Type: text/n3 (N3 Patch) or application/sparql-update (SPARQL Update)'
+  });
+});
+
 // Raw socket helper: fetch/undici auto-derives a Content-Type for string
 // bodies, so a genuinely absent header needs a hand-rolled HTTP/1.1 request.
 function rawRequest({ port, method, path, headers, body }) {
