@@ -24,7 +24,9 @@ const N3_FORMATS = {
   [RDF_TYPES.NTRIPLES]: 'N-Triples',
   [RDF_TYPES.NQUADS]: 'N-Quads',
 };
-const GRAPH_CAPABLE = new Set([RDF_TYPES.NQUADS]);
+// JSON-LD is graph-capable too — jsonld.fromRDF is lossless for named graphs
+// (review #6: it was missing here, so a named-graph source 406'd even to JSON-LD).
+const GRAPH_CAPABLE = new Set([RDF_TYPES.NQUADS, RDF_TYPES.JSON_LD]);
 
 // Serving-arm source gate (spec 2026-07-11 §2): what counts as an RDF SOURCE.
 // Deliberately narrower than utils/url.js isRdfContentType — plain application/json

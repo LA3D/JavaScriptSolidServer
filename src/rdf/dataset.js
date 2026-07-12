@@ -41,7 +41,10 @@ const documentLoader = {
 // Buffer (any accepted RDF media type) → RDF/JS DatasetCore.
 export async function toDataset(buffer, contentType, baseIri) {
   const t = main(contentType);
-  if (t === RDF_TYPES.TURTLE || t === RDF_TYPES.N3) {
+  // n3's default parser mode is the permissive Turtle/TriG/N-Triples/N-Quads
+  // superset — one route serves the whole family (review #6: NT/NQ were
+  // falling through to the JSON-LD parser, which never parses them).
+  if (t === RDF_TYPES.TURTLE || t === RDF_TYPES.N3 || t === RDF_TYPES.NTRIPLES || t === RDF_TYPES.NQUADS) {
     return datasetFromTurtle(buffer.toString('utf8'), baseIri);
   }
   const text = buffer.toString('utf8');
