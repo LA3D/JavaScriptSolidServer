@@ -18,11 +18,13 @@ describe('LWS container conformance (e2e)', () => {
       method: 'PUT',
       auth: 'alice'
     });
-    // PUT JSON-LD to a .ttl URL (always accepted; extension → mediaType in LWS listing)
+    // PUT Turtle to a .ttl URL (extension → mediaType in LWS listing). Under
+    // --lws the write-consistency gate (B1) rejects a JSON-LD body at a .ttl
+    // name as a name/type lie, so the body's type must match the extension.
     await request('/alice/public/notes/note.ttl', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/ld+json' },
-      body: JSON.stringify({ '@context': { dc: 'http://purl.org/dc/terms/' }, '@id': '#n', 'dc:title': 'Test note' }),
+      headers: { 'Content-Type': 'text/turtle' },
+      body: '@prefix dc: <http://purl.org/dc/terms/> .\n<#n> dc:title "Test note" .',
       auth: 'alice'
     });
   });

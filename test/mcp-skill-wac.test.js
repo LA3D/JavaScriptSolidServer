@@ -33,7 +33,7 @@ test('a skill read denies a private path to anonymous', async (t) => {
   await putFile(pod, '/private/secret.md', 'top secret', { publicRead: false });
   const body = await read(pod, `${pod.origin}/private/secret.md`);
   assert.ok(body.error);
-  assert.match(body.error.message, /access denied/i);
+  assert.match(body.error.message, /not found or not authorized/i);
 });
 
 test('a skill read allows a public-read skill file', async (t) => {
@@ -49,7 +49,7 @@ test('the pod-wide SKILL.md is denied when not public-read', async (t) => {
   await putFile(pod, '/SKILL.md', '# skill', { publicRead: false });
   const body = await read(pod, `${pod.origin}/SKILL.md`);
   assert.ok(body.error);
-  assert.match(body.error.message, /access denied/i);
+  assert.match(body.error.message, /not found or not authorized/i);
 });
 
 test('the pod-wide SKILL.md is allowed when public-read', async (t) => {

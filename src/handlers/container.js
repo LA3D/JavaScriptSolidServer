@@ -11,6 +11,7 @@ import { emitChange } from '../notifications/events.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { writeTypeConsistency } from '../lws/write-consistency.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -42,10 +43,12 @@ export async function handlePost(request, reply) {
   }
 
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
   const contentType = request.headers['content-type'] || '';
 
   // Check if we can accept this input type
-  if (!canAcceptInput(contentType, connegEnabled)) {
+  if (!canAcceptInput(contentType, negotiate)) {
     const acceptValue = connegEnabled
       ? 'application/ld+json, application/json, text/turtle, text/n3'
       : 'application/ld+json, application/json';
@@ -107,11 +110,18 @@ export async function handlePost(request, reply) {
       content = Buffer.from('');
     }
 
-    // Convert Turtle/N3 to JSON-LD if conneg enabled
+    // Spec §2: under --lws, store the submitted bytes verbatim; enforce
+    // write-time name/type consistency instead of converting (B1 root fix).
+    // The FINAL resource name (container path + slug) is what must agree
+    // with the submitted type — not the container's own path.
+    // --lws-off keeps the byte-identical legacy Turtle/N3→JSON-LD conversion.
     const inputType = contentType.split(';')[0].trim().toLowerCase();
-    if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
+    if (request.lwsEnabled) {
+      const c = writeTypeConsistency({ urlPath: newUrlPath, submittedType: contentType, lwsEnabled: true });
+      if (!c.ok) return reply.code(400).type('application/problem+json').send(JSON.stringify(c.problem, null, 2));
+    } else if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
       try {
-        const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: !!request.lwsEnabled });
+        const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: false });
         content = Buffer.from(JSON.stringify(jsonLd, null, 2));
       } catch (e) {
         return reply.code(400).send({
@@ -133,7 +143,7 @@ export async function handlePost(request, reply) {
     // L3 admission + write + type-capture via the shared LWS core (--lws-gated
     // inside). New member has no own .meta yet; resolveShapeUrl falls through
     // to the container rule.
-    const postContentType = (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
+    const postContentType = (!request.lwsEnabled && connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
       ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || '');
     const declared = request.lwsEnabled ? parseTypeLinks(linkHeader) : [];
     const w = await applyLwsWrite({

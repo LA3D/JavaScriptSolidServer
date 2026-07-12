@@ -14,12 +14,16 @@ import { AccessMode } from '../wac/parser.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 import { sanitizeTypes, sanitizeField, sanitizeDeep } from './sanitize.js';
 import { describedbyTargets } from '../lws/constraint.js';
+import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { storageDescriptionUrl } from '../lws/storage-description.js';
+import { getContentType } from '../utils/url.js';
 import { toolError, toolJson } from './protocol.js';
 import { readResource } from './resources.js';
 import { ResourceError } from './errors.js';
 import { isLocalUri, uriToPath } from './uri.js';
 import { listFixed, RESOURCE_TEMPLATE } from './surface.js';
+import { isBlockedHost } from './ssrf.js';
+import { MAX_BODY_BYTES } from './read.js';
 
 const JSONLD_CONTEXT_REL = 'http://www.w3.org/ns/json-ld#context';
 
@@ -59,6 +63,17 @@ export async function localLinks(path, ctx) {
   if (path !== '/' && !path.startsWith('/.well-known/')) links.up = buildUrl(ctx, parentPath(path));
   const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   if (shapes.length) links.describedby = shapes;
+  // Alternate representations (altr: model, declared on .meta) — the SAME
+  // authz-filtered read the HTTP linkset uses (src/lws/representations.js),
+  // so conneg-by-profile is discoverable from inside MCP too (probe #7 A2):
+  // an alternate the caller can't Read is simply absent, never
+  // surfaced-then-denied (no-oracle). The default/canonical rep is never
+  // filtered — the caller is already reading this resource.
+  const reps = await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
+    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public });
+  if (reps.default || reps.alternates.length) {
+    Object.assign(links, { canonical: reps.default, alternates: reps.alternates });
+  }
   return links;
 }
 
@@ -97,19 +112,45 @@ async function readRemote(url, ctx) {
   if (depth > MAX_FEDERATION_DEPTH) {
     return toolError(`federation depth exceeded (max ${MAX_FEDERATION_DEPTH})`);
   }
+  // SSRF guard (dt8, spec §6): a federation-gated agent can otherwise reach
+  // LAN/loopback/cloud-metadata endpoints from inside the pod's trust
+  // boundary. Default-blocked; --lws-federation-private is the local rig's
+  // opt-in. Checked before the fetch — never dial a blocked host at all.
+  // Malformed url -> teaching error, not an uncaught throw (dt8 fix round 1).
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return toolError(`invalid remote URL: ${url}`);
+  }
+  if (isBlockedHost(parsed.hostname, { allowPrivate: ctx.federationPrivate })) {
+    return toolError(
+      `federation blocked: ${url} resolves to a private/internal address (set --lws-federation-private to allow)`
+    );
+  }
   let r;
   try {
+    // redirect: 'error' (dt8 fix round 1, CRITICAL 1) — the guard above only
+    // checks the INITIAL host; undici's default redirect:'follow' would
+    // dial a redirect target (e.g. a public URL 302-ing to cloud metadata)
+    // with no recheck. Federation reads don't need redirect-following — a
+    // redirect response now surfaces as a fetch failure -> the existing
+    // "remote unreachable" teaching error, never followed.
     r = await fetch(url, {
       headers: {
         Accept: 'application/ld+json, application/lws+json, text/turtle, */*',
         'MCP-Federation-Depth': String(depth)
       },
+      redirect: 'error',
       signal: AbortSignal.timeout(30_000)
     });
   } catch (e) {
     return toolError(`remote unreachable: ${e.message}`);
   }
-  const body = await r.text();
+  // Bounded body read — a remote pod is the LEAST-trusted content source
+  // (unlike local reads, already capped by readBounded/MAX_BODY_BYTES),
+  // so never buffer an unbounded body from it (dt8, spec §6).
+  const { text: body, truncated } = await readRemoteBody(r);
   // Header-borne affordances (json-ld#context / alternate / linkset) are the
   // agent's ONLY channel to how a remote representation should be interpreted
   // — surface them (never auto-fetch/apply). Body: a remote pod is the
@@ -120,8 +161,41 @@ async function readRemote(url, ctx) {
     status: r.status,
     contentType: r.headers.get('content-type') || null,
     ...(Object.keys(links).length ? { links } : {}),
+    ...(truncated ? { truncated: true } : {}),
     body: sanitizeDeep(body)
   });
+}
+
+// Reads at most `max` bytes off the response stream and cancels the rest,
+// rather than `await r.text()`-ing an attacker-controlled body fully into
+// memory first. Mirrors readBounded's (src/mcp/read.js) truncated-flag
+// shape; falls back to a capped r.text() when the runtime hands back a
+// response with no readable stream (e.g. a test double).
+async function readRemoteBody(r, max = MAX_BODY_BYTES) {
+  const reader = r.body?.getReader?.();
+  if (!reader) {
+    const text = await r.text();
+    const bytes = Buffer.byteLength(text, 'utf8');
+    if (bytes <= max) return { text, truncated: false };
+    return { text: Buffer.from(text, 'utf8').subarray(0, max).toString('utf8'), truncated: true };
+  }
+  const chunks = [];
+  let total = 0;
+  let truncated = false;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      truncated = true;
+      chunks.push(value.subarray(0, value.byteLength - (total - max)));
+      try { await reader.cancel(); } catch { /* noop */ }
+      break;
+    }
+    chunks.push(value);
+  }
+  const text = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength))).toString('utf8');
+  return { text, truncated };
 }
 
 // --- the tools ---
@@ -144,11 +218,16 @@ export async function read_resource({ uri }, ctx) {
     throw e;
   }
   const c = out.contents[0];
-  const links = await localLinks(uriToPath(ctx.origin, uri), ctx);
+  const path = uriToPath(ctx.origin, uri);
+  const links = await localLinks(path, ctx);
+  // The true stored content type (e.g. text/markdown), not c.mimeType — that's
+  // the untrusted-content fence's envelope type (text/plain) when the body is
+  // fenced; the fence's own "original type" label already carries the real
+  // type in prose, this just exposes it structurally too (probe #7 A5).
   return {
     content: [
       { type: 'text', text: c.text },
-      { type: 'text', text: JSON.stringify({ uri, mimeType: c.mimeType, links }, null, 2) },
+      { type: 'text', text: JSON.stringify({ uri, mimeType: getContentType(path), links }, null, 2) },
     ],
     isError: false,
   };

@@ -28,6 +28,7 @@ import { turtleToJsonLd } from '../rdf/turtle.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { writeTypeConsistency } from '../lws/write-consistency.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable } from '../rdf/serve.js';
 
@@ -230,9 +231,13 @@ function containerListingEtag(etag, contentType, visKey) {
 // callers fall through to their own arm.
 function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) {
   const negotiated = selectContentType(acceptHeader, connegEnabled, lwsEnabled);
+  // B1: an explicit application/ld+json (or application/json) Accept always wins
+  // over the .ttl-extension default — the default applies only when Accept is
+  // absent/generic, never as an override of an explicit JSON-LD request.
+  const explicitJson = EXPLICIT_JSON_RE.test(acceptHeader || '');
   const negotiatedLws = QUADS_OUTPUTS[negotiated]
     ? negotiated
-    : (urlPath.endsWith('.ttl') ? RDF_TYPES.TURTLE : negotiated);
+    : (urlPath.endsWith('.ttl') && !explicitJson ? RDF_TYPES.TURTLE : negotiated);
   return QUADS_OUTPUTS[negotiatedLws];
 }
 
@@ -268,6 +273,8 @@ export async function handleGet(request, reply) {
   }
 
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
   const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
   // Task 10 (probe-#6 F2): the representation-specific ETag a FILE GET will
   // actually emit, predicted up front (see predictFileEtag) — unused for
@@ -275,17 +282,46 @@ export async function handleGet(request, reply) {
   // is computed further down once entries are read.
   const fileEtag = stats.isDirectory ? null
     : predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled);
+  // Spec §3 (RFC 9110 §13.2.2): preconditions apply only to requests that
+  // would otherwise succeed — a 304 must never preempt a pending 406.
+  // storedContentType is a cheap sync lookup (file extension only, no I/O),
+  // safe to hoist here; the file-serving arm below reuses this same const
+  // instead of redeclaring it. wouldNotNegotiate mirrors the F3 media gate's
+  // predicate (~line 1069); hasAcceptProfile flags requests whose profile
+  // outcome isn't known yet (resolved later, at the Accept-Profile block) —
+  // both defer the 304 decision instead of guessing.
+  const storedContentType = stats.isDirectory ? null : getContentType(storagePath);
+  // why: a conservative SUPERSET of the real F3 gate (~line 1144) — it
+  // intentionally omits that gate's `looksHtml` byte-sniff exception, which
+  // reads the body to decide whether HTML-looking non-RDF content degrades
+  // to a 200 instead of a 406. Sniffing here would mean reading bytes before
+  // knowing whether a 304 will discard them, which breaks the zero-I/O
+  // early-check invariant HEAD depends on (HEAD must not pay I/O a 304 would
+  // make wasted work, ~line 1521). Net effect: a non-RDF resource whose
+  // bytes look like HTML, requested with an unsatisfiable specific Accept +
+  // If-None-Match, forgoes this early 304 and falls through to a full 200
+  // (the real F3 gate below still degrades it to 200, never a wrong 406).
+  // Safe-direction per RFC 9110 §13.2.2 — never a wrong 304, never a wrong
+  // 406 — just a missed cache-revalidation optimization in a narrow corner,
+  // accepted deliberately rather than adding a body-read to this early check.
+  const wouldNotNegotiate = !stats.isDirectory && request.lwsEnabled
+    && !isRdfSourceType(storedContentType)
+    && !acceptSatisfiable(request.headers.accept || '', storedContentType);
+  const hasAcceptProfile = !!(request.lwsProfileConneg && request.headers['accept-profile']);
 
   // For non-containers, check If-None-Match early using the predicted
   // representation ETag (Task 10). For containers, defer the check until
   // we know which branch (index.html vs listing vs mashlib) will run —
-  // each uses a different ETag source (#456).
+  // each uses a different ETag source (#456). Deferred here too when a 406
+  // gate hasn't resolved yet (wouldNotNegotiate) or Accept-Profile was sent
+  // (hasAcceptProfile — the profile-negotiation block below decides; the
+  // deferred re-check sits right after it resolves, spec §3).
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !stats.isDirectory) {
+  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
-      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(304).send();
     }
   }
@@ -469,7 +505,12 @@ export async function handleGet(request, reply) {
     // the representation- and visibility-keyed ETag above (Task 10,
     // probe-#6 F2), not the bare container ETag, so a format-switching or
     // visibility-switching client can't 304-revalidate the wrong variant.
-    if (ifNoneMatch) {
+    // Spec §3: containers have no F3 (media) arm, but DO have a profile arm
+    // below — when willMashlib is false and Accept-Profile was sent, the
+    // outcome isn't known yet, so skip here and re-check once the profile
+    // block (below) resolves without a redirect/406. A mashlib response
+    // never reaches the profile block, so it's always safe to 304 here.
+    if (ifNoneMatch && !(hasAcceptProfile && !willMashlib)) {
       const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
       if (!check.ok && check.notModified) {
         reply.header('ETag', listingEtag);
@@ -530,6 +571,18 @@ export async function handleGet(request, reply) {
       const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
       const neg = negotiateProfile(request.headers['accept-profile'], reps);
       if (neg.outcome === 'redirect') {
+        // A redirect is not a 406 — the pre-existing "304 wins over 303"
+        // ordering (a cache-valid conditional short-circuits before any
+        // profile redirect) is unaffected by spec §3, which only closes the
+        // 406 case. Check here, inline, before committing to 303.
+        if (ifNoneMatch) {
+          const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
+          if (!check.ok && check.notModified) {
+            reply.header('ETag', listingEtag);
+            reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+            return reply.code(304).send();
+          }
+        }
         reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
         reply.header('Content-Profile', `<${neg.rep.profile}>`);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -538,6 +591,7 @@ export async function handleGet(request, reply) {
       if (neg.outcome === 'notacceptable') {
         // DX-PROF-CONNEG/IETF: the 406 advertises what IS available
         // (authz-filtered) so the client can discover supported profiles.
+        // Spec §3: 406 wins over 304 — no conditional check here, ever.
         const avail = representationLinks(reps);
         if (avail) reply.header('Link', avail);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -546,6 +600,19 @@ export async function handleGet(request, reply) {
       }
       chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
       advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+    }
+
+    // Deferred 304 (spec §3): reached only when the original check above
+    // skipped for hasAcceptProfile — redirect/notacceptable already
+    // returned, so the profile arm would succeed. willMashlib is guaranteed
+    // false here (that branch returns before this point).
+    if (ifNoneMatch && hasAcceptProfile) {
+      const check = checkIfNoneMatchForGet(ifNoneMatch, listingEtag);
+      if (!check.ok && check.notModified) {
+        reply.header('ETag', listingEtag);
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+        return reply.code(304).send();
+      }
     }
 
     // A1 (spec §4): container bare 200 gets the same un-negotiated
@@ -696,7 +763,8 @@ export async function handleGet(request, reply) {
   }
 
   // Handle resource
-  const storedContentType = getContentType(storagePath);
+  // storedContentType is hoisted above (spec §3 304/406 ordering) — reused
+  // here, not recomputed (still the same cheap sync lookup either way).
 
   // Profile conneg (DX-PROF-CONNEG cnpr:http) — only when explicitly
   // enabled AND the client actually sent Accept-Profile. Gating on the
@@ -713,6 +781,18 @@ export async function handleGet(request, reply) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
     const neg = negotiateProfile(request.headers['accept-profile'], reps);
     if (neg.outcome === 'redirect') {
+      // A redirect is not a 406 — the pre-existing "304 wins over 303"
+      // ordering (a cache-valid conditional short-circuits before any
+      // profile redirect) is unaffected by spec §3, which only closes the
+      // 406 case. Check here, inline, before committing to 303.
+      if (ifNoneMatch) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', fileEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
+      }
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
       reply.header('Content-Profile', `<${neg.rep.profile}>`);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -721,6 +801,7 @@ export async function handleGet(request, reply) {
     if (neg.outcome === 'notacceptable') {
       // DX-PROF-CONNEG/IETF: the 406 advertises what IS available
       // (authz-filtered in Task 9) so the client can discover supported profiles.
+      // Spec §3: 406 wins over 304 — no conditional check here, ever.
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -734,6 +815,20 @@ export async function handleGet(request, reply) {
     // that degrades to normal serving with no stamp instead of throwing.
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+  }
+
+  // Deferred 304 (spec §3): the early check above skipped when Accept-Profile
+  // was sent, because the profile outcome wasn't known yet. It's known now —
+  // redirect/notacceptable already returned above, so reaching here means the
+  // profile arm would succeed. wouldNotNegotiate (media F3 arm) still applies
+  // unconditionally: never 304 a request that F3 would 406 below.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+    const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+    if (!check.ok && check.notModified) {
+      reply.header('ETag', fileEtag);
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+      return reply.code(304).send();
+    }
   }
 
   // A1 (spec §4): advertise declared representations on the BARE 200 too —
@@ -907,7 +1002,7 @@ export async function handleGet(request, reply) {
   }
 
   // Content negotiation for RDF resources (including HTML with JSON-LD data islands)
-  if (connegEnabled) {
+  if (negotiate) {
     const contentStr = content.toString();
     const acceptHeader = request.headers.accept || '';
     // Serve Turtle if: URL ends with .ttl OR Accept's q-weighted top
@@ -972,7 +1067,9 @@ export async function handleGet(request, reply) {
       if (request.lwsEnabled) {
         // .ttl is a DEFAULT (Accept absent/generic → Turtle), not an override —
         // an explicit Accept for a different negotiable quads format wins.
-        const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
+        // negotiate (not connegEnabled): the real serving arm below must be
+        // reachable under --lws alone, same as the outer gate (spec §4a).
+        const quadsTarget = negotiateQuadsTarget(acceptHeader, negotiate, true, urlPath);
         if (quadsTarget) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
           const headers = getAllHeaders({
@@ -992,8 +1089,30 @@ export async function handleGet(request, reply) {
           if (!served.ok) return reply.code(406).send(JSON.stringify(served.problem, null, 2));
           return reply.send(served.content);
         }
-        // JSON-LD target: the stored bytes ARE JSON-LD — the legacy arm
-        // below already serves them (JSON.parse→stringify), unchanged.
+        // JSON-LD target: when the stored bytes are a genuine non-JSON-LD RDF
+        // source (B1 — a .ttl/.n3/.nt/.nq resource stores its own bytes,
+        // never a JSON-LD envelope), real-convert through the same dataset
+        // seam + 406-teaching policy as the quads branch above. The legacy
+        // arm below assumes JSON-parseable bytes, which no longer holds.
+        if (storedContentType !== RDF_TYPES.JSON_LD) {
+          const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: RDF_TYPES.JSON_LD, baseIri: resourceUrl });
+          const headers = getAllHeaders({
+            isContainer: false,
+            etag: fileEtag,
+            contentType: served.ok ? served.contentType : 'application/problem+json',
+            origin,
+            resourceUrl,
+            connegEnabled,
+            mashlibEnabled: request.mashlibEnabled,
+            lwsEnabled: request.lwsEnabled,
+            chosenProfile,
+            representations: advertisedReps
+          });
+          headers['Cache-Control'] = RDF_CACHE_CONTROL;
+          Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+          if (!served.ok) return reply.code(406).send(JSON.stringify(served.problem, null, 2));
+          return reply.send(served.content);
+        }
       }
       // Plain JSON-LD file (legacy arm — reached always when --lws off)
       try {
@@ -1155,8 +1274,10 @@ function readFirstBytes(storagePath, bytes) {
 async function negotiateHeadFileContentType({ request, storagePath, urlPath, stats, acceptHeader, connegEnabled, lwsEnabled = false, resourceUrl = null, advertisedReps = null }) {
   const storedContentType = getContentType(storagePath);
   const fitsFullRead = stats.size <= HEAD_FULL_READ_MAX_BYTES;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || lwsEnabled;
 
-  if (connegEnabled) {
+  if (negotiate) {
     // --lws serving-arm parity (spec 2026-07-10 §2): HEAD answers the same
     // 406 a GET would, and the same converted content-type. Large files stay
     // on the optimistic path (docstring above) — same divergence budget.
@@ -1173,7 +1294,19 @@ async function negotiateHeadFileContentType({ request, storagePath, urlPath, sta
         }
         return { contentType: quadsTarget, converted: true };
       }
-      // JSON-LD target: legacy body below already handles it, unchanged.
+      // JSON-LD target: when the stored bytes are a genuine non-JSON-LD RDF
+      // source, GET real-converts through the dataset seam (parity above) —
+      // verify parseability (not full serialize) and report application/ld+json;
+      // never the legacy 'text/turtle'-by-extension guess below.
+      if (storedContentType !== RDF_TYPES.JSON_LD) {
+        if (!fitsFullRead) return { contentType: RDF_TYPES.JSON_LD, converted: true };
+        const content = await storage.read(storagePath);
+        if (content !== null) {
+          const check = await checkServable({ bytes: content, sourceContentType: storedContentType, targetType: RDF_TYPES.JSON_LD, baseIri: resourceUrl || `https://head.invalid${urlPath}` });
+          if (!check.ok) return { notAcceptable: true };
+        }
+        return { contentType: RDF_TYPES.JSON_LD, converted: true };
+      }
     }
 
     // Same negotiation as handleGet's file branch (#325 q-aware).
@@ -1302,6 +1435,8 @@ export async function handleHead(request, reply) {
 
   const origin = request.headers.origin;
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
   let contentType;
   let headEtag = stats.etag;
   let isMashlibResponse = false;
@@ -1325,7 +1460,7 @@ export async function handleHead(request, reply) {
     // actually serves once it falls through to the real listing branch.
     const shadowActive = indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader));
 
-    if (connegEnabled) {
+    if (negotiate) {
       // HEAD must mirror what GET would emit; otherwise client caches and
       // RDF-aware tooling key off a content-type that doesn't match the
       // body they'll see on the next GET (#325). Use q-aware Accept
@@ -1401,27 +1536,62 @@ export async function handleHead(request, reply) {
     // before any read, so HEAD must not pay I/O a 304 will discard.
   }
 
+  // Spec §3 (RFC 9110 §13.2.2): preconditions apply only to requests that
+  // would otherwise succeed — mirrors handleGet's guard. wouldNotNegotiate
+  // is the F3 media-406 predicate negotiateHeadFileContentType applies
+  // below (skipped entirely when isMashlibResponse, same as that call);
+  // hasAcceptProfile defers to the profile block's outcome (skipped when
+  // skipProfileNegotiation — index.html/mashlib containers never reach it).
+  const storedContentType = (!stats.isDirectory && !isMashlibResponse) ? getContentType(storagePath) : null;
+  // why: same conservative SUPERSET as handleGet's wouldNotNegotiate (see
+  // that comment) — omits the real F3 gate's `looksHtml` byte-sniff on
+  // purpose. HEAD is where this matters most: a sniff needs the body, and
+  // HEAD must not read bytes a 304 would discard (the zero-I/O invariant
+  // this whole early-check block exists to protect — see the "HEAD must not
+  // pay I/O" note just above). So an HTML-looking non-RDF resource under an
+  // unsatisfiable specific Accept + If-None-Match forgoes this early 304 and
+  // falls through to 200, same as GET. Safe-direction (RFC 9110 §13.2.2):
+  // never a wrong 304, never a wrong 406 — a missed revalidation in a
+  // corner, accepted deliberately rather than adding a body-read here.
+  const wouldNotNegotiate = !stats.isDirectory && !isMashlibResponse && request.lwsEnabled
+    && !isRdfSourceType(storedContentType)
+    && !acceptSatisfiable(request.headers.accept || '', storedContentType);
+  const hasAcceptProfile = !skipProfileNegotiation && !!(request.lwsProfileConneg && request.headers['accept-profile']);
+
   // Check If-None-Match using the final ETag (#456)
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch) {
+  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
-      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled));
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
       return reply.code(304).send();
     }
   }
 
   // Profile conneg (DX-PROF-CONNEG cnpr:http) — mirrors the GET gate,
-  // placed after the 304 check (parity: a cache-valid conditional request
-  // short-circuits before any profile redirect/406, same as GET). Skipped
-  // for container representations that index.html/mashlib already shadow
-  // (skipProfileNegotiation); files are never skipped, matching GET's
+  // placed after the early 304 check, mirroring GET's guard: hasAcceptProfile
+  // deferred the early check above exactly when this block runs, so a
+  // cache-valid conditional request still short-circuits BEFORE a profile
+  // 406 (spec §3, via the deferred re-check below) while a profile redirect
+  // gets its own inline conditional check (304-wins-over-303 preserved).
+  // Skipped for container representations that index.html/mashlib already
+  // shadow (skipProfileNegotiation); files are never skipped, matching GET's
   // universal chosenProfile stamp across every file serve branch.
   if (!skipProfileNegotiation && request.lwsProfileConneg && request.headers['accept-profile']) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
     const neg = negotiateProfile(request.headers['accept-profile'], reps);
     if (neg.outcome === 'redirect') {
+      // A redirect is not a 406 — 304-wins-over-303 is unaffected by spec
+      // §3, which only closes the 406 case. Check inline before 303.
+      if (ifNoneMatch) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', headEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
+      }
       reply.header('Link', `<${neg.rep.profile}>; rel="profile"`);
       reply.header('Content-Profile', `<${neg.rep.profile}>`);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -1430,6 +1600,7 @@ export async function handleHead(request, reply) {
     if (neg.outcome === 'notacceptable') {
       // HEAD 406 parity: same alternate-list Link as GET, body empty (HEAD) —
       // but same problem+json Content-Type (F5, spec 2026-07-11 §3).
+      // Spec §3: 406 wins over 304 — no conditional check here, ever.
       const avail = representationLinks(reps);
       if (avail) reply.header('Link', avail);
       reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
@@ -1437,6 +1608,19 @@ export async function handleHead(request, reply) {
     }
     chosenProfile = neg.outcome === 'self' ? neg.rep.profile : null;
     advertisedReps = reps;   // list-profiles rides every negotiated response (§8.2.1)
+  }
+
+  // Deferred 304 (spec §3): reached only when the original check above
+  // skipped for hasAcceptProfile — redirect/notacceptable already returned,
+  // so the profile arm would succeed. wouldNotNegotiate still applies
+  // unconditionally: never 304 a request the F3 gate below would 406.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+    const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+    if (!check.ok && check.notModified) {
+      reply.header('ETag', headEtag);
+      reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+      return reply.code(304).send();
+    }
   }
 
   // A1 (spec §4): bare-200 advertisement, GET parity — same exists() gate as
@@ -1528,6 +1712,8 @@ export async function handlePut(request, reply) {
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
   const connegEnabled = request.connegEnabled || false;
+  // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
+  const negotiate = connegEnabled || request.lwsEnabled;
 
   // Handle container creation via PUT
   if (isContainer(urlPath)) {
@@ -1587,7 +1773,7 @@ export async function handlePut(request, reply) {
   }
 
   // Check if we can accept this input type
-  if (!canAcceptInput(contentType, connegEnabled)) {
+  if (!canAcceptInput(contentType, negotiate)) {
     const acceptValue = connegEnabled
       ? 'application/ld+json, application/json, text/turtle, text/n3'
       : 'application/ld+json, application/json';
@@ -1638,11 +1824,16 @@ export async function handlePut(request, reply) {
     content = Buffer.from('');
   }
 
-  // Convert Turtle/N3 to JSON-LD if conneg enabled
+  // Spec §2: under --lws, store the submitted bytes verbatim; enforce
+  // write-time name/type consistency instead of converting (B1 root fix).
+  // --lws-off keeps the byte-identical legacy Turtle/N3→JSON-LD conversion.
   const inputType = contentType.split(';')[0].trim().toLowerCase();
-  if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
+  if (request.lwsEnabled) {
+    const c = writeTypeConsistency({ urlPath, submittedType: contentType, lwsEnabled: true });
+    if (!c.ok) return reply.code(400).type('application/problem+json').send(JSON.stringify(c.problem, null, 2));
+  } else if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
     try {
-      const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: !!request.lwsEnabled });
+      const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: false });
       content = Buffer.from(JSON.stringify(jsonLd, null, 2));
     } catch (e) {
       return reply.code(400).send({
@@ -1669,7 +1860,7 @@ export async function handlePut(request, reply) {
   const w = await applyLwsWrite({
     storage, storagePath, resourceUrl,
     content,
-    contentType: (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
+    contentType: (!request.lwsEnabled && connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3))
       ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
     declaredTypes: declared,
     lwsEnabled: request.lwsEnabled,

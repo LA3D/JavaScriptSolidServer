@@ -2,7 +2,7 @@
  * Generate container representation as JSON-LD
  */
 
-import mime from 'mime-types';
+import { getContentType } from '../utils/url.js';
 
 const LDP = 'http://www.w3.org/ns/ldp#';
 
@@ -94,7 +94,7 @@ export function generateLwsContainer(containerUrl, entries) {
   const items = entries.filter(e => !e.name.startsWith('.')).map(e => {
     const id = baseUrl + e.name + (e.isDirectory ? '/' : '');
     const item = { id, type: e.isDirectory ? 'Container' : 'DataResource' };
-    if (!e.isDirectory) item.mediaType = mime.lookup(e.name) || 'application/octet-stream';
+    if (!e.isDirectory) item.mediaType = getContentType(e.name);
     if (e.size != null) item.size = e.size;
     if (e.modified) item.modified = e.modified;
     return item;

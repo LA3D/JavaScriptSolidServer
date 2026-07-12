@@ -54,7 +54,7 @@ test('an X.acl URL requires Control; a protected resource URL is denied for anon
 
   const anon = await read(pod, `${pod.base}/${pod.podName}/secret/s`);
   assert.ok(anon.error, 'anon read denied');
-  assert.match(anon.error.message, /access denied/i);
+  assert.match(anon.error.message, /not found or not authorized/i);
 
   const acl = await read(pod, `${pod.base}/${pod.podName}/secret/s.acl`, token);
   assert.ok(acl.result.contents, 'owner can read acl');

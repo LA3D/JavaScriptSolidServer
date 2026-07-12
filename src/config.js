@@ -36,13 +36,13 @@ export const defaults = {
   conneg: false,
   lws: false,
   lwsTypeIndex: true,
-  lwsProfileIndex: null,
-  // ON by default whenever --lws is on (mirrors lwsTypeIndex, not
-  // lwsProfileIndex's opt-in-path null) — see task-6-report.md for why.
+  // ON by default whenever --lws is on (mirrors lwsTypeIndex) — see
+  // task-6-report.md for why.
   lwsProfileConneg: true,
-  // Opt-in path, same shape as lwsProfileIndex (task-7-brief.md): the fork
-  // only routes to a configured pod resource, never generates VoID content.
-  lwsVoid: null,
+  // Pod resource declaring { profileIndex, void } as data (spec §4b) —
+  // opt-in path, read lazily + mtime-cached (src/lws/pod-config.js). Replaces
+  // the old --lws-profile-index/--lws-void per-service flags.
+  lwsConfig: null,
   notifications: false,
 
   // Identity Provider
@@ -160,6 +160,10 @@ export const defaults = {
   // or Solid-OIDC DPoP) on /mcp — for exposing MCP to an untrusted/networked
   // agent rather than a trusted local one. See docs/foundations/05-jss-spec-conformance.md axis 6.
   mcpCredentialPolicy: 'trusted-local',
+  // SSRF guard opt-in for the MCP federation arm (dt8, spec §6). Off by
+  // default — readRemote refuses loopback/RFC-1918/link-local/cloud-metadata
+  // targets. The local rig flips this to reach private targets deliberately.
+  lwsFederationPrivate: false,
 
   // Logging
   logger: true,
@@ -183,9 +187,8 @@ const envMap = {
   JSS_CONNEG: 'conneg',
   JSS_LWS: 'lws',
   JSS_LWS_TYPE_INDEX: 'lwsTypeIndex',
-  JSS_LWS_PROFILE_INDEX: 'lwsProfileIndex',
   JSS_LWS_PROFILE_CONNEG: 'lwsProfileConneg',
-  JSS_LWS_VOID: 'lwsVoid',
+  JSS_LWS_CONFIG: 'lwsConfig',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
@@ -240,6 +243,7 @@ const envMap = {
   JSS_MONGO_DATABASE: 'mongoDatabase',
   JSS_MCP: 'mcp',
   JSS_MCP_CREDENTIAL_POLICY: 'mcpCredentialPolicy',
+  JSS_LWS_FEDERATION_PRIVATE: 'lwsFederationPrivate',
 };
 
 /**
@@ -289,6 +293,7 @@ const BOOLEAN_KEYS = new Set([
   'pay',
   'mongo',
   'mcp',
+  'lwsFederationPrivate',
   'idp',
   'notifications',
   'logger',

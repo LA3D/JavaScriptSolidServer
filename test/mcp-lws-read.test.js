@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { collectAuthorizedResources } from '../src/lws/authorized-resources.js';
 import { callTool } from '../src/mcp/tools.js';
 import { startLwsPod, ownerCtx, seedTyped, startTestServer, stopTestServer, getBaseUrl } from './helpers.js';
+import * as storage from '../src/storage/filesystem.js';
 
 test('collectAuthorizedResources drops resources the agent cannot read (no oracle)', async (t) => {
   const pod = await startLwsPod(t);
@@ -50,7 +51,7 @@ test('describe_resource returns anchor/type in its linkset, WAC-gated', async (t
   await seedTyped(pod, '/lwsmcp/priv/b', 'https://ex/Note', { publicRead: false });
   const denied = await callTool('describe_resource', { path: '/lwsmcp/priv/b' }, { webId: null, origin: pod.origin });
   assert.equal(denied.isError, true, 'anonymous must be denied the linkset for a private resource');
-  assert.match(denied.content[0].text, /access denied/i);
+  assert.match(denied.content[0].text, /not found or not authorized/i);
 });
 
 // Round-trips through the real /mcp HTTP route (not a hand-built ctx) so
@@ -123,14 +124,17 @@ test('the storage-description resource mirrors /.well-known/lws-storage capabili
   assert.deepEqual(resourceBody.capability, httpBody.capability);
 });
 
-// Same drift-guard as above, for lwsProfileIndex: proves the HTTP route
-// (src/server.js ~107/1048) and the MCP ctx (src/mcp/index.js:238, reading
-// request.profileIndexPath) both advertise the same ProfileIndexService
-// entry rather than one of them silently omitting it.
-test('the storage-description resource mirrors /.well-known/lws-storage with lwsProfileIndex set', async (t) => {
-  await startTestServer({ lws: true, mcp: true, lwsProfileIndex: '/alice/profiles/index.jsonld' });
+// Same drift-guard as above, for the --lws-config profileIndex pointer:
+// proves the HTTP route (src/server.js, the storage-description route) and
+// the MCP ctx (src/mcp/index.js, reading the SAME shared podConfig instance
+// server.js built) both advertise the same ProfileIndexService entry rather
+// than one of them silently omitting it.
+test('the storage-description resource mirrors /.well-known/lws-storage with profileIndex configured', async (t) => {
+  const CONFIG_PATH = '/alice/profiles/pod-config.jsonld';
+  await startTestServer({ lws: true, mcp: true, lwsConfig: CONFIG_PATH });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
+  await storage.write(CONFIG_PATH, JSON.stringify({ profileIndex: '/alice/profiles/index.jsonld' }));
 
   const httpRes = await fetch(`${base}/.well-known/lws-storage`);
   const httpBody = await httpRes.json();

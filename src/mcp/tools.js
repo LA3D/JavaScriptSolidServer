@@ -20,9 +20,10 @@ import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-inde
 import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
+import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeBody, sanitizeTypes } from './sanitize.js';
-import { readBounded, MAX_BODY_BYTES } from './read.js';
+import { sanitizeTypes } from './sanitize.js';
+import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
 import { isLocalUri, uriToPath } from './uri.js';
 
@@ -404,27 +405,42 @@ async function describe_resource({ path, uri }, ctx) {
     if (path === null) return toolError(`bad resource uri: ${uri}`);
   }
   if (!path) return toolError('path or uri required');
-  if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`access denied: read ${path}`);
-  if (!(await storage.exists(path))) return toolError(`not found: ${path}`);
+  // Same single wording for both branches as resources.js's requireRead/
+  // requireExists (probe #7 A8) — the order (WAC before exists) already kept
+  // existence non-oracular; unifying the string closes the last thing that
+  // could ever hint which branch fired.
+  if (!(await wac(ctx, path, AccessMode.READ))) return toolError(`not found or not authorized: ${path}`);
+  if (!(await storage.exists(path))) return toolError(`not found or not authorized: ${path}`);
   const isContainer = path.endsWith('/');
   let body = null, truncated = false;
   if (!isContainer) {
     const r = await readBounded(path);              // bounded read, shared limit (#5/#6/#12)
     if (r) {
       truncated = r.truncated;
-      let label = 'untrusted pod content';
-      if (truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
-      body = sanitizeBody(r.text, label);
+      // Same trust decision as resources/read and read_resource (dt5): RDF/
+      // JSON-LD structure-preserved, opaque/free-text fenced — not an
+      // unconditional envelope.
+      body = sanitizeForTrust(path, r).text;
     }
   }
   const declared = sanitizeTypes(await readDeclaredTypes(storage, path));
   const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   const conformsTo = sanitizeTypes(await conformsToTargets(storage, path + '.meta', buildUrl(ctx, path)));
+  // Authz-filtered alternate representations (altr: model) — same no-oracle
+  // read the MCP links carrier uses (read-tools.js localLinks) and the HTTP
+  // linkset advertises, so conneg-by-profile is discoverable from inside MCP
+  // too (probe #7 A2).
+  const representations = await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
+    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public });
   const linkset = generateLinkset(buildUrl(ctx, path), {
     parentUrl: buildUrl(ctx, parentPath(path)),
     isContainer, describedByShapes: shapes, declaredTypes: declared, conformsTo,
+    representations,
   });
-  return toolJson({ path, isContainer, body, truncated, types: declared, linkset });
+  return toolJson({
+    path, isContainer, body, truncated, types: declared, linkset,
+    hint: 'representations are negotiable via Accept-Profile: <conformsTo-uri>; alternates are listed as rel=alternate',
+  });
 }
 
 // --- registry ---
@@ -506,7 +522,7 @@ export const TOOLS = {
     handler: subscribe
   },
   lws_type_search: {
-    description: 'Search pod resources by LWS type, describedby, and/or conformsTo — WAC-filtered, no-oracle.',
+    description: 'Search pod resources by LWS type, describedby, and/or conformsTo — WAC-filtered, no-oracle. Empty arguments return the full (WAC-filtered) inventory; filter with type/describedby/conformsTo (repeat to AND, comma to OR).',
     inputSchema: { type: 'object', properties: {
       type: { type: 'array', items: {}, description: 'CNF type filter (see LWS Type Search).' },
       describedby: { type: 'array', items: {}, description: 'CNF describedby (shape) filter.' },

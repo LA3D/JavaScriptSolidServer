@@ -51,3 +51,18 @@ test('TypeSearchService carries a query-syntax hint', () => {
   const ts = sd.service.find(s => s.type === 'TypeSearchService');
   assert.match(ts.hint, /\?type=/);
 });
+
+// probe #7 batch: a cold agent hitting 429s otherwise has no way to learn the
+// budget is per-IP-anonymous, not a pod-wide outage.
+test('McpService hint names the anonymous rate-limit budget when anonRateLimitMax is given', () => {
+  const sd = buildStorageDescription('https://pod.example', { mcpEnabled: true, anonRateLimitMax: 60 });
+  const svc = sd.service.find(s => s.type === 'McpService');
+  assert.match(svc.hint, /Anonymous callers: 60 requests\/minute/);
+  assert.match(svc.hint, /x-ratelimit/i);
+});
+
+test('McpService hint omits the budget sentence when anonRateLimitMax is not given', () => {
+  const sd = buildStorageDescription('https://pod.example', { mcpEnabled: true });
+  const svc = sd.service.find(s => s.type === 'McpService');
+  assert.doesNotMatch(svc.hint, /requests\/minute/);
+});

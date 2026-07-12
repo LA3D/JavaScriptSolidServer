@@ -37,6 +37,7 @@ import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescription } from './lws/storage-description.js';
+import { makePodConfig } from './lws/pod-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -103,12 +104,13 @@ export function createServer(options = {}) {
   // --no-lws-type-index is a per-deployment safety valve to disable just
   // the type-aggregation surface without disabling the rest of --lws.
   const typeIndexEnabled = lwsEnabled && (options.lwsTypeIndex ?? true);
-  // ProfileIndexService advertisement is OFF by default (opt-in path, --lws-gated)
-  const profileIndexPath = lwsEnabled ? (options.lwsProfileIndex ?? null) : null;
-  // VoID rung is OFF by default (opt-in path, --lws-gated, same shape as
-  // profileIndexPath): /.well-known/void 303s to this pod resource — the
-  // server never generates VoID content, the document is pod data.
-  const voidPath = lwsEnabled ? (options.lwsVoid ?? null) : null;
+  // Spec §4b: profileIndex/void service pointers live in ONE pod resource
+  // (--lws-config), read lazily + mtime-cached rather than from two static
+  // per-service flags — absence is normal at boot (services off, warn once);
+  // the next request picks up the resource once the publish pipeline writes
+  // it, no restart needed. ONE instance shared by the HTTP routes below and
+  // the MCP surface (src/mcp/index.js), so the two views can't diverge.
+  const podConfig = makePodConfig(storage, lwsEnabled ? (options.lwsConfig ?? null) : null);
   // Content Negotiation by Profile is ON by default whenever --lws is on;
   // --no-lws-profile-conneg is a per-deployment safety valve to disable just
   // the capability advertisement without disabling the rest of --lws.
@@ -230,6 +232,13 @@ export function createServer(options = {}) {
   const mcpCredentialPolicy = validMcpCredentialPolicies.includes(options.mcpCredentialPolicy)
     ? options.mcpCredentialPolicy
     : 'trusted-local';
+  // Federation SSRF guard opt-in (dt8, spec §6): the MCP federation arm
+  // (read_resource's remote branch) blocks loopback/RFC-1918/link-local/
+  // cloud-metadata hosts by default. --lws-federation-private is the
+  // deliberate opt-in for the local rig (self-fetch across containers on
+  // one host). Strict `=== true` mirrors provisionKeysEnabled below — a
+  // stray truthy non-boolean must not silently open the guard.
+  const federationPrivate = options.lwsFederationPrivate === true;
   // Provision a Schnorr secp256k1 owner key in /private/privkey.jsonld
   // when a single-user pod is first created. Phase 1 of #437. Off by
   // default: keys-on-disk is a real security tradeoff, opt-in keeps
@@ -394,8 +403,6 @@ export function createServer(options = {}) {
   fastify.decorateRequest('connegEnabled', null);
   fastify.decorateRequest('lwsEnabled', null);
   fastify.decorateRequest('typeIndexEnabled', null);
-  fastify.decorateRequest('profileIndexPath', null);
-  fastify.decorateRequest('voidPath', null);
   fastify.decorateRequest('lwsProfileConneg', null);
   fastify.decorateRequest('notificationsEnabled', null);
   fastify.decorateRequest('idpEnabled', null);
@@ -416,8 +423,6 @@ export function createServer(options = {}) {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
     request.typeIndexEnabled = typeIndexEnabled;
-    request.profileIndexPath = profileIndexPath;
-    request.voidPath = voidPath;
     request.lwsProfileConneg = profileConnegEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
     request.idpEnabled = idpEnabled;
@@ -586,7 +591,7 @@ export function createServer(options = {}) {
   // routes registered directly/synchronously on this outer instance).
   if (mcpEnabled) {
     const mcpRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax) } };
-    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy });
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfig, anonRateLimitMax, federationPrivate });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
@@ -1065,7 +1070,8 @@ export function createServer(options = {}) {
       // storage-description resource ctx (src/mcp/index.js) — otherwise HTTP
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, voidPath, profileConnegEnabled, mcpEnabled });
+      const { profileIndex, void: voidPath } = await podConfig.get();
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, mcpEnabled, anonRateLimitMax });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.
@@ -1074,17 +1080,19 @@ export function createServer(options = {}) {
     }
 
     // VoID rung — /.well-known/void 303s to the configured pod resource
-    // (--lws-void). Pure routing (P13): the document itself is pod data,
-    // written by the publish pipeline; the server never generates it.
-    // Route absent entirely when unconfigured → wildcard 404.
-    if (voidPath) {
-      fastify.get('/.well-known/void', async (request, reply) => {
-        const origin = `${request.protocol}://${request.hostname}`;
-        reply.header('Cache-Control', 'public, max-age=3600');
-        return reply.code(303).header('Location', `${origin}${voidPath}`).send();
-      });
-      for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/.well-known/void', methodNotAllowed);
-    }
+    // (the `void` pointer in --lws-config's pod resource). Pure routing
+    // (P13): the document itself is pod data, written by the publish
+    // pipeline; the server never generates it. Registered unconditionally —
+    // podConfig is dynamic (mtime-cached, no restart), so the route can flip
+    // from 404 to 303 mid-lifetime once the resource is published.
+    fastify.get('/.well-known/void', async (request, reply) => {
+      const { void: voidPath } = await podConfig.get();
+      if (!voidPath) return reply.code(404).send();
+      const origin = `${request.protocol}://${request.hostname}`;
+      reply.header('Cache-Control', 'public, max-age=3600');
+      return reply.code(303).header('Location', `${origin}${voidPath}`).send();
+    });
+    for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/.well-known/void', methodNotAllowed);
 
     if (typeIndexEnabled) {
       // fastify.after() defers these two registrations until every plugin

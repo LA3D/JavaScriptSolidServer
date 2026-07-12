@@ -173,7 +173,7 @@ test('#9 a ResourceError carries the same content[] teaching shape as a tool err
     () => readResource(`${p.origin}/${p.podName}/secret`, { origin: p.origin, webId: null }),
     (e) => e instanceof ResourceError
       && Array.isArray(e.data?.content)
-      && /access denied/i.test(e.data.content[0].text)
+      && /not found or not authorized/i.test(e.data.content[0].text)
       && e.data.isError === true,
     'resource-read failures must carry isError + content[] like tool errors',
   );

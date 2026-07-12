@@ -95,10 +95,9 @@ program
   .option('--lws', 'Enable the W3C Linked Web Storage surface (application/lws+json containers)')
   .option('--lws-type-index', 'Enable the LWS Type Index/Search services (default on when --lws)')
   .option('--no-lws-type-index', 'Disable the LWS Type Index/Search services')
-  .option('--lws-profile-index <path>', 'Advertise a ProfileIndexService at this pod path in the storage description (requires --lws)')
   .option('--lws-profile-conneg', 'Enable content negotiation by profile (default on when --lws)')
   .option('--no-lws-profile-conneg', 'Disable content negotiation by profile')
-  .option('--lws-void <path>', 'Serve /.well-known/void as a 303 to this pod path and advertise a VoidService in the storage description (requires --lws)')
+  .option('--lws-config <path>', 'Pod resource declaring LWS service endpoints as data ({ profileIndex, void }, requires --lws)')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -165,6 +164,7 @@ program
   .option('--mcp', 'Enable MCP (Model Context Protocol) server at /mcp — pod as a tool surface for agents (#490)')
   .option('--no-mcp', 'Disable MCP server')
   .option('--mcp-credential-policy <policy>', "Credential tier required on /mcp: 'trusted-local' (default) or 'audience-bound' (refuses the replayable bearer, requires LWS-CID/Solid-OIDC DPoP)")
+  .option('--lws-federation-private', 'Allow the MCP federation arm (read_resource remote reads) to reach loopback/RFC-1918/link-local/cloud-metadata hosts (default: blocked)')
   .option('-q, --quiet', 'Suppress log output')
   .option('--log-level <level>', 'Log level: error, warn, info, debug (default: info)')
   .option('--print-config', 'Print configuration and exit')
@@ -231,9 +231,8 @@ program
         conneg: config.conneg,
         lws: config.lws,
         lwsTypeIndex: config.lwsTypeIndex,
-        lwsProfileIndex: config.lwsProfileIndex,
         lwsProfileConneg: config.lwsProfileConneg,
-        lwsVoid: config.lwsVoid,
+        lwsConfig: config.lwsConfig,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,
@@ -287,6 +286,7 @@ program
         mongoDatabase: config.mongoDatabase,
         mcp: config.mcp,
         mcpCredentialPolicy: config.mcpCredentialPolicy,
+        lwsFederationPrivate: config.lwsFederationPrivate,
       });
 
       await server.listen({ port: config.port, host: config.host });

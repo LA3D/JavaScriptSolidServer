@@ -38,11 +38,13 @@ describe('LWS discovery conformance (--lws ON)', () => {
     // Create container
     await request('/alice/notes/', { method: 'PUT', auth: 'alice' });
 
-    // Create a data resource (JSON-LD — .ttl extension storage, same as lws-conformance.test.js)
+    // Create a data resource at .ttl. Body type matches the extension — under
+    // --lws the B1 write-consistency gate rejects a JSON-LD body at a .ttl name
+    // (name/type lie), so this is stored as Turtle (same as lws-conformance.test.js).
     await request(NOTE_PATH, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/ld+json' },
-      body: JSON.stringify({ '@context': { dc: 'http://purl.org/dc/terms/' }, '@id': '#n', 'dc:title': 'Conformance note' }),
+      headers: { 'Content-Type': 'text/turtle' },
+      body: '@prefix dc: <http://purl.org/dc/terms/> .\n<#n> dc:title "Conformance note" .',
       auth: 'alice',
     });
   });

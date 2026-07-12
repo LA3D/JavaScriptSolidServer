@@ -6,6 +6,7 @@
 // teaching problem+json — never a silent 200 with empty or mislabeled bytes
 // (the probe-#4 family). LWS mandates media conneg be lossless.
 import { Writer } from 'n3';
+import jsonld from 'jsonld';
 import { toDataset } from './dataset.js';
 import { RDF_TYPES } from './conneg.js';
 import { COMMON_PREFIXES, applyTerminatorSpacing } from './turtle.js';
@@ -53,6 +54,18 @@ export function datasetToFormat(dataset, targetType) {
       ? reject(err)
       : resolve(targetType === RDF_TYPES.TURTLE ? applyTerminatorSpacing(result) : result));
   });
+}
+
+// Dataset (default graph only — callers gate named graphs via GRAPH_CAPABLE)
+// → expanded JSON-LD (spec JSON-LD 1.1 §"Expanded Document Form"): no
+// @context, every predicate a full IRI, every value an array of value
+// objects. Real conversion via the `jsonld` library's fromRDF (the spec's
+// RDF-to-JSON-LD algorithm) — not a hand-rolled quad walk. The dataset seam
+// already produces N-Quads for the n-quads serving arm (the n3 Writer via
+// datasetToFormat); reuse that string as jsonld.fromRDF's input.
+async function datasetToJsonLd(dataset) {
+  const nquads = await datasetToFormat(dataset, RDF_TYPES.NQUADS);
+  return jsonld.fromRDF(nquads, { format: 'application/n-quads' });
 }
 
 function notAcceptable(instance, targetType, why, works) {
@@ -106,13 +119,17 @@ async function policyDataset({ bytes, sourceContentType, targetType, baseIri }) 
 const isOwnFormat = (sourceContentType, targetType) =>
   QUADS_OUTPUTS[sourceContentType] === targetType && sourceContentType !== RDF_TYPES.N3;
 
-/** Serve stored RDF bytes as a quads format under the 406-teaching policy. */
+/** Serve stored RDF bytes as a quads format (or JSON-LD) under the 406-teaching policy. */
 export async function serveStoredRdf({ bytes, sourceContentType = RDF_TYPES.JSON_LD, targetType, baseIri }) {
   if (isOwnFormat(sourceContentType, targetType)) {
     return { ok: true, content: bytes, contentType: sourceContentType };
   }
   const p = await policyDataset({ bytes, sourceContentType, targetType, baseIri });
   if (!p.ok) return p;
+  if (targetType === RDF_TYPES.JSON_LD) {
+    const doc = await datasetToJsonLd(p.dataset);
+    return { ok: true, content: JSON.stringify(doc, null, 2), contentType: RDF_TYPES.JSON_LD };
+  }
   const content = await datasetToFormat(p.dataset, targetType);
   return { ok: true, content, contentType: targetType };
 }

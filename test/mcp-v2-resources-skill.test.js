@@ -24,7 +24,7 @@ test('a skill file reads at its real URL; anonymous read of a private skill is d
 
   const anon = await read(pod, `${pod.base}/${pod.podName}/bot/SKILL.md`);
   assert.ok(anon.error);
-  assert.match(anon.error.message, /access denied/i);
+  assert.match(anon.error.message, /not found or not authorized/i);
 
   const owner = await read(pod, `${pod.base}/${pod.podName}/bot/SKILL.md`, token);
   assert.match(owner.result.contents[0].text, /bot skill/);
