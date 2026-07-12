@@ -291,6 +291,19 @@ export async function handleGet(request, reply) {
   // outcome isn't known yet (resolved later, at the Accept-Profile block) —
   // both defer the 304 decision instead of guessing.
   const storedContentType = stats.isDirectory ? null : getContentType(storagePath);
+  // why: a conservative SUPERSET of the real F3 gate (~line 1144) — it
+  // intentionally omits that gate's `looksHtml` byte-sniff exception, which
+  // reads the body to decide whether HTML-looking non-RDF content degrades
+  // to a 200 instead of a 406. Sniffing here would mean reading bytes before
+  // knowing whether a 304 will discard them, which breaks the zero-I/O
+  // early-check invariant HEAD depends on (HEAD must not pay I/O a 304 would
+  // make wasted work, ~line 1521). Net effect: a non-RDF resource whose
+  // bytes look like HTML, requested with an unsatisfiable specific Accept +
+  // If-None-Match, forgoes this early 304 and falls through to a full 200
+  // (the real F3 gate below still degrades it to 200, never a wrong 406).
+  // Safe-direction per RFC 9110 §13.2.2 — never a wrong 304, never a wrong
+  // 406 — just a missed cache-revalidation optimization in a narrow corner,
+  // accepted deliberately rather than adding a body-read to this early check.
   const wouldNotNegotiate = !stats.isDirectory && request.lwsEnabled
     && !isRdfSourceType(storedContentType)
     && !acceptSatisfiable(request.headers.accept || '', storedContentType);
@@ -1530,6 +1543,16 @@ export async function handleHead(request, reply) {
   // hasAcceptProfile defers to the profile block's outcome (skipped when
   // skipProfileNegotiation — index.html/mashlib containers never reach it).
   const storedContentType = (!stats.isDirectory && !isMashlibResponse) ? getContentType(storagePath) : null;
+  // why: same conservative SUPERSET as handleGet's wouldNotNegotiate (see
+  // that comment) — omits the real F3 gate's `looksHtml` byte-sniff on
+  // purpose. HEAD is where this matters most: a sniff needs the body, and
+  // HEAD must not read bytes a 304 would discard (the zero-I/O invariant
+  // this whole early-check block exists to protect — see the "HEAD must not
+  // pay I/O" note just above). So an HTML-looking non-RDF resource under an
+  // unsatisfiable specific Accept + If-None-Match forgoes this early 304 and
+  // falls through to 200, same as GET. Safe-direction (RFC 9110 §13.2.2):
+  // never a wrong 304, never a wrong 406 — a missed revalidation in a
+  // corner, accepted deliberately rather than adding a body-read here.
   const wouldNotNegotiate = !stats.isDirectory && !isMashlibResponse && request.lwsEnabled
     && !isRdfSourceType(storedContentType)
     && !acceptSatisfiable(request.headers.accept || '', storedContentType);

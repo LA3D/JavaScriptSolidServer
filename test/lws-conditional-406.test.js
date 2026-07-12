@@ -58,4 +58,78 @@ describe('negative control: --lws off, conditional fast path unchanged', () => {
     const r = await request('/c46neg/card.md', { headers: { 'If-None-Match': etag, Accept: 'text/turtle' }, auth: 'c46neg' });
     assert.equal(r.status, 304);
   });
+
+  // HEAD twin of the test above — the same Accept that would be
+  // unsatisfiable-under-lws (turtle vs a markdown resource) is a no-op off
+  // --lws, so wouldNotNegotiate's conjuncts (request.lwsEnabled) collapse it
+  // to false and HEAD takes the same bare fast path as GET, byte-identical.
+  it('HEAD: a mismatched Accept still 304s off the bare fast path (no F3/profile gates exist without --lws)', async () => {
+    const r = await request('/c46neg/card.md', { method: 'HEAD', headers: { 'If-None-Match': etag, Accept: 'text/turtle' }, auth: 'c46neg' });
+    assert.equal(r.status, 304);
+  });
+});
+
+describe('lws: 304-wins-over-303 and 406-never-304 — containers', () => {
+  // Mirrors the file-arm fixture in
+  // test/lws-profile-conneg-head-container.test.js — a container with its
+  // own .meta declaring an altr: default + a distinct alternate
+  // representation, negotiated via Accept-Profile. Pins that the container
+  // listing branch (resource.js ~557-603) has the same 304-vs-406/303
+  // ordering as the file branch (~767-819) that describe('lws: 304 never
+  // beats 406') above already covers — container coverage was trace-only
+  // per the debt-drain review.
+  const ALTR = 'http://www.w3.org/ns/dx/connegp/altr#';
+  const DCT = 'http://purl.org/dc/terms/';
+  const CONTAINER_PATH = '/c46cont/mem/';
+  const ALT_PATH = '/c46cont/mem-alt.jsonld';
+  const DEFAULT_PROFILE = 'https://profiles.example/c46-container-default';
+  const ALT_PROFILE = 'https://profiles.example/c46-container-alt';
+  const UNKNOWN_PROFILE = 'https://profiles.example/c46-container-nope';
+  let CONTAINER, ALT, listingEtag;
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true });
+    await createTestPod('c46cont');
+    const base = getBaseUrl();
+    CONTAINER = `${base}${CONTAINER_PATH}`;
+    ALT = `${base}${ALT_PATH}`;
+
+    await request(CONTAINER_PATH, { method: 'PUT', auth: 'c46cont' });
+    await request(`${CONTAINER_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': CONTAINER,
+        'altr:hasDefaultRepresentation': {
+          '@id': CONTAINER, 'dct:format': 'application/ld+json', 'dct:conformsTo': { '@id': DEFAULT_PROFILE },
+        },
+        'altr:hasRepresentation': {
+          '@id': ALT, 'dct:format': 'application/ld+json', 'dct:conformsTo': { '@id': ALT_PROFILE },
+        },
+      }),
+      auth: 'c46cont',
+    });
+
+    const probe = await request(CONTAINER_PATH, { auth: 'c46cont' });
+    listingEtag = probe.headers.get('etag');
+  });
+  after(stopTestServer);
+
+  it('container: If-None-Match + Accept-Profile matching an alternate (would-303) → 304, not 303 (304 wins)', async () => {
+    const r = await request(CONTAINER_PATH, {
+      headers: { 'If-None-Match': listingEtag, 'Accept-Profile': `<${ALT_PROFILE}>` },
+      auth: 'c46cont',
+      redirect: 'manual',
+    });
+    assert.equal(r.status, 304);
+  });
+
+  it('container: If-None-Match + Accept-Profile matching nothing (would-406) → 406, never 304', async () => {
+    const r = await request(CONTAINER_PATH, {
+      headers: { 'If-None-Match': listingEtag, 'Accept-Profile': `<${UNKNOWN_PROFILE}>` },
+      auth: 'c46cont',
+    });
+    assert.equal(r.status, 406);
+  });
 });
