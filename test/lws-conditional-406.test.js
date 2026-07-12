@@ -6,6 +6,7 @@
 // either 406 gate.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import * as storage from '../src/storage/filesystem.js';
 import { startTestServer, stopTestServer, request, createTestPod, getBaseUrl, assertStatus } from './helpers.js';
 
 describe('lws: 304 never beats 406', () => {
@@ -206,44 +207,46 @@ describe('#4 (RFC 9110 §13.2.2): pending RDF conversion defers the early 304; 4
 });
 
 describe('task-5: mashlib-served conditional GET keeps early 304', () => {
-  // Regression test for the conversionPending guard omission: when an RDF
-  // resource is requested with Accept: text/html (mashlib HTML wrapper),
-  // the early If-None-Match check must run with the mashlib ETag. The
-  // fix adds !willServeMashlib to conversionPending so the deferred
-  // conversion check doesn't trigger when mashlib will serve.
-  const RDF = '/mashlib5/public/data.jsonld';
+  // Regression pin for conversionPending's !willServeMashlib guard. The
+  // fixture MUST be one where pendingConversion is actually true — a
+  // JSON-LD-stored resource short-circuits it to false (stored === JSON_LD),
+  // making the pin vacuous. N-Triples stored + a browser Accept gives:
+  // negotiateQuadsTarget → undefined (html is no quads target), stored !==
+  // JSON_LD → pendingConversion true; application/n-triples is
+  // mashlib-viewable (src/mashlib/index.js viewableTypes) → willServeMashlib
+  // true. Without the guard that combination defers the early 304 into the
+  // mashlib branch, which has no conditional handling — the 304 is lost
+  // (always 200). Seeded via storage.write, not PUT: application/n-triples
+  // is 415-rejected on input (mirrors test/lws-serve-nt-nq.test.js).
+  const NT = '/mashlib5/public/data.nt';
+  const BROWSER_ACCEPT = 'text/html,*/*;q=0.8';
   let mashlibEtag;
 
   before(async () => {
     await startTestServer({ lws: true, conneg: true, mashlibCdn: true });
     await createTestPod('mashlib5');
-    const base = getBaseUrl();
-    await request(RDF, {
-      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'mashlib5',
-      body: JSON.stringify({
-        '@context': { foaf: 'http://xmlns.com/foaf/0.1/' },
-        '@id': `${base}${RDF}#me`, 'foaf:name': 'Test',
-      }),
-    });
-    // Capture the mashlib ETag (HTML representation)
-    const html = await request(RDF, { headers: { Accept: 'text/html,*/*;q=0.8' } });
+    await storage.write(NT, Buffer.from('<http://ex/s> <http://ex/p> "v".\n'));
+    // Capture the mashlib ETag (the '-html' variant, per getMashlibEtag)
+    const html = await request(NT, { headers: { Accept: BROWSER_ACCEPT } });
     assertStatus(html, 200);
     mashlibEtag = html.headers.get('etag');
-    assert.ok(mashlibEtag, 'mashlib response must carry ETag');
+    assert.ok(mashlibEtag && mashlibEtag.endsWith('-html"'),
+      `mashlib ETag should end with -html", got: ${mashlibEtag}`);
   });
   after(stopTestServer);
 
-  it('mashlib-served conditional GET with matching ETag → 304', async () => {
-    const r = await request(RDF, {
-      headers: { Accept: 'text/html,*/*;q=0.8', 'If-None-Match': mashlibEtag },
+  it('mashlib-served conditional GET of an NT-stored resource with matching ETag → 304', async () => {
+    const r = await request(NT, {
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': mashlibEtag },
     });
     assert.equal(r.status, 304, 'mashlib-served conditional GET should 304 with matching ETag');
+    assert.equal(r.headers.get('etag'), mashlibEtag);
   });
 
-  it('mashlib-served conditional HEAD with matching ETag → 304', async () => {
-    const r = await request(RDF, {
+  it('HEAD parity: mashlib-served conditional HEAD with matching ETag → 304 (pre-existing isMashlibResponse guard)', async () => {
+    const r = await request(NT, {
       method: 'HEAD',
-      headers: { Accept: 'text/html,*/*;q=0.8', 'If-None-Match': mashlibEtag },
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': mashlibEtag },
     });
     assert.equal(r.status, 304, 'mashlib-served conditional HEAD should 304 with matching ETag');
   });
