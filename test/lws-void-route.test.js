@@ -138,5 +138,18 @@ describe('lws: /.well-known/void rung', () => {
       const sd = await res.json();
       assert.equal(sd.service.some((s) => s.type === 'VoidService'), false);
     });
+
+    // The write routes are registered unconditionally alongside the GET
+    // route (src/server.js), so an unconfigured pod still refuses writes
+    // rather than falling through to the generic wildcard write handler —
+    // which, under /.well-known/* (WAC-bypassed by the global preHandler),
+    // would otherwise accept an unauthenticated write. See dt4-report.md
+    // "Fix round 1" for the old-vs-new exposure this closes.
+    it('writes → 405 even when unconfigured', async () => {
+      const put = await request(VOID_PATH, { method: 'PUT' });
+      assertStatus(put, 405);
+      const post = await request(VOID_PATH, { method: 'POST' });
+      assertStatus(post, 405);
+    });
   });
 });

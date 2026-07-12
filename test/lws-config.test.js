@@ -35,3 +35,25 @@ describe('--lws-config', () => {
     assert.equal(r.headers.get('location'), `${base}/alice/profiles/void.jsonld`);
   });
 });
+
+describe('--lws-config malformed content', () => {
+  let base, tok;
+  before(async () => {
+    await startTestServer({ lws: true, lwsConfig: '/alice/profiles/pod-config.jsonld' });
+    base = getBaseUrl();
+    await createTestPod('alice');
+    tok = getPodToken('alice');
+    await request(`${base}/alice/profiles/pod-config.jsonld`, { method: 'PUT',
+      headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
+      body: 'not json{' });
+  });
+  after(stopTestServer);
+
+  it('malformed config resource: services stay off, pod keeps serving (no crash)', async () => {
+    const res = await request(`${base}/.well-known/lws-storage`);
+    assert.equal(res.status, 200);
+    const sd = await res.json();
+    assert.ok(!(sd.service || []).some(s => s.type === 'VoidService'));
+    assert.ok(!(sd.service || []).some(s => s.type === 'ProfileIndexService'));
+  });
+});
