@@ -11,7 +11,6 @@ import { emitChange } from '../notifications/events.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
-import { writeTypeConsistency } from '../lws/write-consistency.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -110,16 +109,13 @@ export async function handlePost(request, reply) {
       content = Buffer.from('');
     }
 
-    // Spec §2: under --lws, store the submitted bytes verbatim; enforce
-    // write-time name/type consistency instead of converting (B1 root fix).
-    // The FINAL resource name (container path + slug) is what must agree
-    // with the submitted type — not the container's own path.
+    // Spec §2: under --lws, store the submitted bytes verbatim; the name/type
+    // gate now runs inside applyLwsWrite (review #2 — the choke point every
+    // write surface shares) against storagePath, which is the FINAL resource
+    // name (container path + slug) — not here.
     // --lws-off keeps the byte-identical legacy Turtle/N3→JSON-LD conversion.
     const inputType = contentType.split(';')[0].trim().toLowerCase();
-    if (request.lwsEnabled) {
-      const c = writeTypeConsistency({ urlPath: newUrlPath, submittedType: contentType, lwsEnabled: true });
-      if (!c.ok) return reply.code(400).type('application/problem+json').send(JSON.stringify(c.problem, null, 2));
-    } else if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
+    if (!request.lwsEnabled && connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
       try {
         const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: false });
         content = Buffer.from(JSON.stringify(jsonLd, null, 2));
@@ -153,6 +149,9 @@ export async function handlePost(request, reply) {
       lwsEnabled: request.lwsEnabled,
     });
     if (!w.ok) {
+      if (w.problem) {
+        return reply.code(400).type('application/problem+json').send(JSON.stringify(w.problem, null, 2));
+      }
       reply.header('content-type', 'application/problem+json');
       if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
       return reply.code(400).send(constraintProblem({

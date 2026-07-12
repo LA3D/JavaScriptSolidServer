@@ -12,6 +12,13 @@
 // ACL/.meta) and `.jsonld` (application/ld+json) — getContentType() maps both .acl
 // and .meta basenames straight to application/ld+json too, so those fall into the
 // second shape rather than needing a special case.
+//
+// Review 2026-07-12 (#2, #10): the gate runs inside applyLwsWrite now — the
+// choke point every write surface (HTTP PUT/POST + all MCP write tools)
+// shares — instead of at 2 HTTP call sites only. Two strengthenings: plain
+// application/json gates as JSON-LD (#10, asRdf below); a non-RDF body at an
+// RDF-extension name is refused (#2 — admission would skip SHACL for it on
+// write, yet the serving path RDF-serves the name on read).
 import { getContentType } from '../utils/url.js';
 import { RDF_TYPES } from '../rdf/conneg.js';
 
@@ -19,12 +26,27 @@ import { RDF_TYPES } from '../rdf/conneg.js';
 const OTHER_RDF = new Set([RDF_TYPES.TURTLE, RDF_TYPES.N3, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS]);
 const RDF = new Set([...OTHER_RDF, RDF_TYPES.JSON_LD]);
 const main = (t) => (t || '').split(';')[0].trim().toLowerCase();
+// #10 (review 2026-07-12): plain application/json gates as JSON-LD — the rest
+// of the pipeline already reads it that way (isRdfType/toJsonLd/isRdfBody).
+const asRdf = (t) => (t === 'application/json' ? RDF_TYPES.JSON_LD : t);
 
 export function writeTypeConsistency({ urlPath, submittedType, lwsEnabled }) {
   if (!lwsEnabled) return { ok: true };
-  const sub = main(submittedType);
-  if (!RDF.has(sub)) return { ok: true };                 // non-RDF bodies: not our concern
+  const sub = asRdf(main(submittedType));
   const nameType = main(getContentType(urlPath));         // extension-derived (octet-stream if none)
+
+  if (!RDF.has(sub)) {
+    // #2 worst case (review 2026-07-12): a non-RDF body at an RDF-extension
+    // name would be admission-skipped on write yet RDF-served on read.
+    // Refuse the lie in this direction too — symmetric with the RDF-body-at-
+    // wrong-name check below. Extensionless and non-RDF names stay legitimate
+    // (not our concern).
+    if (RDF.has(nameType)) {
+      return problem(urlPath, sub || 'unspecified',
+        `the resource name implies ${nameType} but the body is ${sub || 'unspecified'}; rename to a non-RDF extension or submit the body as ${nameType}`);
+    }
+    return { ok: true };
+  }
 
   if (sub === RDF_TYPES.JSON_LD) {
     // Only reject when the name implies a DIFFERENT RDF serialization — that's the

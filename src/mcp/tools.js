@@ -59,7 +59,7 @@ async function write_resource({ path, content, contentType, types }, ctx) {
     declaredTypes: Array.isArray(types) ? types : [],
     lwsEnabled: ctx.lwsEnabled
   });
-  if (!w.ok) return admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
+  if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${path}`);
   emitChange(buildUrl(ctx, path));
   return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes)`);
@@ -91,7 +91,7 @@ async function create_resource({ container, slug, content, contentType, isContai
     declaredTypes: Array.isArray(types) ? types : [],
     lwsEnabled: ctx.lwsEnabled
   });
-  if (!w.ok) return admissionError(childPath, { violations: w.violations, shapeUrl: w.shapeUrl });
+  if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(childPath, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${childPath}`);
   emitChange(buildUrl(ctx, childPath));
   return toolText(`created ${childPath}`);
@@ -372,6 +372,7 @@ async function put_typed_resource({ path, content, contentType, types, described
       if (metaSnapshot === null) await storage.remove(metaPath);
       else await storage.write(metaPath, metaSnapshot, { contentType: 'application/ld+json' });
     }
+    if (w.problem) return toolError(w.problem.detail);      // gate reject (review #2/#10)
     return w.ok ? toolError(`write failed: ${path}`) : admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   }
   emitChange(buildUrl(ctx, path));
