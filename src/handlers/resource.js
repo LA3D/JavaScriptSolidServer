@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { DataFactory as N3DataFactory } from 'n3';
 import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders, representationLinks } from '../ldp/headers.js';
@@ -31,7 +32,7 @@ import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
-import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToJsonLd, datasetToFormat } from '../rdf/serve.js';
+import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -2083,14 +2084,70 @@ export async function handleOptions(request, reply) {
   return reply.code(204).send();
 }
 
+// task-6 review (owner directive): PATCH on a verbatim-stored resource
+// applies at the RDF TERM level — no JSON-LD document detour. n3-patch.js
+// and sparql-update.js both hand back ground triples {subject, predicate,
+// object}; object is a plain string (URI or literal — parseN3Patch's own
+// ambiguity, resolved the same way its legacy convertToJsonLd did: a bare
+// http(s) string is a URI, anything else a plain literal), an {'@id': ...}
+// / {value|@value, type|@type} / {value|@value, language|@language} object
+// (sparql-update.js's shape), or an N3-Patch-only {blankNode} marker.
+// termFromId/termFromPatchObject below build real n3 DataFactory terms from
+// either shape uniformly.
+const { namedNode: patchNamedNode, literal: patchLiteral, blankNode: patchBlankNode,
+  quad: patchQuad, defaultGraph: patchDefaultGraph } = N3DataFactory;
+
+function termFromId(value) {
+  return typeof value === 'string' && value.startsWith('_:')
+    ? patchBlankNode(value.slice(2))
+    : patchNamedNode(value);
+}
+
+function termFromPatchObject(object) {
+  if (typeof object === 'string') {
+    return (object.startsWith('http://') || object.startsWith('https://'))
+      ? patchNamedNode(object)
+      : patchLiteral(object);
+  }
+  if (object && typeof object === 'object') {
+    if (object.blankNode !== undefined) return patchBlankNode(object.blankNode);
+    if (object['@id'] !== undefined) return termFromId(object['@id']);
+    const val = object.value !== undefined ? object.value : object['@value'];
+    const type = object.type !== undefined ? object.type : object['@type'];
+    const lang = object.language !== undefined ? object.language : object['@language'];
+    if (val !== undefined && type !== undefined) return patchLiteral(val, patchNamedNode(type));
+    if (val !== undefined && lang !== undefined) return patchLiteral(val, lang);
+    if (val !== undefined) return patchLiteral(val);
+  }
+  return patchLiteral(String(object));
+}
+
+// Applies {deletes, inserts} directly on the rdf-ext dataset, scoped to the
+// DEFAULT graph only: deletes that match nothing are silent no-ops (dataset
+// deleteMatches over an empty match set is a no-op by construction — same
+// observable behavior the old document-level deleteTriple had), and named
+// graph quads in .nq-stored docs (non-default graph) are never touched, so
+// they survive untouched. solid:where stays ignored (pre-existing gap, out
+// of scope — neither parser's `where` array is consulted here either).
+function applyPatchToDataset(dataset, { deletes = [], inserts = [] }) {
+  for (const t of deletes) {
+    dataset.deleteMatches(
+      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object), patchDefaultGraph());
+  }
+  for (const t of inserts) {
+    dataset.add(patchQuad(
+      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object), patchDefaultGraph()));
+  }
+}
+
 /**
  * #7 (Solid #server-patch-n3-accept MUST): PATCH a verbatim-stored
  * Turtle-family resource (resourceExists && storedType is Turtle/N3/NT/NQ).
- * Projects stored bytes -> RDF dataset -> expanded JSON-LD (the same seam
- * the serving arm uses, src/rdf/serve.js datasetToJsonLd) since both
- * n3-patch.js and sparql-update.js operate at the JSON-LD document level,
- * then serializes back through toDataset/datasetToFormat so the write lands
- * in the SAME stored format — Content-Type identity is preserved.
+ * Parses stored bytes -> RDF dataset (toDataset) and applies the parsed
+ * patch directly on that dataset (applyPatchToDataset) — no JSON-LD
+ * document projection — then serializes back through datasetToFormat so
+ * the write lands in the SAME stored format — Content-Type identity is
+ * preserved.
  */
 async function patchTurtleFamilyResource(request, reply, { storagePath, resourceUrl, storedType, isSparqlUpdate }) {
   const existingContent = await storage.read(storagePath);
@@ -2108,14 +2165,8 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
       instance: resourceUrl,
     }, null, 2));
   }
-  // datasetToJsonLd returns a bare array of expanded nodes (jsonld.fromRDF's
-  // default-graph form) — neither patch applier's native shape (n3-patch.js
-  // wants {'@graph': [...]}, sparql-update.js wants the bare array), so each
-  // branch below adapts on the way in/out rather than changing the appliers.
-  const nodes = await datasetToJsonLd(dataset);
 
   const patchContent = Buffer.isBuffer(request.body) ? request.body.toString() : request.body;
-  let updatedNodes;
 
   if (isSparqlUpdate) {
     let update;
@@ -2125,9 +2176,7 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
       return reply.code(400).send({ error: 'Bad Request', message: 'Invalid SPARQL Update: ' + e.message });
     }
     try {
-      const result = applySparqlUpdate(nodes, update, resourceUrl);
-      // applySparqlUpdate collapses a single-node result to a bare object.
-      updatedNodes = Array.isArray(result) ? result : [result];
+      applyPatchToDataset(dataset, update);
     } catch (e) {
       return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply SPARQL Update: ' + e.message });
     }
@@ -2139,20 +2188,13 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
       return reply.code(400).send({ error: 'Bad Request', message: 'Invalid N3 Patch format: ' + e.message });
     }
     try {
-      const result = applyN3Patch({ '@graph': nodes }, patch, resourceUrl);
-      updatedNodes = Array.isArray(result['@graph']) ? result['@graph'] : nodes;
+      applyPatchToDataset(dataset, patch);
     } catch (e) {
       return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply patch: ' + e.message });
     }
   }
 
-  let updatedDataset;
-  try {
-    updatedDataset = await toDataset(JSON.stringify(updatedNodes), RDF_TYPES.JSON_LD, resourceUrl);
-  } catch (e) {
-    return reply.code(409).send({ error: 'Conflict', message: 'Patch produced an invalid document: ' + e.message });
-  }
-  const updatedContent = await datasetToFormat(updatedDataset, QUADS_OUTPUTS[storedType] || RDF_TYPES.NQUADS);
+  const updatedContent = await datasetToFormat(dataset, QUADS_OUTPUTS[storedType] || RDF_TYPES.NQUADS);
 
   const success = await storage.write(storagePath, Buffer.from(updatedContent));
   if (!success) {

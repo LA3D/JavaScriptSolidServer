@@ -275,14 +275,6 @@ export function applyN3Patch(document, patch, baseUri) {
   // Clone the document
   let doc = JSON.parse(JSON.stringify(document));
 
-  // task-6 review #1: only a document WITH an @context can resolve prefixed
-  // keys ("dc:title") back to vocabulary IRIs. On a context-free document
-  // (the #7 Turtle-family path projects stored bytes to EXPANDED JSON-LD)
-  // a compacted key re-parses as a literal scheme-IRI (<dc:title>) — silent
-  // corruption — so inserts must emit the full predicate IRI as the key.
-  // Legacy JSON-LD-stored docs (which do carry @context) keep compaction.
-  const compact = doc !== null && typeof doc === 'object' && '@context' in doc;
-
   // Handle @graph array or single object
   const isGraph = Array.isArray(doc['@graph']);
   let nodes = isGraph ? doc['@graph'] : [doc];
@@ -294,7 +286,7 @@ export function applyN3Patch(document, patch, baseUri) {
 
   // Then apply inserts
   for (const triple of patch.inserts) {
-    nodes = insertTriple(nodes, triple, baseUri, compact);
+    nodes = insertTriple(nodes, triple, baseUri);
   }
 
   // Reconstruct document
@@ -345,10 +337,8 @@ function deleteTriple(nodes, triple, baseUri) {
 
 /**
  * Insert a triple into JSON-LD nodes
- * `compact` — whether the enclosing document can resolve prefixed keys
- * (i.e. carries an @context); without one the key must be the full IRI.
  */
-function insertTriple(nodes, triple, baseUri, compact = true) {
+function insertTriple(nodes, triple, baseUri) {
   const { subject, predicate, object } = triple;
 
   // Find or create the subject node
@@ -365,7 +355,7 @@ function insertTriple(nodes, triple, baseUri, compact = true) {
   }
 
   // Add the predicate-object
-  const predicateKey = compact ? compactPredicate(predicate) : predicate;
+  const predicateKey = compactPredicate(predicate);
   const objectValue = convertToJsonLd(object);
 
   if (subjectNode[predicateKey]) {
