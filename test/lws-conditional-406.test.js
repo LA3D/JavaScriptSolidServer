@@ -6,7 +6,7 @@
 // either 406 gate.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startTestServer, stopTestServer, request, createTestPod, getBaseUrl } from './helpers.js';
+import { startTestServer, stopTestServer, request, createTestPod, getBaseUrl, assertStatus } from './helpers.js';
 
 describe('lws: 304 never beats 406', () => {
   let etag;
@@ -131,5 +131,76 @@ describe('lws: 304-wins-over-303 and 406-never-304 — containers', () => {
       auth: 'c46cont',
     });
     assert.equal(r.status, 406);
+  });
+});
+
+describe('#4 (RFC 9110 §13.2.2): pending RDF conversion defers the early 304; 406 carries no ETag', () => {
+  // NG's Turtle conversion 406s (named-graph lossiness); DG's converts fine
+  // (default graph). Both under /public/ so GET/HEAD need no bearer — only
+  // the PUT setup does, mirroring test/lws-serving-path.test.js's fixture.
+  const NG = '/c47/public/namedgraph.jsonld';
+  const DG = '/c47/public/defaultgraph.jsonld';
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true });
+    await createTestPod('c47');
+    const base = getBaseUrl();
+    await request(NG, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'c47',
+      body: JSON.stringify({
+        '@context': { name: 'https://schema.org/name' }, '@id': `${base}${NG}#g`,
+        '@graph': [{ '@id': `${base}${NG}#a`, name: 'A' }],
+      }),
+    });
+    await request(DG, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'c47',
+      body: JSON.stringify({ '@context': { name: 'https://schema.org/name' }, '@id': `${base}${DG}#a`, name: 'A' }),
+    });
+  });
+  after(stopTestServer);
+
+  it('sanity: the named-graph fixture 406s on Turtle (lossy) — the arm this whole block exercises', async () => {
+    const r = await request(NG, { headers: { Accept: 'text/turtle' } });
+    assert.equal(r.status, 406);
+  });
+
+  it('replaying a variant ETag against a would-406 conversion answers 406, never 304 (review #4)', async () => {
+    const own = await request(NG, { headers: { Accept: 'application/ld+json' } });   // own-format 200, bare etag
+    const ttlVariant = own.headers.get('etag').replace(/"$/, '-ttl"');               // the etag a pre-fix 406 leaked
+    const r = await request(NG, { headers: { Accept: 'text/turtle', 'If-None-Match': ttlVariant } });
+    assertStatus(r, 406);
+  });
+
+  it('406 responses carry no ETag (no replayable validator for a non-representation)', async () => {
+    const r = await request(NG, { headers: { Accept: 'text/turtle' } });
+    assertStatus(r, 406);
+    assert.equal(r.headers.get('etag'), null);
+  });
+
+  it('deferred conversion 304 still works when the conversion succeeds', async () => {
+    const ok = await request(DG, { headers: { Accept: 'text/turtle' } });            // default-graph doc converts fine
+    assertStatus(ok, 200);
+    const r = await request(DG, { headers: { Accept: 'text/turtle', 'If-None-Match': ok.headers.get('etag') } });
+    assertStatus(r, 304);
+  });
+
+  it('HEAD: would-406 + matching If-None-Match answers 406 (parity)', async () => {
+    const own = await request(NG, { headers: { Accept: 'application/ld+json' } });
+    const ttlVariant = own.headers.get('etag').replace(/"$/, '-ttl"');
+    const r = await request(NG, { method: 'HEAD', headers: { Accept: 'text/turtle', 'If-None-Match': ttlVariant } });
+    assertStatus(r, 406);
+  });
+
+  it('HEAD 406 responses carry no ETag', async () => {
+    const r = await request(NG, { method: 'HEAD', headers: { Accept: 'text/turtle' } });
+    assertStatus(r, 406);
+    assert.equal(r.headers.get('etag'), null);
+  });
+
+  it('HEAD: deferred conversion 304 still works when the conversion succeeds', async () => {
+    const ok = await request(DG, { method: 'HEAD', headers: { Accept: 'text/turtle' } });
+    assertStatus(ok, 200);
+    const r = await request(DG, { method: 'HEAD', headers: { Accept: 'text/turtle', 'If-None-Match': ok.headers.get('etag') } });
+    assertStatus(r, 304);
   });
 });

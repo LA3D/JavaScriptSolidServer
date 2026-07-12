@@ -266,6 +266,24 @@ function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storag
   return stats.etag;
 }
 
+// #4 (RFC 9110 §13.2.2): a real RDF conversion can still 406 (parse-fail /
+// named-graph lossiness), and that outcome needs the bytes — so the zero-I/O
+// early 304 defers whenever a conversion arm will run; the arm re-checks
+// If-None-Match only after its outcome is known. Own-format reads (bytes are
+// bytes) can never 406 and keep the early check. Mirrors predictFileEtag's
+// negotiation exactly (same negotiateQuadsTarget call shape) — one seam for
+// both GET and HEAD.
+function pendingConversion(request, storagePath, urlPath) {
+  if (!request.lwsEnabled) return false;
+  const stored = getContentType(storagePath);
+  if (!isRdfSourceType(stored)) return false;
+  const acceptHeader = request.headers.accept || '';
+  if (selectContentType(acceptHeader, true) === RDF_TYPES.LINKSET) return false; // generated, never 406s
+  const quadsTarget = negotiateQuadsTarget(acceptHeader, true, true, urlPath);
+  if (quadsTarget) return !(QUADS_OUTPUTS[stored] === quadsTarget && stored !== RDF_TYPES.N3); // isOwnFormat mirror
+  return stored !== RDF_TYPES.JSON_LD;   // ld+json target: converts unless self
+}
+
 /**
  * Handle GET request
  */
@@ -317,16 +335,22 @@ export async function handleGet(request, reply) {
     && !isRdfSourceType(storedContentType)
     && !acceptSatisfiable(request.headers.accept || '', storedContentType);
   const hasAcceptProfile = !!(request.lwsProfileConneg && request.headers['accept-profile']);
+  // #4 (RFC 9110 §13.2.2): a real RDF conversion (quads or ld+json arm,
+  // ~line 1073/1097) can still 406 on parse-fail / named-graph lossiness —
+  // defer the early 304 until that arm knows its outcome (re-check lives in
+  // the serving arm itself, right after `served.ok` is known).
+  const conversionPending = !stats.isDirectory && pendingConversion(request, storagePath, urlPath);
 
   // For non-containers, check If-None-Match early using the predicted
   // representation ETag (Task 10). For containers, defer the check until
   // we know which branch (index.html vs listing vs mashlib) will run —
   // each uses a different ETag source (#456). Deferred here too when a 406
-  // gate hasn't resolved yet (wouldNotNegotiate) or Accept-Profile was sent
+  // gate hasn't resolved yet (wouldNotNegotiate), Accept-Profile was sent
   // (hasAcceptProfile — the profile-negotiation block below decides; the
-  // deferred re-check sits right after it resolves, spec §3).
+  // deferred re-check sits right after it resolves, spec §3), or a real
+  // conversion is pending (conversionPending — re-checked in the serving arm).
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile) {
+  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
@@ -829,9 +853,10 @@ export async function handleGet(request, reply) {
   // Deferred 304 (spec §3): the early check above skipped when Accept-Profile
   // was sent, because the profile outcome wasn't known yet. It's known now —
   // redirect/notacceptable already returned above, so reaching here means the
-  // profile arm would succeed. wouldNotNegotiate (media F3 arm) still applies
-  // unconditionally: never 304 a request that F3 would 406 below.
-  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+  // profile arm would succeed. wouldNotNegotiate (media F3 arm) and
+  // conversionPending (#4 — a real RDF conversion could still 406 below)
+  // still apply unconditionally: never 304 a request either arm would 406.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
@@ -1081,9 +1106,21 @@ export async function handleGet(request, reply) {
         const quadsTarget = negotiateQuadsTarget(acceptHeader, negotiate, true, urlPath);
         if (quadsTarget) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
+          // #4 (RFC 9110 §13.2.2): the early check deferred here
+          // (conversionPending) because this conversion could 406 — the
+          // outcome is known now, so a successful conversion still honors a
+          // conditional revalidation instead of always paying the 200.
+          if (served.ok && ifNoneMatch) {
+            const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+            if (!check.ok && check.notModified) {
+              reply.header('ETag', fileEtag);
+              reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+              return reply.code(304).send();
+            }
+          }
           const headers = getAllHeaders({
             isContainer: false,
-            etag: fileEtag,
+            etag: served.ok ? fileEtag : null,   // #4: no replayable validator for a non-representation
             contentType: served.ok ? served.contentType : 'application/problem+json',
             origin,
             resourceUrl,
@@ -1105,9 +1142,18 @@ export async function handleGet(request, reply) {
         // arm below assumes JSON-parseable bytes, which no longer holds.
         if (storedContentType !== RDF_TYPES.JSON_LD) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: RDF_TYPES.JSON_LD, baseIri: resourceUrl });
+          // #4: same deferred re-check as the quads arm above.
+          if (served.ok && ifNoneMatch) {
+            const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+            if (!check.ok && check.notModified) {
+              reply.header('ETag', fileEtag);
+              reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+              return reply.code(304).send();
+            }
+          }
           const headers = getAllHeaders({
             isContainer: false,
-            etag: fileEtag,
+            etag: served.ok ? fileEtag : null,   // #4: no replayable validator for a non-representation
             contentType: served.ok ? served.contentType : 'application/problem+json',
             origin,
             resourceUrl,
@@ -1566,10 +1612,15 @@ export async function handleHead(request, reply) {
     && !isRdfSourceType(storedContentType)
     && !acceptSatisfiable(request.headers.accept || '', storedContentType);
   const hasAcceptProfile = !skipProfileNegotiation && !!(request.lwsProfileConneg && request.headers['accept-profile']);
+  // #4 (RFC 9110 §13.2.2): mirrors GET's conversionPending — HEAD's
+  // negotiateHeadFileContentType (below) runs the same conversion arm and
+  // can answer notAcceptable the same way, so the early 304 defers the same.
+  const conversionPending = !stats.isDirectory && !isMashlibResponse
+    && pendingConversion(request, storagePath, urlPath);
 
   // Check If-None-Match using the final ETag (#456)
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile) {
+  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
@@ -1621,9 +1672,10 @@ export async function handleHead(request, reply) {
 
   // Deferred 304 (spec §3): reached only when the original check above
   // skipped for hasAcceptProfile — redirect/notacceptable already returned,
-  // so the profile arm would succeed. wouldNotNegotiate still applies
-  // unconditionally: never 304 a request the F3 gate below would 406.
-  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+  // so the profile arm would succeed. wouldNotNegotiate and conversionPending
+  // (#4 — the RDF conversion arm below could still 406) still apply
+  // unconditionally: never 304 a request either arm would 406.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
@@ -1663,6 +1715,17 @@ export async function handleHead(request, reply) {
         if (negotiation.link) reply.header('Link', negotiation.link);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(406).type('application/problem+json').send();
+      }
+      // #4: the early checks above deferred here (conversionPending) because
+      // this conversion could 406 — now that negotiateHeadFileContentType
+      // resolved without one, re-check If-None-Match before falling through.
+      if (ifNoneMatch && conversionPending) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', headEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
       }
       contentType = negotiation.contentType;
       negotiationConverted = negotiation.converted;
