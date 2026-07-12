@@ -12,7 +12,7 @@
 import * as storage from '../storage/filesystem.js';
 import { AccessMode } from '../wac/parser.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeTypes, sanitizeField, sanitizeDeep } from './sanitize.js';
+import { sanitizeTypes, sanitizeField, sanitizeDeep, sanitizeReps } from './sanitize.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { storageDescriptionUrl } from '../lws/storage-description.js';
@@ -69,8 +69,10 @@ export async function localLinks(path, ctx) {
   // an alternate the caller can't Read is simply absent, never
   // surfaced-then-denied (no-oracle). The default/canonical rep is never
   // filtered — the caller is already reading this resource.
-  const reps = await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
-    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public });
+  // href/format/profile are client-controlled (declared on .meta) — strip
+  // hidden chars before they reach the model (review #3).
+  const reps = sanitizeReps(await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
+    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public }));
   if (reps.default || reps.alternates.length) {
     Object.assign(links, { canonical: reps.default, alternates: reps.alternates });
   }
@@ -224,10 +226,15 @@ export async function read_resource({ uri }, ctx) {
   // the untrusted-content fence's envelope type (text/plain) when the body is
   // fenced; the fence's own "original type" label already carries the real
   // type in prose, this just exposes it structurally too (probe #7 A5).
+  // #13: extension-derived only when the extension actually resolves —
+  // containers, /.well-known/*, and extensionless resources report the
+  // trust/view type (c.mimeType), agreeing with the resources/read primitive.
+  const extType = getContentType(path);
+  const mimeType = extType !== 'application/octet-stream' ? extType : c.mimeType;
   return {
     content: [
       { type: 'text', text: c.text },
-      { type: 'text', text: JSON.stringify({ uri, mimeType: getContentType(path), links }, null, 2) },
+      { type: 'text', text: JSON.stringify({ uri, mimeType, links }, null, 2) },
     ],
     isError: false,
   };

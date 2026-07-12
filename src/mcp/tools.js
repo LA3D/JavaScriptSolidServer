@@ -23,7 +23,7 @@ import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeTypes } from './sanitize.js';
+import { sanitizeTypes, sanitizeField, sanitizeReps } from './sanitize.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
 import { isLocalUri, uriToPath } from './uri.js';
@@ -326,9 +326,11 @@ async function lws_type_search(args, ctx) {
     agentWebId: ctx.webId, origin: ctx.origin, neededRelations,
   });
   const matched = resources.filter((r) => matchesFilter(r, filter));
+  // id/type are client-controlled (resource path, declared rel="type" values)
+  // — strip hidden chars before they reach the model (review #12).
   return toolJson({
     type: 'ContainerPage', totalItems: matched.length,
-    items: matched.map((r) => ({ id: r.id, type: containerItemTypes(r.types) })),
+    items: matched.map((r) => ({ id: sanitizeField(r.id), type: sanitizeTypes(containerItemTypes(r.types)) })),
   });
 }
 
@@ -435,8 +437,12 @@ async function describe_resource({ path, uri }, ctx) {
   // read the MCP links carrier uses (read-tools.js localLinks) and the HTTP
   // linkset advertises, so conneg-by-profile is discoverable from inside MCP
   // too (probe #7 A2).
-  const representations = await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
-    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public });
+  // href/format/profile are client-controlled (declared on .meta) — strip
+  // hidden chars before this feeds the linkset below (review #3, second
+  // site; the wrap happens here so BOTH generateLinkset and any direct
+  // field read the sanitized object).
+  const representations = sanitizeReps(await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
+    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public }));
   const linkset = generateLinkset(buildUrl(ctx, path), {
     parentUrl: buildUrl(ctx, parentPath(path)),
     isContainer, describedByShapes: shapes, declaredTypes: declared, conformsTo,

@@ -60,6 +60,25 @@ export function sanitizeJsonLeaves(v) {
   return v;
 }
 
+// A representation descriptor from client-managed .meta (altr: model) headed
+// for a model-bound response: href/format/profile are client-controlled —
+// strip each (review #3). HTTP linksets stay raw (not model-bound).
+export function sanitizeRep(rep) {
+  if (!rep || typeof rep !== 'object') return rep;
+  const out = { ...rep };
+  for (const k of ['href', 'format', 'profile']) {
+    if (typeof out[k] === 'string') out[k] = stripHidden(out[k]);
+  }
+  return out;
+}
+export function sanitizeReps(reps) {
+  if (!reps) return reps;
+  return {
+    default: reps.default ? sanitizeRep(reps.default) : reps.default,
+    alternates: Array.isArray(reps.alternates) ? reps.alternates.map(sanitizeRep) : [],
+  };
+}
+
 // Recursively strip hidden chars from every string in an arbitrary JSON value.
 // For federated content (read_resource's remote arm — its body) — the
 // least-trusted source on the pod — where the shape is a foreign resource
