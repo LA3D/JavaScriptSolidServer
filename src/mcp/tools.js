@@ -15,6 +15,7 @@ import { resourceEvents, emitChange } from '../notifications/events.js';
 import { toolText, toolError, toolJson } from './protocol.js';
 import { admissionError } from './errors.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { extensionForRdfType } from '../lws/write-consistency.js';
 import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
 import { generateLinkset } from '../lws/linkset.js';
@@ -75,7 +76,10 @@ async function create_resource({ container, slug, content, contentType, isContai
   if (!(await storage.exists(container))) {
     return toolError(`container not found: ${container}`);
   }
-  const name = await storage.generateUniqueFilename(container, slug || null, !!isContainer);
+  // #9: a slug-less RDF create derives its extension from the submitted type,
+  // same as the HTTP POST-to-container path — see src/handlers/container.js.
+  const name = await storage.generateUniqueFilename(container, slug || null, !!isContainer,
+    (!isContainer && ctx.lwsEnabled) ? extensionForRdfType(contentType || 'text/plain') : '');
   const childPath = `${container}${name}${isContainer ? '/' : ''}`;
   if (isContainer) {
     await storage.createContainer(childPath);

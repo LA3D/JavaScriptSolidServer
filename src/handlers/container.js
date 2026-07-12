@@ -11,6 +11,7 @@ import { emitChange } from '../notifications/events.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { extensionForRdfType } from '../lws/write-consistency.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -87,8 +88,12 @@ export async function handlePost(request, reply) {
   // Check if creating a container (Link header contains ldp:Container or ldp:BasicContainer)
   const isCreatingContainer = linkHeader.includes('Container') || linkHeader.includes('BasicContainer');
 
-  // Generate unique filename
-  const filename = await storage.generateUniqueFilename(storagePath, slug, isCreatingContainer);
+  // Generate unique filename. #9: a slug-less RDF create derives its extension
+  // from the submitted type so the server's own name never trips the write-
+  // consistency gate (a name it assigned itself, extensionless, otherwise 400s).
+  const defaultExt = (request.lwsEnabled && !isCreatingContainer)
+    ? extensionForRdfType(contentType) : '';
+  const filename = await storage.generateUniqueFilename(storagePath, slug, isCreatingContainer, defaultExt);
   const newUrlPath = urlPath + filename + (isCreatingContainer ? '/' : '');
   const newStoragePath = storagePath + filename + (isCreatingContainer ? '/' : '');
   const resourceUrl = `${request.protocol}://${request.hostname}${newUrlPath}`;

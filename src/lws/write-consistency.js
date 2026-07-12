@@ -7,11 +7,11 @@
 // JSON-LD stays IN the gate (B1 fix round 1 review): the write path stores it verbatim
 // like every other RDF type now, so a JSON-LD body at a Turtle/N3/N-Triples/N-Quads-
 // named path is the exact name/type lie this gate exists to catch. Two shapes are
-// legitimate and pass: extensionless (application/octet-stream — JSS's standard
-// resource-creation idiom: POST slug-less create, MCP shape/typed-resource writes,
-// ACL/.meta) and `.jsonld` (application/ld+json) — getContentType() maps both .acl
-// and .meta basenames straight to application/ld+json too, so those fall into the
-// second shape rather than needing a special case.
+// legitimate and pass: extensionless (application/octet-stream — JSON-LD's legacy
+// creation idiom: MCP shape/typed-resource writes, ACL/.meta) and `.jsonld`
+// (application/ld+json) — getContentType() maps both .acl and .meta basenames
+// straight to application/ld+json too, so those fall into the second shape rather
+// than needing a special case.
 //
 // Review 2026-07-12 (#2, #10): the gate runs inside applyLwsWrite now — the
 // choke point every write surface (HTTP PUT/POST + all MCP write tools)
@@ -19,6 +19,11 @@
 // application/json gates as JSON-LD (#10, asRdf below); a non-RDF body at an
 // RDF-extension name is refused (#2 — admission would skip SHACL for it on
 // write, yet the serving path RDF-serves the name on read).
+//
+// Review 2026-07-12 (#9): POST slug-less create no longer relies on the
+// extensionless-RDF shape above — the server derives the extension from the
+// submitted RDF type (extensionForRdfType below) so a name it assigns itself
+// never trips this gate. JSON-LD is the one type left extensionless by design.
 import { getContentType } from '../utils/url.js';
 import { RDF_TYPES } from '../rdf/conneg.js';
 
@@ -29,6 +34,18 @@ const main = (t) => (t || '').split(';')[0].trim().toLowerCase();
 // #10 (review 2026-07-12): plain application/json gates as JSON-LD — the rest
 // of the pipeline already reads it that way (isRdfType/toJsonLd/isRdfBody).
 const asRdf = (t) => (t === 'application/json' ? RDF_TYPES.JSON_LD : t);
+
+// #9: the canonical extension per gated RDF type — slug-less POST/create
+// derives the server-assigned name from it so the gate's own rule is never
+// violated by a name the SERVER chose. JSON-LD absent on purpose:
+// extensionless JSON-LD is the legitimate legacy creation shape.
+export const RDF_EXTENSIONS = {
+  [RDF_TYPES.TURTLE]: '.ttl',
+  [RDF_TYPES.N3]: '.n3',
+  [RDF_TYPES.NTRIPLES]: '.nt',
+  [RDF_TYPES.NQUADS]: '.nq',
+};
+export const extensionForRdfType = (contentType) => RDF_EXTENSIONS[main(contentType)] || '';
 
 export function writeTypeConsistency({ urlPath, submittedType, lwsEnabled }) {
   if (!lwsEnabled) return { ok: true };
