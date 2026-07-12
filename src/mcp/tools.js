@@ -21,8 +21,8 @@ import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeBody, sanitizeTypes } from './sanitize.js';
-import { readBounded, MAX_BODY_BYTES } from './read.js';
+import { sanitizeTypes } from './sanitize.js';
+import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
 import { isLocalUri, uriToPath } from './uri.js';
 
@@ -412,9 +412,10 @@ async function describe_resource({ path, uri }, ctx) {
     const r = await readBounded(path);              // bounded read, shared limit (#5/#6/#12)
     if (r) {
       truncated = r.truncated;
-      let label = 'untrusted pod content';
-      if (truncated) label += ` (truncated: first ${MAX_BODY_BYTES} of ${r.bytes} bytes)`;
-      body = sanitizeBody(r.text, label);
+      // Same trust decision as resources/read and read_resource (dt5): RDF/
+      // JSON-LD structure-preserved, opaque/free-text fenced — not an
+      // unconditional envelope.
+      body = sanitizeForTrust(path, r).text;
     }
   }
   const declared = sanitizeTypes(await readDeclaredTypes(storage, path));
