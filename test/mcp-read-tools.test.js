@@ -86,6 +86,51 @@ test('read_resource local: WAC denial is a teaching error, not a throw (no-oracl
   assert.match(res.content[0].text, /access denied|not found/i);
 });
 
+test('read_resource local: WAC denial reads "not found or not authorized" — a single indistinguishable string (probe #7 A8)', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/private2.json`, '{}');         // owner-only
+  const anon = { ...ownerCtx(p), webId: null };
+  const res = await callTool('read_resource', { uri: `${p.origin}/${p.podName}/private2.json` }, anon);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /not found or not authorized/);
+});
+
+test('read_resource local: a genuinely missing resource reads the SAME "not found or not authorized" string (no oracle)', async (t) => {
+  const p = await startLwsPod(t);
+  const ctx = { ...ownerCtx(p), lwsEnabled: true };
+  const res = await callTool('read_resource', { uri: `${p.origin}/${p.podName}/does-not-exist.json` }, ctx);
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /not found or not authorized/);
+});
+
+test('read_resource local: a markdown card reports its real mimeType (text/markdown), not the fence envelope\'s text/plain (probe #7 A5)', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/note.md`, '# hi', { publicRead: true });
+  const ctx = { ...ownerCtx(p), lwsEnabled: true };
+  const res = await callTool('read_resource', { uri: `${p.origin}/${p.podName}/note.md` }, ctx);
+  assert.equal(res.isError ?? false, false, JSON.stringify(res));
+  const meta = JSON.parse(res.content[1].text);
+  assert.equal(meta.mimeType, 'text/markdown');
+});
+
+test('describe_resource: WAC denial and not-found both read "not found or not authorized" (probe #7 A8)', async (t) => {
+  const p = await startLwsPod(t);
+  await putFile(p, `/${p.podName}/private3.json`, '{}');         // owner-only
+  const anon = { ...ownerCtx(p), webId: null };
+  const denied = await callTool('describe_resource', { path: `/${p.podName}/private3.json` }, anon);
+  assert.equal(denied.isError, true);
+  assert.match(denied.content[0].text, /not found or not authorized/);
+  const ctx = { ...ownerCtx(p), lwsEnabled: true };
+  const missing = await callTool('describe_resource', { path: `/${p.podName}/nope.json` }, ctx);
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /not found or not authorized/);
+});
+
+test('lws_type_search tool description documents empty-args = full inventory (probe #7 A9)', () => {
+  assert.match(TOOLS.lws_type_search.description, /Empty arguments return the full/);
+  assert.match(TOOLS.lws_type_search.description, /repeat to AND, comma to OR/);
+});
+
 test('read_resource remote: federation gate blocks anonymous; owner passes and links pass through', async (t) => {
   const p = await startLwsPod(t);
   // A genuinely foreign origin: a stub server on another port serving ordinary

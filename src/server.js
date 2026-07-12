@@ -584,7 +584,7 @@ export function createServer(options = {}) {
   // routes registered directly/synchronously on this outer instance).
   if (mcpEnabled) {
     const mcpRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax) } };
-    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfig });
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfig, anonRateLimitMax });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
@@ -1064,7 +1064,7 @@ export function createServer(options = {}) {
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
       const { profileIndex, void: voidPath } = await podConfig.get();
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, mcpEnabled });
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, mcpEnabled, anonRateLimitMax });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

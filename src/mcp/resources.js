@@ -28,13 +28,15 @@ function jsonContents(uri, obj, mimeType = 'application/json') {
 
 // WAC-check BEFORE storage.exists so a denied read is indistinguishable from
 // not-found where existence is privileged (spec §4, mirrors the HTTP layer).
+// Both branches throw the SAME wording (probe #7 A8) — not just the same
+// order — so the response text itself can never hint which branch fired.
 async function requireRead(ctx, path, uri) {
   if (!(await wac(ctx, path, AccessMode.READ))) {
-    throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `access denied: read ${uri}`);
+    throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found or not authorized: ${uri}`);
   }
 }
 function requireExists(exists, uri) {
-  if (!exists) throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found: ${uri}`);
+  if (!exists) throw new ResourceError(RPC_ERRORS.ACCESS_DENIED, `not found or not authorized: ${uri}`);
 }
 
 // --- fixed resolvers (real .well-known URLs) ---------------------------------
@@ -72,6 +74,7 @@ async function readStorageDescription(ctx, uri) {
     profileIndexPath: ctx.profileIndexPath, voidPath: ctx.voidPath,
     profileConnegEnabled: ctx.profileConnegEnabled,
     mcpEnabled: true,
+    anonRateLimitMax: ctx.anonRateLimitMax,
   });
   return jsonContents(uri, withInlineContext(sd), 'application/lws+json');
 }

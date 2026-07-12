@@ -51,7 +51,7 @@ test('describe_resource returns anchor/type in its linkset, WAC-gated', async (t
   await seedTyped(pod, '/lwsmcp/priv/b', 'https://ex/Note', { publicRead: false });
   const denied = await callTool('describe_resource', { path: '/lwsmcp/priv/b' }, { webId: null, origin: pod.origin });
   assert.equal(denied.isError, true, 'anonymous must be denied the linkset for a private resource');
-  assert.match(denied.content[0].text, /access denied/i);
+  assert.match(denied.content[0].text, /not found or not authorized/i);
 });
 
 // Round-trips through the real /mcp HTTP route (not a hand-built ctx) so

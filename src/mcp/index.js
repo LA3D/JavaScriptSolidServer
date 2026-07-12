@@ -209,6 +209,10 @@ export async function mcpPlugin(fastify, options = {}) {
   // present (server.js always constructs one); the fallback here only
   // covers direct mcpPlugin-registration call sites (e.g. tests) that don't.
   const podConfig = options.podConfig || { get: async () => ({}) };
+  // Threaded from server.js's anonRateLimitMax (same const the HTTP
+  // storage-description route reads) so the McpService hint's budget
+  // sentence can never drift between the two surfaces (task 6, parity).
+  const anonRateLimitMax = options.anonRateLimitMax ?? null;
   fastify.post('/mcp', routeOptions, async (request, reply) => {
     const body = request.body;
     if (!body || typeof body !== 'object') {
@@ -246,7 +250,8 @@ export async function mcpPlugin(fastify, options = {}) {
       profileIndexPath: profileIndex || null,
       voidPath: voidPath || null,
       notificationsEnabled: request.notificationsEnabled || false,
-      profileConnegEnabled: request.lwsProfileConneg || false
+      profileConnegEnabled: request.lwsProfileConneg || false,
+      anonRateLimitMax
     };
 
     // Streaming tool? Hand off to SSE handler.

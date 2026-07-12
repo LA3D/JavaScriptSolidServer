@@ -14,7 +14,9 @@ import { AccessMode } from '../wac/parser.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 import { sanitizeTypes, sanitizeField, sanitizeDeep } from './sanitize.js';
 import { describedbyTargets } from '../lws/constraint.js';
+import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { storageDescriptionUrl } from '../lws/storage-description.js';
+import { getContentType } from '../utils/url.js';
 import { toolError, toolJson } from './protocol.js';
 import { readResource } from './resources.js';
 import { ResourceError } from './errors.js';
@@ -59,6 +61,17 @@ export async function localLinks(path, ctx) {
   if (path !== '/' && !path.startsWith('/.well-known/')) links.up = buildUrl(ctx, parentPath(path));
   const shapes = sanitizeTypes(await describedbyTargets(storage, path + '.meta', buildUrl(ctx, path)));
   if (shapes.length) links.describedby = shapes;
+  // Alternate representations (altr: model, declared on .meta) — the SAME
+  // authz-filtered read the HTTP linkset uses (src/lws/representations.js),
+  // so conneg-by-profile is discoverable from inside MCP too (probe #7 A2):
+  // an alternate the caller can't Read is simply absent, never
+  // surfaced-then-denied (no-oracle). The default/canonical rep is never
+  // filtered — the caller is already reading this resource.
+  const reps = await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
+    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public });
+  if (reps.default || reps.alternates.length) {
+    Object.assign(links, { canonical: reps.default, alternates: reps.alternates });
+  }
   return links;
 }
 
@@ -144,11 +157,16 @@ export async function read_resource({ uri }, ctx) {
     throw e;
   }
   const c = out.contents[0];
-  const links = await localLinks(uriToPath(ctx.origin, uri), ctx);
+  const path = uriToPath(ctx.origin, uri);
+  const links = await localLinks(path, ctx);
+  // The true stored content type (e.g. text/markdown), not c.mimeType — that's
+  // the untrusted-content fence's envelope type (text/plain) when the body is
+  // fenced; the fence's own "original type" label already carries the real
+  // type in prose, this just exposes it structurally too (probe #7 A5).
   return {
     content: [
       { type: 'text', text: c.text },
-      { type: 'text', text: JSON.stringify({ uri, mimeType: c.mimeType, links }, null, 2) },
+      { type: 'text', text: JSON.stringify({ uri, mimeType: getContentType(path), links }, null, 2) },
     ],
     isError: false,
   };
