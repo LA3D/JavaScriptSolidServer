@@ -1,11 +1,12 @@
 /**
  * LWS VoID Route Tests (spec §5)
  *
- * Tests GET /.well-known/void when --lws-void is configured/unconfigured.
- * P13: the fork only ROUTES to a configured pod resource — it never
- * generates VoID content itself (that document is data, materialized by
- * the lws-pod publish pipeline in a later task). This route is a 303
- * redirect to whatever pod resource --lws-void names.
+ * Tests GET /.well-known/void when the `void` pointer in the --lws-config
+ * pod resource (spec §4b) is configured/unconfigured. P13: the fork only
+ * ROUTES to a configured pod resource — it never generates VoID content
+ * itself (that document is data, materialized by the lws-pod publish
+ * pipeline in a later task). This route is a 303 redirect to whatever pod
+ * resource the config's `void` field names.
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -17,16 +18,23 @@ import {
   getBaseUrl,
   assertStatus,
 } from './helpers.js';
+import * as storage from '../src/storage/filesystem.js';
 
 const VOID_PATH = '/.well-known/void';
+const CONFIG_PATH = '/alice/profiles/pod-config.jsonld';
 
 describe('lws: /.well-known/void rung', () => {
-  describe('configured (--lws-void set)', () => {
+  describe('configured (--lws-config names a void pointer)', () => {
     let base;
 
     before(async () => {
-      await startTestServer({ lws: true, lwsVoid: '/alice/profiles/void.jsonld' });
+      await startTestServer({ lws: true, lwsConfig: CONFIG_PATH });
       base = getBaseUrl();
+      // Written directly to storage (bypassing HTTP/pod-token plumbing) —
+      // makePodConfig reads via storage.stat/read, same as the pod-root
+      // skill-discovery helpers (putFile), so no pod/auth setup is needed
+      // just to make the resource visible to the server.
+      await storage.write(CONFIG_PATH, JSON.stringify({ void: '/alice/profiles/void.jsonld' }));
     });
 
     after(async () => {
@@ -67,23 +75,24 @@ describe('lws: /.well-known/void rung', () => {
     });
   });
 
-  // Same drift-guard as test/mcp-lws-read.test.js's lwsProfileIndex case:
-  // proves the HTTP route and the MCP ctx (src/mcp/index.js, reading
-  // request.voidPath) both advertise the same VoidService entry rather
-  // than one of them silently omitting it.
-  describe('MCP parity (lwsVoid set, mcp on)', () => {
+  // Same drift-guard as test/mcp-lws-read.test.js's profileIndex case:
+  // proves the HTTP route and the MCP ctx (src/mcp/index.js, reading the
+  // SAME shared podConfig instance server.js built) both advertise the same
+  // VoidService entry rather than one of them silently omitting it.
+  describe('MCP parity (void configured, mcp on)', () => {
     let base;
 
     before(async () => {
-      await startTestServer({ lws: true, mcp: true, lwsVoid: '/alice/profiles/void.jsonld' });
+      await startTestServer({ lws: true, mcp: true, lwsConfig: CONFIG_PATH });
       base = getBaseUrl();
+      await storage.write(CONFIG_PATH, JSON.stringify({ void: '/alice/profiles/void.jsonld' }));
     });
 
     after(async () => {
       await stopTestServer();
     });
 
-    it('the storage-description resource mirrors /.well-known/lws-storage with lwsVoid set', async () => {
+    it('the storage-description resource mirrors /.well-known/lws-storage with void configured', async () => {
       const httpRes = await fetch(`${base}/.well-known/lws-storage`);
       const httpBody = await httpRes.json();
 
@@ -99,13 +108,13 @@ describe('lws: /.well-known/void rung', () => {
       const resourceBody = JSON.parse(mcpJson.result.contents[0].text);
 
       const voidSvc = httpBody.service.find((s) => s.type === 'VoidService');
-      assert.ok(voidSvc, 'HTTP route must advertise VoidService when lwsVoid is set');
+      assert.ok(voidSvc, 'HTTP route must advertise VoidService when the config names a void pointer');
       assert.equal(voidSvc.serviceEndpoint, `${base}/.well-known/void`);
       assert.deepEqual(resourceBody.service, httpBody.service);
     });
   });
 
-  describe('unconfigured (--lws-void not set)', () => {
+  describe('unconfigured (--lws-config not set)', () => {
     let base;
 
     before(async () => {

@@ -202,6 +202,13 @@ export async function mcpPlugin(fastify, options = {}) {
   // Credential-tier seam (task-6). Threaded from server.js the same way as
   // routeOptions — createServer({ mcpCredentialPolicy }) -> here.
   const credentialPolicy = options.credentialPolicy || 'trusted-local';
+  // Spec §4b: the SAME podConfig instance server.js built for the HTTP
+  // storage-description/void routes — sharing it (rather than making a
+  // second makePodConfig) is what keeps the HTTP and MCP views of
+  // profileIndex/void from ever diverging. options.podConfig is always
+  // present (server.js always constructs one); the fallback here only
+  // covers direct mcpPlugin-registration call sites (e.g. tests) that don't.
+  const podConfig = options.podConfig || { get: async () => ({}) };
   fastify.post('/mcp', routeOptions, async (request, reply) => {
     const body = request.body;
     if (!body || typeof body !== 'object') {
@@ -229,14 +236,15 @@ export async function mcpPlugin(fastify, options = {}) {
     const depthHdr = request.headers['mcp-federation-depth'];
     const federationDepth = depthHdr ? parseInt(depthHdr, 10) || 0 : 0;
 
+    const { profileIndex, void: voidPath } = await podConfig.get();
     const ctx = {
       webId: webId || null,
       origin: originOf(request),
       federationDepth,
       lwsEnabled: request.lwsEnabled || false,
       typeIndexEnabled: request.typeIndexEnabled || false,
-      profileIndexPath: request.profileIndexPath || null,
-      voidPath: request.voidPath || null,
+      profileIndexPath: profileIndex || null,
+      voidPath: voidPath || null,
       notificationsEnabled: request.notificationsEnabled || false,
       profileConnegEnabled: request.lwsProfileConneg || false
     };
