@@ -68,8 +68,8 @@ export function getResponseHeaders({ isContainer = false, etag = null, contentTy
     headers['WAC-Allow'] = wacAllow;
   }
 
-  // Add Accept-* headers (conneg-aware)
-  const acceptHeaders = getAcceptHeaders(connegEnabled, isContainer);
+  // Add Accept-* headers (conneg-aware; lwsEnabled adds merge-patch to Accept-Patch — P1)
+  const acceptHeaders = getAcceptHeaders(connegEnabled, isContainer, lwsEnabled);
   Object.assign(headers, acceptHeaders);
 
   // Add Updates-Via header for WebSocket notifications discovery

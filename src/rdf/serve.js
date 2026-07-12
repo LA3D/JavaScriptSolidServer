@@ -65,7 +65,9 @@ export function datasetToFormat(dataset, targetType) {
 // RDF-to-JSON-LD algorithm) — not a hand-rolled quad walk. The dataset seam
 // already produces N-Quads for the n-quads serving arm (the n3 Writer via
 // datasetToFormat); reuse that string as jsonld.fromRDF's input.
-async function datasetToJsonLd(dataset) {
+// Exported for handlePatch (#7): applying N3-Patch/SPARQL-Update to
+// verbatim-stored Turtle-family bytes projects through this same expansion.
+export async function datasetToJsonLd(dataset) {
   const nquads = await datasetToFormat(dataset, RDF_TYPES.NQUADS);
   return jsonld.fromRDF(nquads, { format: 'application/n-quads' });
 }

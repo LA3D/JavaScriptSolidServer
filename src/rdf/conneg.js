@@ -319,8 +319,12 @@ export function getVaryHeader(connegEnabled, mashlibEnabled = false, lwsEnabled 
  * strict contract that every media type matching the wildcard will be
  * accepted by canAcceptInput() (e.g., application/n-triples and
  * application/rdf+xml are not accepted).
+ *
+ * @param {boolean} lwsEnabled - P1 (LWS update-resource MUST: JSON Merge
+ *   Patch, RFC 7386): under --lws, PATCH also accepts merge-patch+json, so
+ *   advertise it. The --lws-off Accept-Patch value stays byte-identical.
  */
-export function getAcceptHeaders(connegEnabled, isContainer = false) {
+export function getAcceptHeaders(connegEnabled, isContainer = false, lwsEnabled = false) {
   const headers = {};
 
   if (isContainer) {
@@ -333,7 +337,8 @@ export function getAcceptHeaders(connegEnabled, isContainer = false) {
     ? `${RDF_TYPES.JSON_LD}, application/json, ${RDF_TYPES.TURTLE}, ${RDF_TYPES.N3}, */*`
     : `${RDF_TYPES.JSON_LD}, application/json, */*`;
 
-  headers['Accept-Patch'] = 'text/n3, application/sparql-update';
+  headers['Accept-Patch'] = 'text/n3, application/sparql-update'
+    + (lwsEnabled ? ', application/merge-patch+json' : '');
 
   return headers;
 }

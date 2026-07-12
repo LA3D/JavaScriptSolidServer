@@ -5,9 +5,11 @@ import { getAllHeaders, getNotFoundHeaders, representationLinks } from '../ldp/h
 import { generateContainerJsonLd, generateLwsContainer, serializeJsonLd } from '../ldp/container.js';
 import { generateLinkset } from '../lws/linkset.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
-import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl } from '../utils/url.js';
+import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl, isBodiedWithoutContentType, missingContentTypeProblem } from '../utils/url.js';
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
+import { applyMergePatch } from '../patch/merge-patch.js';
+import { toDataset } from '../rdf/dataset.js';
 import {
   selectContentType,
   canAcceptInput,
@@ -29,7 +31,7 @@ import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
-import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable } from '../rdf/serve.js';
+import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToJsonLd, datasetToFormat } from '../rdf/serve.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -41,6 +43,13 @@ const LIVE_RELOAD_SCRIPT = `<script>(function(){var ws=new WebSocket((location.p
 // across auth-state changes (WAC) and closes the mashlib render-race window
 // where a cached data variant was served on top-level navigation (#315).
 const RDF_CACHE_CONTROL = 'private, no-cache, must-revalidate';
+
+// #7 (Solid #server-patch-n3-accept MUST): stored types PATCH must parse by
+// real media type rather than blind JSON — the n3 family (verbatim under
+// --lws). JSON/JSON-LD stays on the legacy safeJsonParse-first flow below.
+const PATCH_TURTLE_FAMILY = new Set([
+  RDF_TYPES.TURTLE, RDF_TYPES.N3, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS,
+]);
 
 // Detects when the request's Accept header explicitly names a JSON
 // media type. Used by the container/index.html branches of GET and HEAD
@@ -1783,6 +1792,15 @@ export async function handlePut(request, reply) {
   }
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
+
+  // P2 (Solid #server-content-type-missing MUST): a bodied write with no
+  // Content-Type must 400, not silently fall through to canAcceptInput('')
+  // (which treats absence as accept-anything).
+  if (request.lwsEnabled && isBodiedWithoutContentType(request)) {
+    return reply.code(400).type('application/problem+json')
+      .send(JSON.stringify(missingContentTypeProblem(resourceUrl), null, 2));
+  }
+
   const connegEnabled = request.connegEnabled || false;
   // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
   const negotiate = connegEnabled || request.lwsEnabled;
@@ -2066,6 +2084,94 @@ export async function handleOptions(request, reply) {
 }
 
 /**
+ * #7 (Solid #server-patch-n3-accept MUST): PATCH a verbatim-stored
+ * Turtle-family resource (resourceExists && storedType is Turtle/N3/NT/NQ).
+ * Projects stored bytes -> RDF dataset -> expanded JSON-LD (the same seam
+ * the serving arm uses, src/rdf/serve.js datasetToJsonLd) since both
+ * n3-patch.js and sparql-update.js operate at the JSON-LD document level,
+ * then serializes back through toDataset/datasetToFormat so the write lands
+ * in the SAME stored format — Content-Type identity is preserved.
+ */
+async function patchTurtleFamilyResource(request, reply, { storagePath, resourceUrl, storedType, isSparqlUpdate }) {
+  const existingContent = await storage.read(storagePath);
+  if (existingContent === null) {
+    return reply.code(500).send({ error: 'Read error' });
+  }
+
+  let dataset;
+  try {
+    dataset = await toDataset(existingContent, storedType, resourceUrl);
+  } catch (e) {
+    return reply.code(409).type('application/problem+json').send(JSON.stringify({
+      type: 'about:blank', title: 'Conflict', status: 409,
+      detail: `the stored document did not parse as ${storedType} (${e.message}).`,
+      instance: resourceUrl,
+    }, null, 2));
+  }
+  // datasetToJsonLd returns a bare array of expanded nodes (jsonld.fromRDF's
+  // default-graph form) — neither patch applier's native shape (n3-patch.js
+  // wants {'@graph': [...]}, sparql-update.js wants the bare array), so each
+  // branch below adapts on the way in/out rather than changing the appliers.
+  const nodes = await datasetToJsonLd(dataset);
+
+  const patchContent = Buffer.isBuffer(request.body) ? request.body.toString() : request.body;
+  let updatedNodes;
+
+  if (isSparqlUpdate) {
+    let update;
+    try {
+      update = parseSparqlUpdate(patchContent, resourceUrl);
+    } catch (e) {
+      return reply.code(400).send({ error: 'Bad Request', message: 'Invalid SPARQL Update: ' + e.message });
+    }
+    try {
+      const result = applySparqlUpdate(nodes, update, resourceUrl);
+      // applySparqlUpdate collapses a single-node result to a bare object.
+      updatedNodes = Array.isArray(result) ? result : [result];
+    } catch (e) {
+      return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply SPARQL Update: ' + e.message });
+    }
+  } else {
+    let patch;
+    try {
+      patch = parseN3Patch(patchContent, resourceUrl);
+    } catch (e) {
+      return reply.code(400).send({ error: 'Bad Request', message: 'Invalid N3 Patch format: ' + e.message });
+    }
+    try {
+      const result = applyN3Patch({ '@graph': nodes }, patch, resourceUrl);
+      updatedNodes = Array.isArray(result['@graph']) ? result['@graph'] : nodes;
+    } catch (e) {
+      return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply patch: ' + e.message });
+    }
+  }
+
+  let updatedDataset;
+  try {
+    updatedDataset = await toDataset(JSON.stringify(updatedNodes), RDF_TYPES.JSON_LD, resourceUrl);
+  } catch (e) {
+    return reply.code(409).send({ error: 'Conflict', message: 'Patch produced an invalid document: ' + e.message });
+  }
+  const updatedContent = await datasetToFormat(updatedDataset, QUADS_OUTPUTS[storedType] || RDF_TYPES.NQUADS);
+
+  const success = await storage.write(storagePath, Buffer.from(updatedContent));
+  if (!success) {
+    return reply.code(500).send({ error: 'Write failed' });
+  }
+
+  const origin = request.headers.origin;
+  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled });
+  Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+
+  if (request.notificationsEnabled) {
+    emitChange(resourceUrl);
+  }
+
+  // The resource already existed (dispatch precondition) — always 204.
+  return reply.code(204).send();
+}
+
+/**
  * Handle PATCH request
  * Supports N3 Patch format (text/n3) and SPARQL Update for updating RDF resources
  */
@@ -2077,6 +2183,13 @@ export async function handlePatch(request, reply) {
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
 
+  // P2 (Solid #server-content-type-missing MUST): a bodied write with no
+  // Content-Type must 400, not fall through to a guessed patch type.
+  if (request.lwsEnabled && isBodiedWithoutContentType(request)) {
+    return reply.code(400).type('application/problem+json')
+      .send(JSON.stringify(missingContentTypeProblem(resourceUrl), null, 2));
+  }
+
   // Don't allow PATCH to containers
   if (isContainer(urlPath)) {
     return reply.code(409).send({ error: 'Cannot PATCH containers' });
@@ -2086,11 +2199,16 @@ export async function handlePatch(request, reply) {
   const contentType = request.headers['content-type'] || '';
   const isN3Patch = contentType.includes('text/n3') || contentType.includes('application/n3');
   const isSparqlUpdate = contentType.includes('application/sparql-update');
+  // P1 (LWS update-resource MUST: JSON Merge Patch, RFC 7386) — --lws only;
+  // the --lws-off 415 gate below stays byte-identical (isMergePatch false).
+  const isMergePatch = request.lwsEnabled
+    && contentType.split(';')[0].trim().toLowerCase() === 'application/merge-patch+json';
 
-  if (!isN3Patch && !isSparqlUpdate) {
+  if (!isN3Patch && !isSparqlUpdate && !isMergePatch) {
     return reply.code(415).send({
       error: 'Unsupported Media Type',
-      message: 'PATCH requires Content-Type: text/n3 (N3 Patch) or application/sparql-update (SPARQL Update)'
+      message: 'PATCH requires Content-Type: text/n3 (N3 Patch), application/sparql-update (SPARQL Update)'
+        + (request.lwsEnabled ? ', or application/merge-patch+json (JSON Merge Patch)' : '')
     });
   }
 
@@ -2107,6 +2225,21 @@ export async function handlePatch(request, reply) {
         return reply.code(check.status).send({ error: check.error });
       }
     }
+  }
+
+  // #7: a verbatim-stored Turtle-family resource is parsed by its real media
+  // type (src/rdf/dataset.js toDataset), not blindly as JSON-LD — the legacy
+  // flow below assumes JSON-LD and 409s every Turtle/N3/NT/NQ PATCH target.
+  const storedType = (request.lwsEnabled && resourceExists) ? getContentType(storagePath) : null;
+  if (storedType && PATCH_TURTLE_FAMILY.has(storedType)) {
+    if (isMergePatch) {
+      return reply.code(415).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Unsupported Media Type', status: 415,
+        detail: `JSON Merge Patch applies to JSON documents; this resource is ${storedType} — use text/n3 (N3 Patch) or application/sparql-update.`,
+        instance: resourceUrl,
+      }, null, 2));
+    }
+    return patchTurtleFamilyResource(request, reply, { storagePath, resourceUrl, storedType, isSparqlUpdate });
   }
 
   // Read existing content or start with empty JSON-LD document
@@ -2250,7 +2383,20 @@ export async function handlePatch(request, reply) {
 
   let updatedDocument;
 
-  if (isSparqlUpdate) {
+  if (isMergePatch) {
+    // P1 (LWS update-resource MUST, RFC 7386): merge-patch applies straight
+    // to the stored JSON/JSON-LD document — no triple-level projection needed.
+    let patchObj;
+    try {
+      patchObj = safeJsonParse(patchContent);
+    } catch (e) {
+      return reply.code(400).send({
+        error: 'Bad Request',
+        message: 'Invalid JSON Merge Patch: ' + e.message
+      });
+    }
+    updatedDocument = applyMergePatch(document, patchObj);
+  } else if (isSparqlUpdate) {
     // Handle SPARQL Update
     let update;
     try {

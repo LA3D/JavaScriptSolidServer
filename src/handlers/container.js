@@ -1,7 +1,7 @@
 import * as storage from '../storage/filesystem.js';
 import { initializeQuota, checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders } from '../ldp/headers.js';
-import { isContainer, getEffectiveUrlPath, getPodName } from '../utils/url.js';
+import { isContainer, getEffectiveUrlPath, getPodName, isBodiedWithoutContentType, missingContentTypeProblem } from '../utils/url.js';
 import { generateProfile, generatePreferences, generateTypeIndex, serialize } from '../webid/profile.js';
 import { generateOwnerAcl, generatePrivateAcl, generateInboxAcl, generatePublicFolderAcl, serializeAcl, relativizeOwnerWebId } from '../wac/parser.js';
 import { provisionOwnerKey, assertProvisionKeysCompatible } from '../keys/provision.js';
@@ -36,6 +36,16 @@ export async function handlePost(request, reply) {
   }
 
   const { urlPath, storagePath } = getRequestPaths(request);
+
+  // P2 (Solid #server-content-type-missing MUST): a bodied write with no
+  // Content-Type must 400, not silently fall through to canAcceptInput('').
+  // (The target resource URL isn't assigned yet at POST time — the
+  // container URL is the closest "instance" available.)
+  if (request.lwsEnabled && isBodiedWithoutContentType(request)) {
+    const containerUrl = `${request.protocol}://${request.hostname}${urlPath}`;
+    return reply.code(400).type('application/problem+json')
+      .send(JSON.stringify(missingContentTypeProblem(containerUrl), null, 2));
+  }
 
   // Ensure target is a container
   if (!isContainer(urlPath)) {
