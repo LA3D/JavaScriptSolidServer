@@ -204,3 +204,47 @@ describe('#4 (RFC 9110 §13.2.2): pending RDF conversion defers the early 304; 4
     assertStatus(r, 304);
   });
 });
+
+describe('task-5: mashlib-served conditional GET keeps early 304', () => {
+  // Regression test for the conversionPending guard omission: when an RDF
+  // resource is requested with Accept: text/html (mashlib HTML wrapper),
+  // the early If-None-Match check must run with the mashlib ETag. The
+  // fix adds !willServeMashlib to conversionPending so the deferred
+  // conversion check doesn't trigger when mashlib will serve.
+  const RDF = '/mashlib5/public/data.jsonld';
+  let mashlibEtag;
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true, mashlibCdn: true });
+    await createTestPod('mashlib5');
+    const base = getBaseUrl();
+    await request(RDF, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'mashlib5',
+      body: JSON.stringify({
+        '@context': { foaf: 'http://xmlns.com/foaf/0.1/' },
+        '@id': `${base}${RDF}#me`, 'foaf:name': 'Test',
+      }),
+    });
+    // Capture the mashlib ETag (HTML representation)
+    const html = await request(RDF, { headers: { Accept: 'text/html,*/*;q=0.8' } });
+    assertStatus(html, 200);
+    mashlibEtag = html.headers.get('etag');
+    assert.ok(mashlibEtag, 'mashlib response must carry ETag');
+  });
+  after(stopTestServer);
+
+  it('mashlib-served conditional GET with matching ETag → 304', async () => {
+    const r = await request(RDF, {
+      headers: { Accept: 'text/html,*/*;q=0.8', 'If-None-Match': mashlibEtag },
+    });
+    assert.equal(r.status, 304, 'mashlib-served conditional GET should 304 with matching ETag');
+  });
+
+  it('mashlib-served conditional HEAD with matching ETag → 304', async () => {
+    const r = await request(RDF, {
+      method: 'HEAD',
+      headers: { Accept: 'text/html,*/*;q=0.8', 'If-None-Match': mashlibEtag },
+    });
+    assert.equal(r.status, 304, 'mashlib-served conditional HEAD should 304 with matching ETag');
+  });
+});

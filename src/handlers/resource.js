@@ -339,7 +339,7 @@ export async function handleGet(request, reply) {
   // ~line 1073/1097) can still 406 on parse-fail / named-graph lossiness —
   // defer the early 304 until that arm knows its outcome (re-check lives in
   // the serving arm itself, right after `served.ok` is known).
-  const conversionPending = !stats.isDirectory && pendingConversion(request, storagePath, urlPath);
+  const conversionPending = !stats.isDirectory && !willServeMashlib && pendingConversion(request, storagePath, urlPath);
 
   // For non-containers, check If-None-Match early using the predicted
   // representation ETag (Task 10). For containers, defer the check until
