@@ -1,3 +1,5 @@
+import { prefersPlainJson } from '../rdf/conneg.js';
+
 const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 
 /**
@@ -9,6 +11,25 @@ const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 export function storageDescriptionUrl(resourceUrl) {
   if (!resourceUrl || !resourceUrl.includes('://')) throw new Error(`storageDescriptionUrl requires an absolute URL, got: ${resourceUrl}`);
   return `${new URL(resourceUrl).origin}/.well-known/lws-storage`;
+}
+
+// P3 (LWS media-type MUST, FOLLOWUP.md conformance-audit 2026-07-12): the
+// storage description body never changes — only which of the three
+// equivalent JSON media-type spellings labels it. application/lws+json is
+// this resource's own registered type (IANA-Considerations.html) and stays
+// the default (absent/generic Accept, or whenever explicitly present —
+// mirrors selectContentType's unconditional lws+json early-return in
+// resource.js). An explicit application/ld+json or application/json Accept
+// (and no lws+json) relabels to what was asked for; prefersPlainJson gives
+// the q-aware json-vs-ld+json ranking, same rule the container-listing
+// label swap uses.
+export function storageDescriptionContentType(acceptHeader) {
+  if (!acceptHeader) return 'application/lws+json';
+  const header = acceptHeader.toLowerCase();
+  if (header.includes('application/lws+json')) return 'application/lws+json';
+  if (prefersPlainJson(acceptHeader)) return 'application/json';
+  if (header.includes('application/ld+json')) return 'application/ld+json';
+  return 'application/lws+json';
 }
 
 /**

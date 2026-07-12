@@ -20,7 +20,8 @@ import {
   getVaryHeader,
   negotiateProfile,
   acceptSatisfiable,
-  acceptsHtml
+  acceptsHtml,
+  prefersPlainJson
 } from '../rdf/conneg.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
@@ -204,6 +205,15 @@ const VARIANT_KEYS = {
   [RDF_TYPES.NQUADS]: 'nq',
   [RDF_TYPES.LWS_JSON]: 'lws',
   [RDF_TYPES.LINKSET]: 'ls',
+  // P3 (LWS media-type MUST): the plain-application/json LABEL of a JSON-LD
+  // container listing needs its own variant key so it revalidates
+  // independently of the application/ld+json label (RFC 9110 §8.8.3) — same
+  // bytes, different Content-Type, different cache entry. Container-listing
+  // key only (containerListingEtag, keyed off a container's stats.etag); the
+  // file-arm '-json' conversion suffix (predictFileEtag, keyed off a FILE's
+  // stats.etag) never shares a base etag with this, so the reused string
+  // suffix can't collide across the two code paths.
+  'application/json': 'json',
 };
 
 function variantEtag(etag, key) {
@@ -536,12 +546,21 @@ export async function handleGet(request, reply) {
       : (request.lwsEnabled && QUADS_OUTPUTS[negotiated]) ? QUADS_OUTPUTS[negotiated]
       : wantsTurtle ? RDF_TYPES.TURTLE
       : RDF_TYPES.JSON_LD;
+    // P3 (LWS media-type MUST): plain application/json is the same JSON-LD
+    // payload under its own label — swap the label only, never the body
+    // (jsonLd/serializeJsonLd below stay keyed off listingContentType).
+    // Gated on listingContentType === JSON_LD so this never mislabels the
+    // lws+json/linkset/quads/turtle branches, and on request.lwsEnabled so
+    // an --lws-off pod stays byte-identical to pre-Task-9 behavior.
+    const labeledListingType = (request.lwsEnabled
+      && listingContentType === RDF_TYPES.JSON_LD && prefersPlainJson(acceptHeader))
+      ? 'application/json' : listingContentType;
     // --lws-off / mashlib-HTML keep the pre-Task-10 etag source (bare or
     // the mashlib '-html' suffix) — mashlib's embedded listing isn't part
     // of the altr: representation family this task scopes (brief: lws+json/
     // linkset/quads/turtle/ld+json).
     const listingEtag = (request.lwsEnabled && !willMashlib)
-      ? containerListingEtag(stats.etag, listingContentType, visKey)
+      ? containerListingEtag(stats.etag, labeledListingType, visKey)
       : effectiveEtag;
 
     // Deferred 304 check for container listings (#456) — compared against
@@ -790,7 +809,12 @@ export async function handleGet(request, reply) {
     const headers = getAllHeaders({
       isContainer: true,
       etag: listingEtag,
-      contentType: 'application/ld+json',
+      // P3: only relabel when JSON-LD was the actually-negotiated target —
+      // this line is also the unconditional bottom fallback reached after a
+      // failed Turtle/quads conversion (listingContentType would be that
+      // other type there, not JSON_LD), which must keep serving plain
+      // ld+json exactly as before Task 9.
+      contentType: listingContentType === RDF_TYPES.JSON_LD ? labeledListingType : 'application/ld+json',
       origin,
       resourceUrl,
       connegEnabled,
@@ -1560,6 +1584,15 @@ export async function handleHead(request, reply) {
       if (lwsNeg === RDF_TYPES.LWS_JSON) contentType = RDF_TYPES.LWS_JSON;
       else if (lwsNeg === RDF_TYPES.LINKSET) contentType = RDF_TYPES.LINKSET;
       else if (QUADS_OUTPUTS[lwsNeg]) contentType = QUADS_OUTPUTS[lwsNeg];
+    }
+
+    // P3 (LWS media-type MUST): mirror GET's label swap — plain
+    // application/json is the same JSON-LD payload under its own label.
+    // Only fires when none of the overrides above claimed contentType (i.e.
+    // it's still the plain JSON-LD default), so containerListingEtag below
+    // gets the same label GET would compute (and thus the same ETag, #552).
+    if (request.lwsEnabled && contentType === RDF_TYPES.JSON_LD && prefersPlainJson(acceptHeader)) {
+      contentType = 'application/json';
     }
 
     if (shadowActive) {
