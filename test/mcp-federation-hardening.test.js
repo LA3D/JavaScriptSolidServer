@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { isBlockedHost } from '../src/mcp/ssrf.js';
+import { isPrivateIP } from '../src/utils/ssrf.js';
 import { MAX_BODY_BYTES } from '../src/mcp/read.js';
 import { callTool } from '../src/mcp/tools.js';
 import { startLwsPod, ownerCtx } from './helpers.js';
@@ -75,6 +76,25 @@ test('isBlockedHost: unspecified addresses (0.0.0.0, ::, [::]) are blocked', () 
   for (const h of ['0.0.0.0', '::', '[::]']) {
     assert.equal(isBlockedHost(h), true, `expected ${h} blocked`);
   }
+});
+
+// --- isBlockedHost/isPrivateIP: one shared range table (review #14) ---
+// mcp/ssrf.js used to carry its OWN hand-rolled private-range table, missing
+// 100.64.0.0/10 (Alibaba cloud metadata 100.100.100.200, Tailscale) even
+// though src/utils/ssrf.js's isPrivateIP already blocked it — two divergent
+// lists. isBlockedHost now delegates to isPrivateIP as the ONE table.
+
+test('isBlockedHost blocks 100.64/10 incl. Alibaba metadata, mapped-IPv6 form too', () => {
+  assert.equal(isBlockedHost('100.100.100.200'), true);
+  assert.equal(isBlockedHost('100.64.0.1'), true);
+  assert.equal(isBlockedHost('[::ffff:6464:64c8]'), true);   // 100.100.100.200 hex-mapped
+  assert.equal(isBlockedHost('[::ffff:100.100.100.200]'), true);
+  assert.equal(isBlockedHost('fc01::1'), true);              // fc00::/7, not just fc00:
+  assert.equal(isBlockedHost('8.8.8.8'), false);
+});
+
+test('utils isPrivateIP gains the hex-group mapped form (importers inherit)', () => {
+  assert.equal(isPrivateIP('::ffff:a9fe:a9fe'), true);       // 169.254.169.254
 });
 
 // --- readRemote: the same bypasses, driven end-to-end through read_resource ---

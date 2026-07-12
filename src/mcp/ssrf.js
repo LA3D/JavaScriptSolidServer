@@ -15,47 +15,30 @@
 //   - IPv4-compatible ::a.b.c.d (deprecated, RFC 4291 §2.5.5.1): modern
 //     stacks don't route it to the embedded IPv4.
 // The local rig is dual-stack, so none is a live vector here.
+//
+// review #14: this file used to carry its OWN private-range table (PRIV4 +
+// a local embeddedV4), which had drifted from src/utils/ssrf.js's isPrivateIP
+// (missing 100.64.0.0/10 — Alibaba metadata 100.100.100.200, Tailscale; and
+// TEST-NETs/multicast/reserved). isPrivateIP is now the ONE range table;
+// this file is a thin hostname-normalizing wrapper around it (bracket-strip,
+// net.isIP dispatch, the localhost/unspecified literals) that keeps this
+// module's own literal-hostname-scope contract above.
 import net from 'node:net';
-
-const PRIV4 = [/^127\./, /^10\./, /^169\.254\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./];
-
-function isBlockedV4(h) {
-  if (h === '0.0.0.0') return true;                                // unspecified (dt8 fix round 1)
-  if (h === '169.254.169.254') return true;                        // cloud metadata
-  return PRIV4.some((re) => re.test(h));
-}
-
-// An IPv4-mapped IPv6 address (::ffff:a.b.c.d) embeds a real IPv4 target —
-// e.g. ::ffff:169.254.169.254 reaches cloud metadata on Linux dual-stack
-// hosts. `new URL(...).hostname` normalizes the embedded address to the
-// compressed hex-group form (::ffff:a9fe:a9fe), but callers may also pass
-// the dotted-quad form directly, so both are recognized here.
-function embeddedV4(h) {
-  let m = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-  if (m) return m[1];
-  m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
-  if (m) {
-    const hi = parseInt(m[1], 16);
-    const lo = parseInt(m[2], 16);
-    return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join('.');
-  }
-  return null;
-}
+import { isPrivateIP, embeddedV4 } from '../utils/ssrf.js';
 
 export function isBlockedHost(hostname, { allowPrivate = false } = {}) {
   if (allowPrivate) return false;
   // Strip URL-bracket notation FIRST — `new URL(url).hostname` for an IPv6
-  // literal is ALWAYS bracketed (`[fc00::1]`), and net.isIP()/the prefix
-  // checks below only work on the bare address (dt8 fix round 1: this was
-  // dead code on the real fetch path before the strip was added).
+  // literal is ALWAYS bracketed (`[fc00::1]`), and net.isIP()/isPrivateIP
+  // only work on the bare address (dt8 fix round 1: this was dead code on
+  // the real fetch path before the strip was added).
   const h = (hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h === '::1') return true;
-  if (h === '::') return true;                                      // IPv6 unspecified
-  if (net.isIP(h) === 4) return isBlockedV4(h);
+  if (h === 'localhost') return true;
+  if (h === '0.0.0.0' || h === '::') return true;                   // unspecified
   if (net.isIP(h) === 6) {
     const v4 = embeddedV4(h);
-    if (v4) return isBlockedV4(v4);
-    if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;
+    if (v4) return isPrivateIP(v4);
   }
+  if (net.isIP(h)) return isPrivateIP(h);
   return false;
 }
