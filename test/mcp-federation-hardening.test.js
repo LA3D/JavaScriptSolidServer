@@ -139,35 +139,83 @@ test('read_resource remote: a malformed URL returns a teaching error instead of 
   assert.match(res.content[0].text, /invalid remote URL/);
 });
 
-// --- readRemote: redirect-follow bypass (CRITICAL 1) ---
+// --- readRemote: per-hop redirect revalidation (review #8) ---
+// dt8 fix round 1's redirect:'error' (CRITICAL 1) closed the redirect-follow
+// bypass by refusing to follow ANY redirect — but that also dead-ended the
+// pod's OWN cross-pod rails (e.g. the /.well-known/void 303). readRemote now
+// follows redirects itself, re-running the SSRF guard on EVERY hop: a
+// legitimate redirect between allowed hosts is followed (restoring the void
+// rail), while a redirect hop that resolves to a blocked host is still
+// refused before it's ever dialed (CRITICAL 1 stays closed).
 
-test('read_resource remote: a 302 redirect is NOT followed (redirect target is never dialed)', async (t) => {
-  let redirectTargetHit = false;
-  const target = http.createServer((req, res) => { redirectTargetHit = true; res.end('should not be reached'); });
+test('read_resource remote: a 303 with a relative Location is followed with per-hop SSRF revalidation (#8): public->public followed', async (t) => {
+  let finalHit = false;
+  const target = http.createServer((req, res) => {
+    finalHit = true;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{"ok":true}');
+  });
   await new Promise((r) => target.listen(0, '127.0.0.1', r));
   t.after(() => target.close());
   const targetPort = target.address().port;
 
   const source = http.createServer((req, res) => {
-    res.writeHead(302, { Location: `http://127.0.0.1:${targetPort}/metadata` });
+    // Protocol-relative Location — resolved against the CURRENT hop
+    // (the source URL), not re-parsed from scratch.
+    res.writeHead(303, { Location: `//127.0.0.1:${targetPort}/final` });
     res.end();
   });
   await new Promise((r) => source.listen(0, '127.0.0.1', r));
   t.after(() => source.close());
-  const url = `http://127.0.0.1:${source.address().port}/x`;
+  const url = `http://127.0.0.1:${source.address().port}/void`;
 
   const p = await startLwsPod(t);
-  // federationPrivate:true bypasses the initial-host check on the SOURCE
-  // url (a loopback stub standing in for "an allowed public host") so this
-  // test isolates the redirect-follow bug from the host-block guard
-  // (CRITICAL 2, covered above): the guard only ever sees the INITIAL host
-  // in the URL — a redirect response must never be followed at all, to any
-  // host, since the guard performs no per-hop recheck.
+  // federationPrivate:true stands in for "these are allowed public hosts"
+  // (same convention used elsewhere in this file) — isolates per-hop
+  // redirect-following from the host-block guard, covered separately below.
   const res = await callTool('read_resource', { uri: url },
     { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true, federationPrivate: true });
+  assert.equal(res.isError ?? false, false, JSON.stringify(res));
+  const out = JSON.parse(res.content[0].text);
+  assert.equal(finalHit, true, 'the redirect target must actually be dialed (#8 restores following)');
+  assert.equal(out.url, `http://127.0.0.1:${targetPort}/final`);
+  assert.equal(out.resolvedFrom, url);
+  assert.match(out.body, /"ok":true/);
+});
+
+test('read_resource remote: a redirect hop to a blocked host is refused with a teaching error naming the blocked target (never dialed)', async (t) => {
+  // startLwsPod itself uses fetch (pod bootstrap) — install the mock AFTER
+  // the pod is up, so only readRemote's own fetch calls are intercepted.
+  const p = await startLwsPod(t);
+  const fetchMock = t.mock.method(globalThis, 'fetch', async (input) => {
+    const u = typeof input === 'string' ? input : input.url;
+    if (u === 'https://example.com/void') {
+      return new Response(null, { status: 303, headers: { Location: 'http://169.254.169.254/latest/meta-data/' } });
+    }
+    throw new Error(`unexpected fetch in test: ${u}`);
+  });
+
+  const res = await callTool('read_resource', { uri: 'https://example.com/void' },
+    { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
   assert.equal(res.isError, true);
-  assert.match(res.content[0].text, /remote unreachable/);
-  assert.equal(redirectTargetHit, false, 'the redirect target must never be dialed');
+  assert.match(res.content[0].text, /federation blocked/);
+  assert.match(res.content[0].text, /169\.254\.169\.254/);
+  assert.equal(fetchMock.mock.callCount(), 1, 'the blocked redirect target must never be dialed');
+});
+
+test('read_resource remote: stops after MAX_REDIRECT_HOPS with a teaching error (no unbounded redirect chain)', async (t) => {
+  const p = await startLwsPod(t);
+  let calls = 0;
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return new Response(null, { status: 302, headers: { Location: `https://example.com/hop${calls}` } });
+  });
+
+  const res = await callTool('read_resource', { uri: 'https://example.com/hop0' },
+    { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /too many redirects/);
+  assert.equal(fetchMock.mock.callCount(), 3, 'capped at MAX_REDIRECT_HOPS fetches, no more');
 });
 
 // --- readRemote: pre-fetch SSRF gate ---

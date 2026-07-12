@@ -117,37 +117,52 @@ async function readRemote(url, ctx) {
   // SSRF guard (dt8, spec §6): a federation-gated agent can otherwise reach
   // LAN/loopback/cloud-metadata endpoints from inside the pod's trust
   // boundary. Default-blocked; --lws-federation-private is the local rig's
-  // opt-in. Checked before the fetch — never dial a blocked host at all.
-  // Malformed url -> teaching error, not an uncaught throw (dt8 fix round 1).
-  let parsed;
+  // opt-in. Checked before EVERY hop below — never dial a blocked host at
+  // all. Malformed url -> teaching error, not an uncaught throw (dt8 fix
+  // round 1).
+  let target;
   try {
-    parsed = new URL(url);
+    target = new URL(url);
   } catch {
     return toolError(`invalid remote URL: ${url}`);
   }
-  if (isBlockedHost(parsed.hostname, { allowPrivate: ctx.federationPrivate })) {
-    return toolError(
-      `federation blocked: ${url} resolves to a private/internal address (set --lws-federation-private to allow)`
-    );
-  }
+  // Manual redirect loop (review #8): `redirect:'error'` (dt8 fix round 1,
+  // CRITICAL 1) dead-ended the pod's own cross-pod rails (e.g. the
+  // /.well-known/void 303) along with any legitimate redirect. Following
+  // redirects OURSELVES — re-running the SSRF guard on every hop, not just
+  // the initial URL — restores those rails while still closing CRITICAL 1
+  // (a public host 302-ing to cloud metadata is caught on the redirect hop,
+  // never blindly dialed the way undici's default redirect:'follow' would).
+  const MAX_REDIRECT_HOPS = 3;
   let r;
-  try {
-    // redirect: 'error' (dt8 fix round 1, CRITICAL 1) — the guard above only
-    // checks the INITIAL host; undici's default redirect:'follow' would
-    // dial a redirect target (e.g. a public URL 302-ing to cloud metadata)
-    // with no recheck. Federation reads don't need redirect-following — a
-    // redirect response now surfaces as a fetch failure -> the existing
-    // "remote unreachable" teaching error, never followed.
-    r = await fetch(url, {
-      headers: {
-        Accept: 'application/ld+json, application/lws+json, text/turtle, */*',
-        'MCP-Federation-Depth': String(depth)
-      },
-      redirect: 'error',
-      signal: AbortSignal.timeout(30_000)
-    });
-  } catch (e) {
-    return toolError(`remote unreachable: ${e.message}`);
+  for (let hop = 0; ; hop++) {
+    if (isBlockedHost(target.hostname, { allowPrivate: ctx.federationPrivate })) {
+      return toolError(
+        `federation blocked: ${target.href} resolves to a private/internal address (set --lws-federation-private to allow)`
+      );
+    }
+    try {
+      r = await fetch(target.href, {
+        headers: {
+          Accept: 'application/ld+json, application/lws+json, text/turtle, */*',
+          'MCP-Federation-Depth': String(depth)
+        },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(30_000)
+      });
+    } catch (e) {
+      return toolError(`remote unreachable: ${e.message}`);
+    }
+    const loc = r.headers.get('location');
+    if (![301, 302, 303, 307, 308].includes(r.status) || !loc) break;
+    if (hop >= MAX_REDIRECT_HOPS - 1) {
+      return toolError(`too many redirects (max ${MAX_REDIRECT_HOPS}): ${url}`);
+    }
+    try {
+      target = new URL(loc, target);
+    } catch {
+      return toolError(`invalid redirect target from ${target.href}: ${loc}`);
+    }
   }
   // Bounded body read — a remote pod is the LEAST-trusted content source
   // (unlike local reads, already capped by readBounded/MAX_BODY_BYTES),
@@ -159,7 +174,11 @@ async function readRemote(url, ctx) {
   // least-trusted content source — deep-strip (review #7, carried verbatim).
   const links = parseRemoteLinks(r.headers.get('link'));
   return toolJson({
-    url,
+    url: target.href,
+    // The FINAL hop's URL is what was actually read; resolvedFrom names the
+    // caller's original URL when a redirect moved it, so the agent sees
+    // where a rail (e.g. /.well-known/void's 303) actually landed (#8).
+    ...(target.href !== url ? { resolvedFrom: url } : {}),
     status: r.status,
     contentType: r.headers.get('content-type') || null,
     ...(Object.keys(links).length ? { links } : {}),
