@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import * as storage from '../src/storage/filesystem.js';
 import { startTestServer, stopTestServer, request, createTestPod, getPodToken, getBaseUrl, assertStatus } from './helpers.js';
 
 const N3_INSERT = `@prefix solid: <http://www.w3.org/ns/solid/terms#>.
@@ -24,6 +25,81 @@ test('N3 Patch on a verbatim-stored .ttl applies and stays Turtle (#7)', async (
   assert.match(ttl, /"v"/);        // original triple survives
   assert.match(ttl, /"added"/);    // patch applied
   assert.equal(back.headers.get('content-type').split(';')[0], 'text/turtle');  // stored format preserved
+});
+
+test('N3 Patch INSERT emits full predicate IRIs on a context-free stored doc (review #1)', async (t) => {
+  // #7 projects verbatim-stored bytes through EXPANDED JSON-LD (no @context)
+  // before applyN3Patch runs. insertTriple used to run the predicate through
+  // compactPredicate unconditionally, producing keys like "rdf:type" that
+  // re-parse (no @context to resolve them) as literal scheme-IRIs
+  // <rdf:type> instead of the real vocabulary IRI.
+  //
+  // Storage format is deliberately application/n-triples, NOT text/turtle:
+  // Turtle-family write-back declares the SAME 7 default prefixes
+  // (COMMON_PREFIXES) that compactPredicate hardcodes, so a Turtle
+  // round-trip coincidentally "launders" the corrupt CURIE-shaped string
+  // back to the correct IRI on re-parse and hides the bug. N-Triples has no
+  // prefix mechanism — a corrupt predicate stays a literal wrong IRI, which
+  // is what makes this the right stored form to pin the regression against.
+  // Assert TRIPLE-LEVEL via the n3 Parser — a regex/substring check would
+  // miss this class of bug (and would be fooled by the Turtle-masking above).
+  //
+  // PUT itself doesn't accept application/n-triples (not in SUPPORTED_INPUT),
+  // so the seed file is written directly via storage.write — the same
+  // seeding pattern test/lws-serve-nt-nq.test.js and
+  // test/lws-conditional-406.test.js use for filesystem/git-sourced .nt/.nq.
+  await startTestServer({ lws: true, conneg: true });
+  t.after(stopTestServer);
+  await createTestPod('patchiris');
+  await storage.write('/patchiris/d.nt', Buffer.from('<#s> <http://ex/p> "v" .\n'));
+  const INSERT_COMMON = `@prefix solid: <http://www.w3.org/ns/solid/terms#>.
+_:p a solid:InsertDeletePatch;
+  solid:inserts {
+    <#s> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Thing>.
+    <#s> <http://purl.org/dc/terms/title> "Title".
+  }.`;
+  const r = await request('/patchiris/d.nt', { method: 'PATCH', auth: 'patchiris',
+    headers: { 'Content-Type': 'text/n3' }, body: INSERT_COMMON });
+  assert.ok([200, 204].includes(r.status), `expected 2xx, got ${r.status}`);
+
+  const back = await request('/patchiris/d.nt', { headers: { Accept: 'application/n-triples' }, auth: 'patchiris' });
+  const nt = await back.text();
+  const { Parser } = await import('n3');
+  const quads = new Parser({ baseIRI: new URL('/patchiris/d.nt', getBaseUrl()).href }).parse(nt);
+  const predicates = quads.map(q => q.predicate.value);
+  assert.ok(predicates.includes('http://www.w3.org/1999/02/22-rdf-syntax-ns#type'),
+    `expected the full rdf:type IRI among stored predicates, got ${JSON.stringify(predicates)}`);
+  assert.ok(predicates.includes('http://purl.org/dc/terms/title'),
+    `expected the full dc:title IRI among stored predicates, got ${JSON.stringify(predicates)}`);
+});
+
+test('N3 Patch DELETE removes a common-vocabulary triple on a context-free stored doc (review #1, symmetric)', async (t) => {
+  // Pins the symmetric (delete-side) path: a genuine dc:title triple
+  // (never touched by insertTriple's compaction) must still be matched
+  // and removed by predicate on an expanded/context-free document.
+  // application/n-triples again, so there is no prefix-declaration masking
+  // to launder a match failure into an accidental pass. Seeded via
+  // storage.write — see the note on the INSERT test above.
+  await startTestServer({ lws: true, conneg: true });
+  t.after(stopTestServer);
+  await createTestPod('patchdelvoc');
+  await storage.write('/patchdelvoc/d.nt', Buffer.from(
+    '<#s> <http://ex/p> "v" .\n<#s> <http://purl.org/dc/terms/title> "Title" .\n'));
+  const DELETE_COMMON = `@prefix solid: <http://www.w3.org/ns/solid/terms#>.
+_:p a solid:InsertDeletePatch;
+  solid:deletes { <#s> <http://purl.org/dc/terms/title> "Title". }.`;
+  const r = await request('/patchdelvoc/d.nt', { method: 'PATCH', auth: 'patchdelvoc',
+    headers: { 'Content-Type': 'text/n3' }, body: DELETE_COMMON });
+  assert.ok([200, 204].includes(r.status), `expected 2xx, got ${r.status}`);
+
+  const back = await request('/patchdelvoc/d.nt', { headers: { Accept: 'application/n-triples' }, auth: 'patchdelvoc' });
+  const nt = await back.text();
+  const { Parser } = await import('n3');
+  const quads = new Parser({ baseIRI: new URL('/patchdelvoc/d.nt', getBaseUrl()).href }).parse(nt);
+  const predicates = quads.map(q => q.predicate.value);
+  assert.ok(!predicates.includes('http://purl.org/dc/terms/title'),
+    `dc:title should have been deleted, got ${JSON.stringify(predicates)}`);
+  assert.ok(predicates.includes('http://ex/p'), 'unrelated triple should survive the delete');
 });
 
 test('JSON Merge Patch applies to a stored JSON-LD doc (P1, RFC 7386)', async (t) => {
