@@ -5,10 +5,16 @@
 // pod's trust boundary. Default-on; --lws-federation-private is the
 // deliberate opt-in (the local rig fetching across containers on one host).
 //
-// Scoped fix: checks the LITERAL hostname/IP in the URL, not a DNS
-// resolution — a public hostname that resolves to a private IP (DNS
-// rebinding) is NOT caught here. A resolve-then-check is a larger change;
-// recorded as a known limitation, not expanded into scope (dt8).
+// Scoped fix: checks the LITERAL hostname/IP in the URL, not a network-layer
+// translation of it. Three literal forms that a fabric/gateway could still
+// translate to a private target are OUT of scope by the same rule, recorded
+// (not expanded) — revisit only for a public IPv6-only build (dt8):
+//   - DNS rebinding: a public name resolving to a private IP.
+//   - NAT64 64:ff9b::/96: on an IPv6-only host with a NAT64 gateway,
+//     [64:ff9b::a9fe:a9fe] translates to 169.254.169.254.
+//   - IPv4-compatible ::a.b.c.d (deprecated, RFC 4291 §2.5.5.1): modern
+//     stacks don't route it to the embedded IPv4.
+// The local rig is dual-stack, so none is a live vector here.
 import net from 'node:net';
 
 const PRIV4 = [/^127\./, /^10\./, /^169\.254\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./];
