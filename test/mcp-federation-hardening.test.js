@@ -6,6 +6,16 @@
 // This covers: isBlockedHost's range table directly, readRemote's pre-fetch
 // SSRF gate (default-blocked, --lws-federation-private opt-in via
 // ctx.federationPrivate), and the size bound on the remote body read.
+//
+// Fix round 1 (adversarial review, dt8 task 8): three real bypasses were
+// found and closed here — see src/mcp/ssrf.js and src/mcp/read-tools.js for
+// the fix commentary. The IPv6 unit tests below were REWRITTEN, not just
+// extended: the original tests fed isBlockedHost bare strings like
+// 'fc00::1', which net.isIP() accepts but which the real fetch path NEVER
+// produces (`new URL(url).hostname` for an IPv6 literal is ALWAYS bracketed,
+// `[fc00::1]`) — that was a false-green. Every IPv6 case below now drives
+// hostnames as `new URL(...).hostname` actually produces them, or asserts
+// straight through read_resource -> readRemote -> isBlockedHost.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -16,9 +26,9 @@ import { startLwsPod, ownerCtx } from './helpers.js';
 
 // --- isBlockedHost: the range table, unit-level ---
 
-test('isBlockedHost: loopback, RFC-1918, link-local, and cloud metadata are blocked by default', () => {
+test('isBlockedHost: loopback, RFC-1918, link-local, and cloud metadata (IPv4) are blocked by default', () => {
   for (const h of ['127.0.0.1', 'localhost', '10.0.0.1', '192.168.1.1', '172.16.0.1', '172.31.255.255',
-    '169.254.1.1', '169.254.169.254', '::1', '[::1]', 'fc00::1', 'fd12::3456', 'fe80::1']) {
+    '169.254.1.1', '169.254.169.254']) {
     assert.equal(isBlockedHost(h), true, `expected ${h} blocked`);
   }
 });
@@ -30,9 +40,114 @@ test('isBlockedHost: public hosts and out-of-range private-looking IPs are not b
 });
 
 test('isBlockedHost: allowPrivate overrides every check, including cloud metadata', () => {
-  for (const h of ['127.0.0.1', '169.254.169.254', '10.0.0.1', 'fc00::1']) {
+  for (const h of ['127.0.0.1', '169.254.169.254', '10.0.0.1', '[fc00::1]', '0.0.0.0', '[::]']) {
     assert.equal(isBlockedHost(h, { allowPrivate: true }), false, `expected ${h} allowed under allowPrivate`);
   }
+});
+
+// --- isBlockedHost: IPv6, driven through the REAL production shape ---
+// (dt8 fix round 1, CRITICAL 2 — bracketed hostnames + IPv4-mapped IPv6)
+
+test('isBlockedHost: hostnames as new URL(...).hostname ACTUALLY produces them (bracketed) are blocked — ULA/link-local/loopback/unspecified/IPv4-mapped', () => {
+  const blockedUrls = [
+    'http://[fc00::1]/x',                    // ULA
+    'http://[fd12::3456]/x',                 // ULA
+    'http://[fe80::1]/x',                    // link-local
+    'http://[::1]/x',                        // loopback
+    'http://[::]/x',                         // unspecified
+    'http://[::ffff:169.254.169.254]/x',     // IPv4-mapped -> cloud metadata
+    'http://[::ffff:10.0.0.1]/x',            // IPv4-mapped -> RFC-1918
+    'http://[::ffff:127.0.0.1]/x',           // IPv4-mapped -> loopback
+  ];
+  for (const u of blockedUrls) {
+    const hostname = new URL(u).hostname;
+    assert.equal(isBlockedHost(hostname), true, `expected ${u} (hostname=${hostname}) blocked`);
+  }
+});
+
+test('isBlockedHost: bracketed IPv4-mapped IPv6 in dotted-quad form is blocked too (not just the URL-normalized hex form)', () => {
+  for (const h of ['[::ffff:169.254.169.254]', '[::ffff:10.0.0.1]', '[::ffff:127.0.0.1]']) {
+    assert.equal(isBlockedHost(h), true, `expected ${h} blocked`);
+  }
+});
+
+test('isBlockedHost: unspecified addresses (0.0.0.0, ::, [::]) are blocked', () => {
+  for (const h of ['0.0.0.0', '::', '[::]']) {
+    assert.equal(isBlockedHost(h), true, `expected ${h} blocked`);
+  }
+});
+
+// --- readRemote: the same bypasses, driven end-to-end through read_resource ---
+
+test('read_resource remote: bracketed IPv6 (ULA/link-local/loopback) targets are blocked by default (no live listener needed)', async (t) => {
+  const p = await startLwsPod(t);
+  for (const uri of ['http://[fc00::1]/x', 'http://[fe80::1]/x', 'http://[::1]/x']) {
+    const res = await callTool('read_resource', { uri },
+      { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+    assert.equal(res.isError, true, `expected ${uri} blocked`);
+    assert.match(res.content[0].text, /federation blocked/, `expected ${uri} teaching error`);
+  }
+});
+
+test('read_resource remote: IPv4-mapped IPv6 targets (::ffff:a.b.c.d) are blocked by default (no live listener needed)', async (t) => {
+  const p = await startLwsPod(t);
+  for (const uri of ['http://[::ffff:169.254.169.254]/x', 'http://[::ffff:10.0.0.1]/x', 'http://[::ffff:127.0.0.1]/x']) {
+    const res = await callTool('read_resource', { uri },
+      { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+    assert.equal(res.isError, true, `expected ${uri} blocked`);
+    assert.match(res.content[0].text, /federation blocked/, `expected ${uri} teaching error`);
+  }
+});
+
+test('read_resource remote: unspecified-address targets (0.0.0.0, [::]) are blocked by default (no live listener needed)', async (t) => {
+  const p = await startLwsPod(t);
+  for (const uri of ['http://0.0.0.0/x', 'http://[::]/x']) {
+    const res = await callTool('read_resource', { uri },
+      { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+    assert.equal(res.isError, true, `expected ${uri} blocked`);
+    assert.match(res.content[0].text, /federation blocked/, `expected ${uri} teaching error`);
+  }
+});
+
+// --- readRemote: malformed URL is a teaching error, not a throw (MINOR 4) ---
+
+test('read_resource remote: a malformed URL returns a teaching error instead of throwing', async (t) => {
+  const p = await startLwsPod(t);
+  const res = await callTool('read_resource', { uri: 'http://[not-a-valid-host/x' },
+    { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /invalid remote URL/);
+});
+
+// --- readRemote: redirect-follow bypass (CRITICAL 1) ---
+
+test('read_resource remote: a 302 redirect is NOT followed (redirect target is never dialed)', async (t) => {
+  let redirectTargetHit = false;
+  const target = http.createServer((req, res) => { redirectTargetHit = true; res.end('should not be reached'); });
+  await new Promise((r) => target.listen(0, '127.0.0.1', r));
+  t.after(() => target.close());
+  const targetPort = target.address().port;
+
+  const source = http.createServer((req, res) => {
+    res.writeHead(302, { Location: `http://127.0.0.1:${targetPort}/metadata` });
+    res.end();
+  });
+  await new Promise((r) => source.listen(0, '127.0.0.1', r));
+  t.after(() => source.close());
+  const url = `http://127.0.0.1:${source.address().port}/x`;
+
+  const p = await startLwsPod(t);
+  // federationPrivate:true bypasses the initial-host check on the SOURCE
+  // url (a loopback stub standing in for "an allowed public host") so this
+  // test isolates the redirect-follow bug from the host-block guard
+  // (CRITICAL 2, covered above): the guard only ever sees the INITIAL host
+  // in the URL — a redirect response must never be followed at all, to any
+  // host, since the guard performs no per-hop recheck.
+  const res = await callTool('read_resource', { uri: url },
+    { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true, federationPrivate: true });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /remote unreachable/);
+  assert.equal(redirectTargetHit, false, 'the redirect target must never be dialed');
 });
 
 // --- readRemote: pre-fetch SSRF gate ---

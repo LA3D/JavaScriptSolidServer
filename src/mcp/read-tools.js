@@ -116,18 +116,32 @@ async function readRemote(url, ctx) {
   // LAN/loopback/cloud-metadata endpoints from inside the pod's trust
   // boundary. Default-blocked; --lws-federation-private is the local rig's
   // opt-in. Checked before the fetch — never dial a blocked host at all.
-  if (isBlockedHost(new URL(url).hostname, { allowPrivate: ctx.federationPrivate })) {
+  // Malformed url -> teaching error, not an uncaught throw (dt8 fix round 1).
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return toolError(`invalid remote URL: ${url}`);
+  }
+  if (isBlockedHost(parsed.hostname, { allowPrivate: ctx.federationPrivate })) {
     return toolError(
       `federation blocked: ${url} resolves to a private/internal address (set --lws-federation-private to allow)`
     );
   }
   let r;
   try {
+    // redirect: 'error' (dt8 fix round 1, CRITICAL 1) — the guard above only
+    // checks the INITIAL host; undici's default redirect:'follow' would
+    // dial a redirect target (e.g. a public URL 302-ing to cloud metadata)
+    // with no recheck. Federation reads don't need redirect-following — a
+    // redirect response now surfaces as a fetch failure -> the existing
+    // "remote unreachable" teaching error, never followed.
     r = await fetch(url, {
       headers: {
         Accept: 'application/ld+json, application/lws+json, text/turtle, */*',
         'MCP-Federation-Depth': String(depth)
       },
+      redirect: 'error',
       signal: AbortSignal.timeout(30_000)
     });
   } catch (e) {
