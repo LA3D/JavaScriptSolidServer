@@ -247,10 +247,20 @@ function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storag
     return variantEtag(stats.etag, 'ls');
   }
   const storedContentType = getContentType(storagePath);
-  if (connegEnabled && isRdfSourceType(storedContentType)) {
-    const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
+  // #5 (RFC 9110 §8.8.3 / LWS ETag MUST): keyed on the negotiation surface the
+  // serving arm actually runs (this function already early-returns unless
+  // lwsEnabled, and --lws mandates negotiation — spec §4a), and covering BOTH
+  // conversion arms: quads targets get their VARIANT_KEYS suffix, the JSON-LD
+  // conversion of a non-JSON-LD source gets '-json'. Before this, Turtle
+  // bytes and their JSON-LD conversion shared one bare ETag (cross-variant
+  // 304 reuse), and --lws-without---conneg collapsed every variant.
+  if (isRdfSourceType(storedContentType)) {
+    const quadsTarget = negotiateQuadsTarget(acceptHeader, true, true, urlPath);
     if (quadsTarget && quadsTarget !== storedContentType) {
       return variantEtag(stats.etag, VARIANT_KEYS[quadsTarget]);
+    }
+    if (!quadsTarget && storedContentType !== RDF_TYPES.JSON_LD) {
+      return variantEtag(stats.etag, 'json');   // the ld+json conversion arm (~line 1097)
     }
   }
   return stats.etag;
