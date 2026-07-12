@@ -56,3 +56,19 @@ test('HTTP PUT: application/json at .ttl name 400s; at .jsonld name passes (#10)
     assertStatus(plain, 400);
   } finally { await stopTestServer(); }
 });
+
+test('HTTP PUT: gate problem.instance echoes the resource URL, not storage path', async () => {
+  await startTestServer({ lws: true, conneg: true });
+  try {
+    await createTestPod('gateinstance');
+    const response = await request('/gateinstance/z.ttl', {
+      method: 'PUT', auth: 'gateinstance',
+      headers: { 'Content-Type': 'application/json' }, body: '{"a":1}',
+    });
+    assertStatus(response, 400);
+    const problem = await response.json();
+    assert.ok(problem.instance.startsWith('http://'), 'instance should be a full HTTP URL');
+    assert.ok(problem.instance.includes('/gateinstance/z.ttl'), 'instance should include the request path');
+    assert.ok(!problem.instance.includes('.stored'), 'instance should not be a storage path');
+  } finally { await stopTestServer(); }
+});

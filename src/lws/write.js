@@ -16,7 +16,7 @@ export async function applyLwsWrite({
   // surface shares (HTTP PUT/POST + all MCP write tools) — no surface can
   // store a name/type lie or an admission-skipped body at an RDF name.
   const c = writeTypeConsistency({ urlPath: storagePath, submittedType: contentType, lwsEnabled });
-  if (!c.ok) return { ok: false, problem: c.problem };
+  if (!c.ok) return { ok: false, problem: { ...c.problem, instance: resourceUrl } };
 
   let shapeUrl = null;
   let advisories = [];
