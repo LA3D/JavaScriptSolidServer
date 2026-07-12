@@ -150,7 +150,12 @@ test('read_resource remote: federation gate blocks anonymous; owner passes and l
   assert.equal(anonRes.isError, true);
   assert.match(anonRes.content[0].text, /federation requires a local WebID/);
 
-  const res = await callTool('read_resource', { uri: url }, { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+  // The stub is a loopback address — dt8's SSRF guard blocks it by default,
+  // so this test (which uses loopback to stand in for "a foreign pod")
+  // needs the local-rig opt-in to reach it. The guard itself is covered by
+  // test/mcp-federation-hardening.test.js.
+  const res = await callTool('read_resource', { uri: url },
+    { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true, federationPrivate: true });
   assert.equal(res.isError ?? false, false, JSON.stringify(res));
   const out = JSON.parse(res.content[0].text);
   assert.equal(out.links.context, 'https://ex.org/ctx.jsonld');   // surfaced, not applied

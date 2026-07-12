@@ -22,6 +22,8 @@ import { readResource } from './resources.js';
 import { ResourceError } from './errors.js';
 import { isLocalUri, uriToPath } from './uri.js';
 import { listFixed, RESOURCE_TEMPLATE } from './surface.js';
+import { isBlockedHost } from './ssrf.js';
+import { MAX_BODY_BYTES } from './read.js';
 
 const JSONLD_CONTEXT_REL = 'http://www.w3.org/ns/json-ld#context';
 
@@ -110,6 +112,15 @@ async function readRemote(url, ctx) {
   if (depth > MAX_FEDERATION_DEPTH) {
     return toolError(`federation depth exceeded (max ${MAX_FEDERATION_DEPTH})`);
   }
+  // SSRF guard (dt8, spec §6): a federation-gated agent can otherwise reach
+  // LAN/loopback/cloud-metadata endpoints from inside the pod's trust
+  // boundary. Default-blocked; --lws-federation-private is the local rig's
+  // opt-in. Checked before the fetch — never dial a blocked host at all.
+  if (isBlockedHost(new URL(url).hostname, { allowPrivate: ctx.federationPrivate })) {
+    return toolError(
+      `federation blocked: ${url} resolves to a private/internal address (set --lws-federation-private to allow)`
+    );
+  }
   let r;
   try {
     r = await fetch(url, {
@@ -122,7 +133,10 @@ async function readRemote(url, ctx) {
   } catch (e) {
     return toolError(`remote unreachable: ${e.message}`);
   }
-  const body = await r.text();
+  // Bounded body read — a remote pod is the LEAST-trusted content source
+  // (unlike local reads, already capped by readBounded/MAX_BODY_BYTES),
+  // so never buffer an unbounded body from it (dt8, spec §6).
+  const { text: body, truncated } = await readRemoteBody(r);
   // Header-borne affordances (json-ld#context / alternate / linkset) are the
   // agent's ONLY channel to how a remote representation should be interpreted
   // — surface them (never auto-fetch/apply). Body: a remote pod is the
@@ -133,8 +147,41 @@ async function readRemote(url, ctx) {
     status: r.status,
     contentType: r.headers.get('content-type') || null,
     ...(Object.keys(links).length ? { links } : {}),
+    ...(truncated ? { truncated: true } : {}),
     body: sanitizeDeep(body)
   });
+}
+
+// Reads at most `max` bytes off the response stream and cancels the rest,
+// rather than `await r.text()`-ing an attacker-controlled body fully into
+// memory first. Mirrors readBounded's (src/mcp/read.js) truncated-flag
+// shape; falls back to a capped r.text() when the runtime hands back a
+// response with no readable stream (e.g. a test double).
+async function readRemoteBody(r, max = MAX_BODY_BYTES) {
+  const reader = r.body?.getReader?.();
+  if (!reader) {
+    const text = await r.text();
+    const bytes = Buffer.byteLength(text, 'utf8');
+    if (bytes <= max) return { text, truncated: false };
+    return { text: Buffer.from(text, 'utf8').subarray(0, max).toString('utf8'), truncated: true };
+  }
+  const chunks = [];
+  let total = 0;
+  let truncated = false;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      truncated = true;
+      chunks.push(value.subarray(0, value.byteLength - (total - max)));
+      try { await reader.cancel(); } catch { /* noop */ }
+      break;
+    }
+    chunks.push(value);
+  }
+  const text = Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength))).toString('utf8');
+  return { text, truncated };
 }
 
 // --- the tools ---

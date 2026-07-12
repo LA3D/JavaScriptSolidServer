@@ -164,6 +164,7 @@ program
   .option('--mcp', 'Enable MCP (Model Context Protocol) server at /mcp — pod as a tool surface for agents (#490)')
   .option('--no-mcp', 'Disable MCP server')
   .option('--mcp-credential-policy <policy>', "Credential tier required on /mcp: 'trusted-local' (default) or 'audience-bound' (refuses the replayable bearer, requires LWS-CID/Solid-OIDC DPoP)")
+  .option('--lws-federation-private', 'Allow the MCP federation arm (read_resource remote reads) to reach loopback/RFC-1918/link-local/cloud-metadata hosts (default: blocked)')
   .option('-q, --quiet', 'Suppress log output')
   .option('--log-level <level>', 'Log level: error, warn, info, debug (default: info)')
   .option('--print-config', 'Print configuration and exit')
@@ -285,6 +286,7 @@ program
         mongoDatabase: config.mongoDatabase,
         mcp: config.mcp,
         mcpCredentialPolicy: config.mcpCredentialPolicy,
+        lwsFederationPrivate: config.lwsFederationPrivate,
       });
 
       await server.listen({ port: config.port, host: config.host });

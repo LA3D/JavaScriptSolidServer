@@ -213,6 +213,10 @@ export async function mcpPlugin(fastify, options = {}) {
   // storage-description route reads) so the McpService hint's budget
   // sentence can never drift between the two surfaces (task 6, parity).
   const anonRateLimitMax = options.anonRateLimitMax ?? null;
+  // Federation SSRF opt-in (dt8, spec §6) — threaded from server.js's
+  // --lws-federation-private the same way as credentialPolicy/podConfig.
+  // Off by default; readRemote (read-tools.js) is the only consumer.
+  const federationPrivate = options.federationPrivate ?? false;
   fastify.post('/mcp', routeOptions, async (request, reply) => {
     const body = request.body;
     if (!body || typeof body !== 'object') {
@@ -245,6 +249,7 @@ export async function mcpPlugin(fastify, options = {}) {
       webId: webId || null,
       origin: originOf(request),
       federationDepth,
+      federationPrivate,
       lwsEnabled: request.lwsEnabled || false,
       typeIndexEnabled: request.typeIndexEnabled || false,
       profileIndexPath: profileIndex || null,

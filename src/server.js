@@ -232,6 +232,13 @@ export function createServer(options = {}) {
   const mcpCredentialPolicy = validMcpCredentialPolicies.includes(options.mcpCredentialPolicy)
     ? options.mcpCredentialPolicy
     : 'trusted-local';
+  // Federation SSRF guard opt-in (dt8, spec §6): the MCP federation arm
+  // (read_resource's remote branch) blocks loopback/RFC-1918/link-local/
+  // cloud-metadata hosts by default. --lws-federation-private is the
+  // deliberate opt-in for the local rig (self-fetch across containers on
+  // one host). Strict `=== true` mirrors provisionKeysEnabled below — a
+  // stray truthy non-boolean must not silently open the guard.
+  const federationPrivate = options.lwsFederationPrivate === true;
   // Provision a Schnorr secp256k1 owner key in /private/privkey.jsonld
   // when a single-user pod is first created. Phase 1 of #437. Off by
   // default: keys-on-disk is a real security tradeoff, opt-in keeps
@@ -584,7 +591,7 @@ export function createServer(options = {}) {
   // routes registered directly/synchronously on this outer instance).
   if (mcpEnabled) {
     const mcpRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax) } };
-    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfig, anonRateLimitMax });
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfig, anonRateLimitMax, federationPrivate });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
