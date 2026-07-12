@@ -468,11 +468,23 @@ export async function handleGet(request, reply) {
               Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
               return reply.send(turtleContent);
             } else {
-              // Return JSON-LD directly
+              // Return JSON-LD directly. P3 (LWS media-type MUST, task-9
+              // review): the SAME label swap the listing branch applies
+              // (~line 555) — plain application/json is the identical
+              // data-island payload under its own label when the client
+              // prefers it (body untouched). Mirrors HEAD's shadowActive
+              // branch (~line 1594), which stamps this label onto
+              // `indexStats.etag` with NO variant suffix — so this branch
+              // keeps that same bare etag rather than adopting the
+              // listing's containerListingEtag/VARIANT_KEYS treatment;
+              // matching HEAD (not the listing) is what keeps GET==HEAD
+              // (#552) for the shadowed case.
+              const islandContentType = (request.lwsEnabled && prefersPlainJson(acceptHeader))
+                ? 'application/json' : 'application/ld+json';
               const headers = getAllHeaders({
                 isContainer: true,
                 etag: indexStats?.etag || stats.etag,
-                contentType: 'application/ld+json',
+                contentType: islandContentType,
                 origin,
                 resourceUrl,
                 connegEnabled,
