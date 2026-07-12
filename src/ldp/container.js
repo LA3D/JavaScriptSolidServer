@@ -2,7 +2,6 @@
  * Generate container representation as JSON-LD
  */
 
-import mime from 'mime-types';
 import { getContentType } from '../utils/url.js';
 
 const LDP = 'http://www.w3.org/ns/ldp#';
