@@ -39,9 +39,9 @@ describe('representation preservation (--lws)', () => {
     assert.ok(JSON.stringify(doc).includes('http://ex/p'));
   });
 
-  // TODO(dt7): items[].mediaType is derived from getContentType — Task 7 lands the
-  // fix that makes this agree with the stored Turtle type. Un-skip there.
-  it.skip('items[] mediaType agrees with the stored Turtle type', async () => {
+  // Task 7: items[].mediaType is derived from getContentType — now uses
+  // Solid-aware getContentType() for sidecar and RDF type resolution.
+  it('items[] mediaType agrees with the stored Turtle type', async () => {
     const l = await request(`${base}/rp/`, { headers: { authorization: `Bearer ${tok}`, accept: 'application/lws+json' } });
     const item = (await l.json()).items.find(i => i.id.endsWith('/v.ttl'));
     assert.equal(item.mediaType, 'text/turtle');
