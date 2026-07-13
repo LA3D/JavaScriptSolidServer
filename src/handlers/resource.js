@@ -2132,13 +2132,20 @@ export async function handleOptions(request, reply) {
 // task-6 review (owner directive): PATCH on a verbatim-stored resource
 // applies at the RDF TERM level — no JSON-LD document detour. n3-patch.js
 // and sparql-update.js both hand back ground triples {subject, predicate,
-// object}; object is a plain string (URI or literal — parseN3Patch's own
-// ambiguity, resolved the same way its legacy convertToJsonLd did: a bare
-// http(s) string is a URI, anything else a plain literal), an {'@id': ...}
-// / {value|@value, type|@type} / {value|@value, language|@language} object
-// (sparql-update.js's shape), or an N3-Patch-only {blankNode} marker.
-// termFromId/termFromPatchObject below build real n3 DataFactory terms from
-// either shape uniformly.
+// object}; object is a plain string, an {'@id': ...} / {value|@value,
+// type|@type} / {value|@value, language|@language} object (sparql-update.js's
+// shape), or an N3-Patch-only {blankNode} marker. A bare STRING object is
+// only ambiguous (URI or literal) when it came from parseN3Patch — its own
+// regex parser hands back the same bare-string shape for both (resolved
+// the same way its legacy convertToJsonLd did: a bare http(s) string is a
+// URI, anything else a plain literal). parseSparqlUpdate's bare strings are
+// NEVER ambiguous — termToJsonLdValue only flattens a KNOWN xsd:string
+// literal that way, always wrapping IRIs as {'@id':...} — so the
+// http-heuristic must not run on SPARQL-sourced strings (finding 1, review
+// round: it was corrupting URL-valued string literals into NamedNodes).
+// termFromId/termFromPatchObject below build real n3 DataFactory terms;
+// termFromPatchObject takes an `ambiguous` flag so each caller in
+// applyPatchToDataset can say which shape-origin it's feeding it.
 const { namedNode: patchNamedNode, literal: patchLiteral, blankNode: patchBlankNode,
   quad: patchQuad, defaultGraph: patchDefaultGraph } = N3DataFactory;
 
@@ -2148,9 +2155,19 @@ function termFromId(value) {
     : patchNamedNode(value);
 }
 
-function termFromPatchObject(object) {
+// `ambiguous` is true only for N3-Patch-sourced objects, whose parser hands
+// back a bare string for BOTH IRIs and plain literals (genuine ambiguity —
+// resolveValue in n3-patch.js, see comment above). SPARQL's parser KNOWS
+// the difference (termToJsonLdValue in sparql-update.js wraps IRIs as
+// {'@id':...} and only flattens a KNOWN xsd:string literal to a bare
+// string) — so a bare string from the SPARQL path must always be a
+// literal, never run through the http-heuristic (finding 1: a
+// "https://example.org" string literal was being corrupted into a
+// NamedNode on INSERT, and DELETE against that same literal silently
+// no-op'd because deleteMatches never matched a mistyped NamedNode).
+function termFromPatchObject(object, ambiguous) {
   if (typeof object === 'string') {
-    return (object.startsWith('http://') || object.startsWith('https://'))
+    return (ambiguous && (object.startsWith('http://') || object.startsWith('https://')))
       ? patchNamedNode(object)
       : patchLiteral(object);
   }
@@ -2174,14 +2191,14 @@ function termFromPatchObject(object) {
 // graph quads in .nq-stored docs (non-default graph) are never touched, so
 // they survive untouched. solid:where stays ignored (pre-existing gap, out
 // of scope — neither parser's `where` array is consulted here either).
-function applyPatchToDataset(dataset, { deletes = [], inserts = [] }) {
+function applyPatchToDataset(dataset, { deletes = [], inserts = [] }, ambiguous) {
   for (const t of deletes) {
     dataset.deleteMatches(
-      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object), patchDefaultGraph());
+      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object, ambiguous), patchDefaultGraph());
   }
   for (const t of inserts) {
     dataset.add(patchQuad(
-      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object), patchDefaultGraph()));
+      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object, ambiguous), patchDefaultGraph()));
   }
 }
 
@@ -2221,7 +2238,7 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
       return reply.code(400).send({ error: 'Bad Request', message: 'Invalid SPARQL Update: ' + e.message });
     }
     try {
-      applyPatchToDataset(dataset, update);
+      applyPatchToDataset(dataset, update, false); // SPARQL: bare strings are KNOWN literals
     } catch (e) {
       return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply SPARQL Update: ' + e.message });
     }
@@ -2233,7 +2250,7 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
       return reply.code(400).send({ error: 'Bad Request', message: 'Invalid N3 Patch format: ' + e.message });
     }
     try {
-      applyPatchToDataset(dataset, patch);
+      applyPatchToDataset(dataset, patch, true); // N3-Patch: bare strings are AMBIGUOUS (IRI or literal)
     } catch (e) {
       return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply patch: ' + e.message });
     }
