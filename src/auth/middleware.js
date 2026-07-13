@@ -95,6 +95,19 @@ export async function authorize(request, reply, options = {}) {
     return authorizeAclAccess(request, urlPath, method, webId, authError);
   }
 
+  // System-Managed `.lwstypes`/`.lwsprov` sidecars require special handling
+  // too (C1, 2026-07-13): they leak the SUBJECT's rdf:type / validating
+  // profile, so being able to see them should require READ on the subject —
+  // not whatever ACL the blanket check below would resolve for the sidecar's
+  // OWN path (which walks up to the container default and never binds to
+  // the subject's own, possibly tighter, `.acl` — see findApplicableAcl in
+  // src/wac/checker.js). Mirrors the `.acl` carve-out above, READ instead of
+  // Control. --lws-gated: these sidecars can't exist with `--lws` off (the
+  // write path that creates them is gated), so this is a no-op there.
+  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(urlPath)) {
+    return authorizeSidecarAccess(request, urlPath, webId, authError);
+  }
+
   // Log auth failures for debugging
   if (authError) {
     request.log.warn({ authError, method, urlPath, hasAuth: !!request.headers.authorization }, 'Auth error');
@@ -488,4 +501,55 @@ async function authorizeAclAccess(request, urlPath, method, webId, authError) {
     : wacAllow;
 
   return { authorized: allowed, webId, wacAllow: aclWacAllow, authError };
+}
+
+/**
+ * Authorize access to System-Managed `.lwstypes`/`.lwsprov` sidecars.
+ * These sidecars reveal the SUBJECT resource's rdf:type (`.lwstypes`) or
+ * validating profile (`.lwsprov`) — so reading them requires acl:Read on the
+ * subject, exactly the access the subject's own `.acl` already governs.
+ *
+ * Without this, a direct GET of e.g. `secret.jsonld.lwstypes` falls through
+ * the dotfile guard (it doesn't start with `.`) into the blanket WAC check,
+ * which resolves an ACL by walking UP from the sidecar's own path
+ * (findApplicableAcl in src/wac/checker.js) — landing on the CONTAINER
+ * default, never the subject's own (possibly tighter) `.acl`. A private
+ * resource in an otherwise-public container leaked its type/provenance to
+ * anonymous clients even though the resource itself 403s (C1, 2026-07-13).
+ *
+ * @param {object} request - Fastify request
+ * @param {string} urlPath - URL path to the `.lwstypes`/`.lwsprov` sidecar
+ * @param {string|null} webId - Authenticated user's WebID
+ * @param {string|null} authError - Authentication error if any
+ * @returns {Promise<{authorized: boolean, webId: string|null, wacAllow: string, authError: string|null}>}
+ */
+async function authorizeSidecarAccess(request, urlPath, webId, authError) {
+  // Strip the sidecar suffix to get the subject these describe.
+  // `foo.jsonld.lwstypes` describes `foo.jsonld`; sidecars are always
+  // resource (never container) suffixes — write.js only writes them
+  // alongside a PUT/POST'd RDF resource body.
+  const subjectPath = urlPath.replace(/\.(lwstypes|lwsprov)$/, '');
+  const isSubjectContainer = subjectPath.endsWith('/');
+  const subjectUrl = buildResourceUrl(request, subjectPath);
+
+  const storagePath = getEffectiveUrlPath(request).replace(/\.(lwstypes|lwsprov)$/, '');
+
+  // READ on the subject — the same mode the subject's own GET requires.
+  const { allowed, wacAllow } = await checkAccess({
+    resourceUrl: subjectUrl,
+    resourcePath: storagePath,
+    isContainer: isSubjectContainer,
+    agentWebId: webId,
+    requiredMode: AccessMode.READ
+  });
+
+  // WAC-Allow describes the REQUESTED resource (the sidecar), which only
+  // ever supports GET/HEAD — narrow the subject's mode set (which may
+  // legitimately include write/append/control) down to "read", so the
+  // header never over-claims modes the sidecar doesn't support.
+  const readOnly = (modes) => modes.split(/\s+/).filter(m => m === 'read').join(' ');
+  const sidecarWacAllow = wacAllow.replace(/user="([^"]*)"/, (_, m) => `user="${readOnly(m)}"`)
+                                   .replace(/public="([^"]*)"/, (_, m) => `public="${readOnly(m)}"`);
+
+  return { authorized: allowed, webId, wacAllow: sidecarWacAllow, authError };
 }
