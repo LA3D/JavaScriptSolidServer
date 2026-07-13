@@ -1,7 +1,8 @@
 import { admit, urlToStoragePath } from './admission.js';
-import { captureDeclaredTypes, typeStorePath } from './type-metadata.js';
+import { captureDeclaredTypes, typeStorePath, writeProvenance } from './type-metadata.js';
 import { writeTypeConsistency } from './write-consistency.js';
 import { subjectTypesFromBody } from './subject-types.js';
+import { conformsToTargets } from './constraint.js';
 
 /**
  * Shared LWS write pipeline: name/type gate → SHACL admission → storage.write
@@ -21,10 +22,11 @@ export async function applyLwsWrite({
 
   let shapeUrl = null;
   let advisories = [];
+  let containerMetaPath = null;
 
   if (lwsEnabled) {
     const targetMetaPath = storagePath + '.meta';
-    const containerMetaPath = storagePath.slice(0, storagePath.lastIndexOf('/') + 1) + '.meta';
+    containerMetaPath = storagePath.slice(0, storagePath.lastIndexOf('/') + 1) + '.meta';
     const result = await admit({
       storage, content, contentType, resourceUrl,
       targetMetaPath, containerMetaPath, shapeUrlToPath: urlToStoragePath,
@@ -48,6 +50,21 @@ export async function applyLwsWrite({
     const enriched = [...new Set([...declaredTypes, ...bodyTypes])];
     if (enriched.length) await captureDeclaredTypes(storage, storagePath, enriched);
     else await storage.remove(typeStorePath(storagePath));
+
+    // Earned conformsTo provenance (Task 2, 2026-07-13): a non-reject write
+    // reaches here, so stamp the member with the profile its CONTAINER
+    // declares (dct:conformsTo on the container's .meta) — System-Managed
+    // provenance, distinct from a resource's own client-managed `.meta`
+    // dct:conformsTo (declared binding intent). The up-walk stays the
+    // discovery contract; this is provenance only, and best-effort: a
+    // read/write hiccup here must never fail a write that already
+    // succeeded.
+    try {
+      const containerConformsTo = await conformsToTargets(storage, containerMetaPath, resourceUrl);
+      if (containerConformsTo.length) {
+        await writeProvenance(storage, storagePath, { conformsTo: containerConformsTo });
+      }
+    } catch { /* provenance is additive; never block the write */ }
   }
 
   return { ok: true, wrote, shapeUrl, advisories };

@@ -44,3 +44,25 @@ export async function readDeclaredTypes(storage, storagePath) {
   try { const arr = JSON.parse(buf.toString('utf8')); return Array.isArray(arr) ? arr : []; }
   catch { return []; }
 }
+
+// Earned conformsTo provenance (System-Managed): which profile a member's
+// CONTAINER declared at the moment the member was admitted. Distinct from
+// the client-managed `.meta` dct:conformsTo (declared binding intent) — a
+// separate `.lwsprov` sidecar, not folded into `.lwstypes` (a plain
+// type-URI array), keeps both shapes simple.
+export function provStorePath(storagePath) {
+  return storagePath + '.lwsprov';
+}
+
+export async function readProvenance(storage, storagePath) {
+  const p = provStorePath(storagePath);
+  if (!(await storage.exists(p))) return null;
+  const buf = await storage.read(p);
+  if (!buf) return null;
+  try { return JSON.parse(buf.toString('utf8')); }
+  catch { return null; }
+}
+
+export async function writeProvenance(storage, storagePath, prov) {
+  await storage.write(provStorePath(storagePath), Buffer.from(JSON.stringify(prov)));
+}
