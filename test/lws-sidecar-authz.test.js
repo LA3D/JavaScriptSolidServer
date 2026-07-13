@@ -13,6 +13,19 @@
 // `*.lwstypes`/`*.lwsprov` now requires acl:Read on the STRIPPED SUBJECT —
 // mirrors the existing `*.acl` carve-out (authorizeAclAccess), READ instead
 // of Control.
+//
+// `.meta` extension (same day, live-triage-confirmed): the client-managed
+// `.meta` sidecar leaks the same class of thing — a private member's own
+// governance metadata (dct:conformsTo/powder:describedby) plus its
+// existence — through the identical hole. GET/HEAD of `*.meta` now routes
+// through the SAME authorizeSidecarAccess (READ-on-stripped-subject);
+// PUT/PATCH/DELETE of `.meta` are untouched (still WRITE via the blanket
+// check — `.meta` is legitimately client-writable, unlike `.lwstypes`/
+// `.lwsprov`). The stripped-subject computation is suffix-agnostic: a
+// CONTAINER's own bare `.meta` (`/foo/.meta` → strip → `/foo/`) checks READ
+// on the CONTAINER, preserving the public governance up-walk; a MEMBER's
+// `.meta` (`/foo/bar.meta` → strip → `/foo/bar`) checks READ on the MEMBER,
+// closing the leak.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -45,7 +58,7 @@ function typedBody(base, path) {
   });
 }
 
-describe('.lwstypes/.lwsprov sidecars require READ-on-subject (C1)', () => {
+describe('.lwstypes/.lwsprov/.meta sidecars require READ-on-subject (C1)', () => {
   let alice, base;
 
   before(async () => {
@@ -110,6 +123,33 @@ describe('.lwstypes/.lwsprov sidecars require READ-on-subject (C1)', () => {
       body: serializeAcl(generatePrivateAcl(`${base}${PRIV}`, alice.webId, false)),
     });
     assert.ok([200, 201, 204].includes(aclRes2.status), `priv .acl re-PUT ${aclRes2.status}`);
+
+    // `.meta` extension fixtures: a MEMBER-level `.meta` on each of PRIV
+    // (tighter own .acl) and OPEN (public, container default) — distinct
+    // from the CONTAINER's own bare `.meta` PUT above (which already
+    // carries describedby+conformsTo and is reused as-is for the up-walk
+    // case). Owner-authored via alice; write.js resolves `.meta` writes
+    // through the container's default ACL (not the stripped-subject rule
+    // — that's GET/HEAD-only), so these PUTs succeed regardless of PRIV's
+    // tighter own .acl.
+    const privMetaPut = await request(`${PRIV}.meta`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'alice',
+      body: JSON.stringify({
+        '@id': `${base}${PRIV}`,
+        [DESCRIBEDBY]: { '@id': `${base}/alice/shapes/AlwaysPassSidecar` },
+        [DCT_CONFORMS]: { '@id': PROFILE_URI },
+      }),
+    });
+    assert.ok(privMetaPut.ok, `priv .meta PUT ${privMetaPut.status}`);
+
+    const openMetaPut = await request(`${OPEN}.meta`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'alice',
+      body: JSON.stringify({
+        '@id': `${base}${OPEN}`,
+        [DCT_CONFORMS]: { '@id': PROFILE_URI },
+      }),
+    });
+    assert.ok(openMetaPut.ok, `open .meta PUT ${openMetaPut.status}`);
   });
   after(async () => { await stopTestServer(); });
 
@@ -155,5 +195,51 @@ describe('.lwstypes/.lwsprov sidecars require READ-on-subject (C1)', () => {
     assert.equal(r.status, 200, `expected 200, got ${r.status}`);
     const body = await r.json();
     assert.ok(Array.isArray(body) && body.includes('https://example.org/ex#Thing'));
+  });
+
+  // --- .meta extension (live-triage-confirmed leak, 2026-07-13) ---
+
+  it('LEAK CLOSED: anonymous GET of the private member\'s .meta is not 200', async () => {
+    const r = await request(`${PRIV}.meta`);
+    assert.ok([401, 403, 404].includes(r.status), `expected 401/403/404, got ${r.status}: ${await r.text()}`);
+  });
+
+  it('LEAK CLOSED: anonymous HEAD of the private member\'s .meta is not 200', async () => {
+    const r = await request(`${PRIV}.meta`, { method: 'HEAD' });
+    assert.ok([401, 403, 404].includes(r.status), `expected 401/403/404, got ${r.status}`);
+  });
+
+  it('NO OVER-BLOCKING: a public member\'s .meta stays anonymously readable', async () => {
+    const r = await request(`${OPEN}.meta`);
+    assert.equal(r.status, 200, `expected 200, got ${r.status}`);
+    const body = await r.json();
+    assert.equal(body[DCT_CONFORMS]?.['@id'], PROFILE_URI, `expected conformsTo in body: ${JSON.stringify(body)}`);
+  });
+
+  it('UP-WALK PRESERVED: a public container\'s own .meta stays anonymously readable', async () => {
+    // /alice/public/.meta was PUT in before() with describedby+conformsTo.
+    // Stripping '.meta' from '/alice/public/.meta' yields the CONTAINER
+    // path '/alice/public/' (trailing slash) — READ is checked against the
+    // container, which is public-read by default, so this must stay 200.
+    // This is the case the fix must NOT break: governance discovery for a
+    // cold agent walking up from a member to its container's .meta.
+    const r = await request('/alice/public/.meta');
+    assert.equal(r.status, 200, `expected 200, got ${r.status}`);
+    const body = await r.json();
+    assert.equal(body[DCT_CONFORMS]?.['@id'], PROFILE_URI, `expected conformsTo in body: ${JSON.stringify(body)}`);
+    assert.equal(body[DESCRIBEDBY]?.['@id'], `${base}/alice/shapes/AlwaysPassSidecar`,
+      `expected describedby in body: ${JSON.stringify(body)}`);
+  });
+
+  it('PRESERVED: the owner still GETs the private member\'s .meta', async () => {
+    const r = await request(`${PRIV}.meta`, { auth: 'alice' });
+    assert.equal(r.status, 200, `expected 200, got ${r.status}`);
+    const body = await r.json();
+    assert.equal(body[DCT_CONFORMS]?.['@id'], PROFILE_URI, `expected conformsTo in body: ${JSON.stringify(body)}`);
+  });
+
+  it('sanity: .acl stays CONTROL-protected (unchanged by the .meta fix)', async () => {
+    const r = await request(`${PRIV}.acl`);
+    assert.ok([401, 403].includes(r.status), `expected 401/403, got ${r.status}: ${await r.text()}`);
   });
 });

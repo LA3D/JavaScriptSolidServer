@@ -108,6 +108,33 @@ export async function authorize(request, reply, options = {}) {
     return authorizeSidecarAccess(request, urlPath, webId, authError);
   }
 
+  // The client-managed `.meta` sidecar leaks the same class of thing —
+  // governance metadata (dct:conformsTo, powder:describedby) plus the
+  // subject's existence — through the identical hole: a live triage
+  // (2026-07-13) confirmed a private member's OWN `x.meta` was anonymously
+  // GETtable when the member sat in a public container but carried a
+  // tighter own `.acl`, because the blanket check below resolves `.meta`'s
+  // ACL by walking up from `.meta`'s OWN path (never the member's own
+  // `.acl` — same findApplicableAcl gap as above) and lands on the
+  // container default. Route it through the SAME authorizeSidecarAccess
+  // (READ-on-stripped-subject) — but GET/HEAD ONLY: unlike `.lwstypes`/
+  // `.lwsprov` (never client-writable), `.meta` IS legitimately
+  // client-PUT/PATCH/DELETE-able (pod owners declare describedby/conformsTo
+  // on it), and those methods must keep requiring WRITE via the unmodified
+  // blanket check below — routing them through authorizeSidecarAccess too
+  // would silently downgrade a `.meta` write from WRITE-gated to
+  // READ-gated. authorizeSidecarAccess strips the suffix and re-derives
+  // isContainer from the stripped path's trailing slash, so a CONTAINER's
+  // own bare `.meta` (`/foo/.meta` → strip → `/foo/`) still checks READ on
+  // the CONTAINER — preserving the public governance up-walk (a cold agent
+  // reading a public container's `.meta` for its conformsTo/describedby) —
+  // while a MEMBER's `.meta` (`/foo/bar.meta` → strip → `/foo/bar`) checks
+  // READ on the MEMBER, closing the leak. --lws-gated to match the sibling
+  // suffixes and keep this scoped to the C1 line of fixes.
+  if (request.lwsEnabled && (method === 'GET' || method === 'HEAD') && urlPath.endsWith('.meta')) {
+    return authorizeSidecarAccess(request, urlPath, webId, authError);
+  }
+
   // Log auth failures for debugging
   if (authError) {
     request.log.warn({ authError, method, urlPath, hasAuth: !!request.headers.authorization }, 'Auth error');
@@ -504,35 +531,61 @@ async function authorizeAclAccess(request, urlPath, method, webId, authError) {
 }
 
 /**
- * Authorize access to System-Managed `.lwstypes`/`.lwsprov` sidecars.
- * These sidecars reveal the SUBJECT resource's rdf:type (`.lwstypes`) or
- * validating profile (`.lwsprov`) — so reading them requires acl:Read on the
- * subject, exactly the access the subject's own `.acl` already governs.
+ * Authorize access to System-Managed `.lwstypes`/`.lwsprov` sidecars, and
+ * the client-managed `.meta` sidecar.
+ * `.lwstypes`/`.lwsprov` reveal the SUBJECT resource's rdf:type / validating
+ * profile; `.meta` reveals the subject's governance metadata
+ * (dct:conformsTo, powder:describedby) and existence — so reading any of
+ * them requires acl:Read on the subject, exactly the access the subject's
+ * own `.acl` already governs.
  *
- * Without this, a direct GET of e.g. `secret.jsonld.lwstypes` falls through
- * the dotfile guard (it doesn't start with `.`) into the blanket WAC check,
- * which resolves an ACL by walking UP from the sidecar's own path
- * (findApplicableAcl in src/wac/checker.js) — landing on the CONTAINER
- * default, never the subject's own (possibly tighter) `.acl`. A private
- * resource in an otherwise-public container leaked its type/provenance to
- * anonymous clients even though the resource itself 403s (C1, 2026-07-13).
+ * Without this, a direct GET of e.g. `secret.jsonld.lwstypes` (or
+ * `secret.jsonld.meta`) falls through the dotfile guard (`secret.jsonld.*`
+ * doesn't start with `.`, so it isn't caught by the ALLOWED_DOTFILES check
+ * in server.js) into the blanket WAC check, which resolves an ACL by
+ * walking UP from the sidecar's own path (findApplicableAcl in
+ * src/wac/checker.js) — landing on the CONTAINER default, never the
+ * subject's own (possibly tighter) `.acl`. A private resource in an
+ * otherwise-public container leaked its type/provenance to anonymous
+ * clients even though the resource itself 403s (C1, 2026-07-13; `.meta`
+ * extension same day, live-triage-confirmed).
+ *
+ * `.meta` is unlike `.lwstypes`/`.lwsprov` in that a CONTAINER also has its
+ * own bare `.meta` (`/foo/.meta`, which DOES start with `.` and IS in
+ * ALLOWED_DOTFILES, so it reaches this same authorize() pipeline via the
+ * normal resource path, not the dotfile 403). Stripping the suffix from
+ * `/foo/.meta` yields `/foo/` (isSubjectContainer = true via the trailing
+ * slash below) — READ is then checked against the CONTAINER, which is
+ * typically public-read, so the up-walk governance-discovery contract
+ * (a cold agent reading a public container's `.meta` for its
+ * conformsTo/describedby) keeps working. Stripping `/foo/bar.meta` yields
+ * `/foo/bar` (a member, isSubjectContainer = false) — READ is checked
+ * against the MEMBER, closing the leak for a private member sitting in a
+ * public container.
+ *
+ * Callers gate `.meta` dispatch to GET/HEAD only (unlike `.lwstypes`/
+ * `.lwsprov`, which are never client-writable) — PUT/PATCH/DELETE of
+ * `.meta` must keep going through the unmodified blanket WAC check (WRITE
+ * required), not this READ-only path.
  *
  * @param {object} request - Fastify request
- * @param {string} urlPath - URL path to the `.lwstypes`/`.lwsprov` sidecar
+ * @param {string} urlPath - URL path to the `.lwstypes`/`.lwsprov`/`.meta` sidecar
  * @param {string|null} webId - Authenticated user's WebID
  * @param {string|null} authError - Authentication error if any
  * @returns {Promise<{authorized: boolean, webId: string|null, wacAllow: string, authError: string|null}>}
  */
 async function authorizeSidecarAccess(request, urlPath, webId, authError) {
   // Strip the sidecar suffix to get the subject these describe.
-  // `foo.jsonld.lwstypes` describes `foo.jsonld`; sidecars are always
-  // resource (never container) suffixes — write.js only writes them
-  // alongside a PUT/POST'd RDF resource body.
-  const subjectPath = urlPath.replace(/\.(lwstypes|lwsprov)$/, '');
+  // `foo.jsonld.lwstypes` describes `foo.jsonld`; `foo.jsonld.meta`
+  // describes `foo.jsonld`; bare `.meta` describes the container it sits in
+  // (see the isSubjectContainer derivation below — trailing slash after
+  // stripping decides resource-vs-container per-request, no suffix-specific
+  // branching needed).
+  const subjectPath = urlPath.replace(/\.(lwstypes|lwsprov|meta)$/, '');
   const isSubjectContainer = subjectPath.endsWith('/');
   const subjectUrl = buildResourceUrl(request, subjectPath);
 
-  const storagePath = getEffectiveUrlPath(request).replace(/\.(lwstypes|lwsprov)$/, '');
+  const storagePath = getEffectiveUrlPath(request).replace(/\.(lwstypes|lwsprov|meta)$/, '');
 
   // READ on the subject — the same mode the subject's own GET requires.
   const { allowed, wacAllow } = await checkAccess({
