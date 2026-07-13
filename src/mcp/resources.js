@@ -73,6 +73,7 @@ async function readStorageDescription(ctx, uri) {
     typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
     profileIndexPath: ctx.profileIndexPath, voidPath: ctx.voidPath,
     profileConnegEnabled: ctx.profileConnegEnabled,
+    referentResolutionEnabled: ctx.referentResolutionEnabled,
     mcpEnabled: true,
     anonRateLimitMax: ctx.anonRateLimitMax,
   });
