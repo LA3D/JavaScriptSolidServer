@@ -3,6 +3,7 @@ import { captureDeclaredTypes, typeStorePath, writeProvenance } from './type-met
 import { writeTypeConsistency } from './write-consistency.js';
 import { subjectTypesFromBody } from './subject-types.js';
 import { conformsToTargets } from './constraint.js';
+import { AUX_SUFFIX } from '../storage/filesystem.js';
 
 /**
  * Shared LWS write pipeline: name/type gate → SHACL admission → storage.write
@@ -42,7 +43,11 @@ export async function applyLwsWrite({
 
   const wrote = await storage.write(storagePath, content);
 
-  if (lwsEnabled && wrote) {
+  // Auxiliary writes (.acl/.meta/.lwstypes/.lwsprov) never get type-capture or
+  // conformsTo provenance — an ACL body has its own typed acl:Authorization
+  // subject, and sidecar-of-a-sidecar (x.jsonld.acl.lwstypes) is what leaked
+  // into container listings (post-referent-round regression, fixed 2026-07-13).
+  if (lwsEnabled && wrote && !AUX_SUFFIX.test(storagePath)) {
     // Referent identity & discovery (2026-07-13): union the body's primary
     // referent rdf:type with the client-declared (Link rel=type) types —
     // enrich, never replace (lws10-searchindex content-derivation ¶2). The
