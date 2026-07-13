@@ -23,6 +23,7 @@ export async function applyLwsWrite({
   let shapeUrl = null;
   let advisories = [];
   let containerMetaPath = null;
+  let decision = null;
 
   if (lwsEnabled) {
     const targetMetaPath = storagePath + '.meta';
@@ -34,6 +35,7 @@ export async function applyLwsWrite({
     if (result.decision === 'reject') {
       return { ok: false, shapeUrl: result.shapeUrl, violations: result.violations };
     }
+    decision = result.decision;
     shapeUrl = result.shapeUrl || null;
     advisories = result.advisories || [];
   }
@@ -51,20 +53,25 @@ export async function applyLwsWrite({
     if (enriched.length) await captureDeclaredTypes(storage, storagePath, enriched);
     else await storage.remove(typeStorePath(storagePath));
 
-    // Earned conformsTo provenance (Task 2, 2026-07-13): a non-reject write
-    // reaches here, so stamp the member with the profile its CONTAINER
-    // declares (dct:conformsTo on the container's .meta) — System-Managed
-    // provenance, distinct from a resource's own client-managed `.meta`
-    // dct:conformsTo (declared binding intent). The up-walk stays the
-    // discovery contract; this is provenance only, and best-effort: a
-    // read/write hiccup here must never fail a write that already
-    // succeeded.
-    try {
-      const containerConformsTo = await conformsToTargets(storage, containerMetaPath, resourceUrl);
-      if (containerConformsTo.length) {
-        await writeProvenance(storage, storagePath, { conformsTo: containerConformsTo });
-      }
-    } catch { /* provenance is additive; never block the write */ }
+    // Earned conformsTo provenance (Task 2, 2026-07-13): "earned" means a
+    // profile that actually VALIDATED this member — decision === 'admit'
+    // (SHACL ran and passed), not merely != 'reject'. 'pass' (non-RDF body,
+    // or a container with conformsTo but no resolvable describedby shape —
+    // an opt-in miss) never ran SHACL, so it has nothing to earn. Stamp the
+    // member with the profile its CONTAINER declares (dct:conformsTo on the
+    // container's .meta) — System-Managed provenance, distinct from a
+    // resource's own client-managed `.meta` dct:conformsTo (declared binding
+    // intent). The up-walk stays the discovery contract; this is provenance
+    // only, and best-effort: a read/write hiccup here must never fail a
+    // write that already succeeded.
+    if (decision === 'admit') {
+      try {
+        const containerConformsTo = await conformsToTargets(storage, containerMetaPath, resourceUrl);
+        if (containerConformsTo.length) {
+          await writeProvenance(storage, storagePath, { conformsTo: containerConformsTo });
+        }
+      } catch { /* provenance is additive; never block the write */ }
+    }
   }
 
   return { ok: true, wrote, shapeUrl, advisories };

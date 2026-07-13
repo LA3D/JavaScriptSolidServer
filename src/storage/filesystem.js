@@ -5,7 +5,7 @@ import { getDataRoot, urlToPath, isContainer } from '../utils/url.js';
 
 // Note: Data directory is ensured in server.js after DATA_ROOT is set
 
-const AUX_SUFFIX = /\.(acl|meta|lwstypes)$/;
+const AUX_SUFFIX = /\.(acl|meta|lwstypes|lwsprov)$/;
 
 /**
  * Check if resource exists

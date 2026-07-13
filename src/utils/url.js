@@ -250,7 +250,10 @@ export function getContentType(filePath) {
     '.acl': 'application/ld+json',
     '.meta': 'application/ld+json',
     // LWS types sidecar (spec 2026-07-10 §4)
-    '.lwstypes': 'application/json'
+    '.lwstypes': 'application/json',
+    // LWS earned-conformsTo provenance sidecar (Task 2, 2026-07-13) — same
+    // stance as .lwstypes: plain JSON, no @context, so not ld+json.
+    '.lwsprov': 'application/json'
   };
 
   // Solid convention dotfiles (.acl, .meta) are RDF resources. path.extname
@@ -261,7 +264,7 @@ export function getContentType(filePath) {
   // older Solid tooling) via handleGet's conneg branch.
   const base = path.basename(filePath);
   if (base === '.acl' || base === '.meta') return 'application/ld+json';
-  if (base === '.lwstypes') return 'application/json';
+  if (base === '.lwstypes' || base === '.lwsprov') return 'application/json';
 
   // Overrides first, then the comprehensive mime-types database (as CSS and
   // NSS do), then octet-stream. This is what makes audio/video/etc. resolve

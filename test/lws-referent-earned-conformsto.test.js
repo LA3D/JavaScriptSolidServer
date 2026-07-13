@@ -97,4 +97,52 @@ describe('earned conformsTo provenance', () => {
     const prov = await readProvenance(storage, '/alice/plain/m');
     assert.equal(prov, null, 'no conformsTo declared -> no .lwsprov sidecar expected');
   });
+
+  // Fix 3 (review): a 'pass' decision (SHACL never ran) must not stamp
+  // provenance, even when the container declares conformsTo — "earned" means
+  // VALIDATED, not merely non-rejected. This container declares conformsTo
+  // but NO describedby, so resolveShapeUrl finds no shape (opt-in miss) and
+  // admit() returns 'pass' — the exact case the reviewer called out.
+  it('writes no sidecar on a pass decision (conformsTo declared, no resolvable shape)', async () => {
+    const mk = await request('/alice/passcase/', { method: 'PUT', auth: 'alice' });
+    assert.ok(mk.ok, `container create failed: ${mk.status}`);
+
+    const meta = await request('/alice/passcase/.meta', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@id': `${pod.base}/alice/passcase/`,
+        [DCT_CONFORMS]: { '@id': PROFILE_URI },
+      }),
+      auth: 'alice',
+    });
+    assert.ok(meta.ok, `.meta PUT failed: ${meta.status}`);
+
+    const put = await request('/alice/passcase/m', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { ex: 'http://ex/' },
+        '@id': `${pod.base}/alice/passcase/m`,
+        '@type': 'ex:Thing',
+      }),
+      auth: 'alice',
+    });
+    assert.ok(put.ok, `member PUT failed: ${put.status}`);
+
+    const prov = await readProvenance(storage, '/alice/passcase/m');
+    assert.equal(prov, null, "a 'pass' decision (no resolvable shape) must not earn conformsTo provenance");
+  });
+
+  // Fix 1 (review — confirmed leak): .lwsprov must be a registered aux
+  // suffix, or walkResources() surfaces it as its own resource and it leaks
+  // into /types/search (and the MCP resource-discovery walk that shares the
+  // same collectAuthorizedResources plumbing).
+  it('.lwsprov sidecar does not leak into GET /types/search', async () => {
+    const search = await request('/types/search', { auth: 'alice' });
+    assert.ok(search.ok, `/types/search failed: ${search.status}`);
+    const page = await search.json();
+    const leaked = page.items.filter((i) => i.id.endsWith('.lwsprov'));
+    assert.deepEqual(leaked, [], `.lwsprov sidecar(s) leaked into /types/search: ${JSON.stringify(leaked)}`);
+  });
 });
