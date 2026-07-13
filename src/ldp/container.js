@@ -6,6 +6,15 @@ import { getContentType } from '../utils/url.js';
 
 const LDP = 'http://www.w3.org/ns/ldp#';
 
+// System-Managed derived-metadata sidecars — NEVER LDP members. Deliberately
+// NARROWER than storage's AUX_SUFFIX: `.acl`/`.meta` are client-managed
+// per-resource auxiliaries that DO appear as members with their own mediaTypes
+// (DT7, pinned by lws-items-mediatype.test.js) and are WAC-filtered per member
+// by S1. `.lwstypes`/`.lwsprov` are server-derived, public-read by container
+// inheritance, and were the actual leak vector — a private resource's name
+// escaping into an anonymous listing via its sidecar (2026-07-13).
+const SYS_SIDECAR = /\.(lwstypes|lwsprov)$/;
+
 // Dotfiles allowed to appear in ldp:contains. Anything else starting with '.'
 // is server-internal state and must not leak into container listings — even
 // when direct GETs are 403'd by the routing-layer dotfile guard in server.js
@@ -31,7 +40,15 @@ const LDP = 'http://www.w3.org/ns/ldp#';
 const ALLOWED_DOTFILES = new Set(['.acl', '.meta', '.well-known']);
 
 function isHiddenEntry(name) {
-  return name.startsWith('.') && !ALLOWED_DOTFILES.has(name);
+  // Bare container-level sidecars (literal '.acl'/'.meta'/'.well-known') stay
+  // governed by ALLOWED_DOTFILES — CONTROL-holder visibility unchanged.
+  if (ALLOWED_DOTFILES.has(name)) return false;
+  if (name.startsWith('.')) return true;
+  // System-Managed suffix sidecars (x.jsonld.lwstypes/.lwsprov, incl.
+  // sidecar-of-a-sidecar like x.jsonld.acl.lwstypes) are never members and
+  // were the listing-leak vector — hide them. Client-managed x.jsonld.acl /
+  // x.jsonld.meta stay listed (DT7), WAC-filtered per member by S1.
+  return SYS_SIDECAR.test(name);
 }
 
 /**
@@ -91,7 +108,10 @@ export function generateLwsContainer(containerUrl, entries) {
   const baseUrl = containerUrl.endsWith('/') ? containerUrl : containerUrl + '/';
   // LWS excludes all dotfiles (including sidecars like .acl, .meta) from listing
   // Deliberately excludes all dotfiles (unlike isHiddenEntry which allows .acl/.meta/.well-known) — LWS hides sidecars
-  const items = entries.filter(e => !e.name.startsWith('.')).map(e => {
+  // Also excludes System-Managed suffix sidecars (x.jsonld.lwstypes/.lwsprov)
+  // that don't start with '.' — the same leak isHiddenEntry closes. Suffix
+  // .acl/.meta stay (DT7, pinned by lws-items-mediatype.test.js) (2026-07-13).
+  const items = entries.filter(e => !e.name.startsWith('.') && !SYS_SIDECAR.test(e.name)).map(e => {
     const id = baseUrl + e.name + (e.isDirectory ? '/' : '');
     const item = { id, type: e.isDirectory ? 'Container' : 'DataResource' };
     if (!e.isDirectory) item.mediaType = getContentType(e.name);

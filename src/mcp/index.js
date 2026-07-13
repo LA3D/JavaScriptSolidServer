@@ -244,18 +244,20 @@ export async function mcpPlugin(fastify, options = {}) {
     const depthHdr = request.headers['mcp-federation-depth'];
     const federationDepth = depthHdr ? parseInt(depthHdr, 10) || 0 : 0;
 
-    const { profileIndex, void: voidPath } = await podConfig.get();
+    const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
+    const lwsEnabled = request.lwsEnabled || false;
     const ctx = {
       webId: webId || null,
       origin: originOf(request),
       federationDepth,
       federationPrivate,
-      lwsEnabled: request.lwsEnabled || false,
+      lwsEnabled,
       typeIndexEnabled: request.typeIndexEnabled || false,
       profileIndexPath: profileIndex || null,
       voidPath: voidPath || null,
       notificationsEnabled: request.notificationsEnabled || false,
       profileConnegEnabled: request.lwsProfileConneg || false,
+      referentResolutionEnabled: lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0,
       anonRateLimitMax
     };
 

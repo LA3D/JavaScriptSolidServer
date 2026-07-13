@@ -419,9 +419,11 @@ export function createServer(options = {}) {
   fastify.decorateRequest('liveReloadEnabled', null);
   fastify.decorateRequest('singleUser', null);
   fastify.decorateRequest('singleUserName', null);
+  fastify.decorateRequest('podConfig', null);
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
+    request.podConfig = podConfig;
     request.typeIndexEnabled = typeIndexEnabled;
     request.lwsProfileConneg = profileConnegEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
@@ -1072,8 +1074,9 @@ export function createServer(options = {}) {
       // storage-description resource ctx (src/mcp/index.js) — otherwise HTTP
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
-      const { profileIndex, void: voidPath } = await podConfig.get();
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, mcpEnabled, anonRateLimitMax });
+      const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
+      const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, referentResolutionEnabled, mcpEnabled, anonRateLimitMax });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

@@ -56,10 +56,10 @@ export function generateStorageDescription(storageRootUrl, services = []) {
  * resource (read at /.well-known/lws-storage) both call this so the advertised
  * service set can never drift between the two surfaces.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
  * @returns {object}
  */
-export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, mcpEnabled = false, anonRateLimitMax = null } = {}) {
+export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, mcpEnabled = false, anonRateLimitMax = null } = {}) {
   const lwsStoragePath = '/.well-known/lws-storage';
   const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
   if (typeIndexEnabled) {
@@ -125,13 +125,27 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
       hint: 'This storage speaks RFC 9264: resources serve a linkset of their typed links — request the resource URL with Accept: application/linkset+json (rel="linkset"); a container shadowed by its index.html serves the HTML only to HTML-accepting requests — request it with a specific non-HTML Accept (application/lws+json, text/turtle, application/linkset+json) for the real container view; this includes the root: GET / with Accept: application/lws+json lists the top-level containers. A member linkset carries up/type; the governing describedby (SHACL shape) and conformsTo (profile) edges live on its CONTAINER\'s linkset — follow up. Linksets carry governance, not membership: list members by GETting the container itself (ldp:contains, or items[] via Accept: application/lws+json); search by type via the TypeSearchService.',
     },
   };
+  // Capability array is hoisted out of the conneg-only gate so a second,
+  // independent capability (referent resolution) can coexist — only
+  // attached to `base` if non-empty, so the default (neither flag set)
+  // stays byte-identical to before this array existed (no `capability` key).
+  const capability = [];
   if (profileConnegEnabled) {
-    base.capability = [{
+    capability.push({
       // DX-PROF-CONNEG cnpr:http functional profile — the pod negotiates
       // representations by profile via Accept-Profile / Content-Profile.
       type: 'http://www.w3.org/ns/dx/connegp/profile/http',
       hint: 'This storage negotiates by profile (W3C Content Negotiation by Profile). Send Accept-Profile: <profile-uri> to select a representation; a resource lists its representations as canonical/alternate links in its RFC 9264 linkset (type=media, formats=profile).',
-    }];
+    });
   }
+  if (referentResolutionEnabled) {
+    capability.push({
+      // Parallel to DX-PROF-CONNEG above: this storage resolves minted
+      // subject-IRI names (a declared void:uriSpace) by 303 redirect.
+      type: 'https://w3id.org/lws-pod/capability/ReferentResolution',
+      hint: 'This storage dereferences minted subject-IRI names by 303 redirect to their backing resource. A resource in a declared void:uriSpace resolves via GET; the referent is the #it fragment. Discover typed referents via the Type Search service.',
+    });
+  }
+  if (capability.length > 0) base.capability = capability;
   return base;
 }
