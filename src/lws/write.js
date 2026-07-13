@@ -1,6 +1,7 @@
 import { admit, urlToStoragePath } from './admission.js';
 import { captureDeclaredTypes, typeStorePath } from './type-metadata.js';
 import { writeTypeConsistency } from './write-consistency.js';
+import { subjectTypesFromBody } from './subject-types.js';
 
 /**
  * Shared LWS write pipeline: name/type gate → SHACL admission → storage.write
@@ -38,7 +39,14 @@ export async function applyLwsWrite({
   const wrote = await storage.write(storagePath, content);
 
   if (lwsEnabled && wrote) {
-    if (declaredTypes.length) await captureDeclaredTypes(storage, storagePath, declaredTypes);
+    // Referent identity & discovery (2026-07-13): union the body's primary
+    // referent rdf:type with the client-declared (Link rel=type) types —
+    // enrich, never replace (lws10-searchindex content-derivation ¶2). The
+    // else->remove branch now clears the sidecar only when BOTH sets are
+    // empty, so a body-only @type with no rel=type header still persists.
+    const bodyTypes = await subjectTypesFromBody(content, contentType, resourceUrl);
+    const enriched = [...new Set([...declaredTypes, ...bodyTypes])];
+    if (enriched.length) await captureDeclaredTypes(storage, storagePath, enriched);
     else await storage.remove(typeStorePath(storagePath));
   }
 
