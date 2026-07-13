@@ -7,12 +7,38 @@ import { isIP } from 'net';
 import dns from 'dns/promises';
 
 /**
+ * An IPv4-mapped IPv6 address embeds a real IPv4 target. Both the dotted
+ * (::ffff:169.254.169.254) and hex-group (::ffff:a9fe:a9fe) forms are
+ * recognized — `new URL().hostname` normalizes to the hex-group form, but
+ * callers may also pass the dotted-quad form directly (review #14: this
+ * decoder used to live only in src/mcp/ssrf.js's own divergent table).
+ * @param {string} ip - IP address to check
+ * @returns {string|null} - embedded dotted-quad IPv4, or null if not mapped
+ */
+export function embeddedV4(ip) {
+  let m = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(ip);
+  if (m) return m[1];
+  m = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(ip);
+  if (m) {
+    const hi = parseInt(m[1], 16), lo = parseInt(m[2], 16);
+    return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join('.');
+  }
+  return null;
+}
+
+/**
  * Check if an IP address is private/internal
  * Blocks: localhost, private ranges, link-local, loopback, etc.
  * @param {string} ip - IP address to check
  * @returns {boolean} - true if private/internal
  */
 export function isPrivateIP(ip) {
+  // Normalize IPv4-mapped IPv6 (dotted or hex-group form) to the embedded
+  // IPv4 first, so the one IPv4 table below covers mapped addresses too —
+  // no separate/narrower mapped-form list to drift out of sync (review #14).
+  const mapped = embeddedV4(ip);
+  if (mapped) return isPrivateIP(mapped);
+
   // IPv4 private/reserved ranges
   const privateRanges = [
     /^127\./, // Loopback (127.0.0.0/8)
@@ -21,7 +47,7 @@ export function isPrivateIP(ip) {
     /^192\.168\./, // Private Class C (192.168.0.0/16)
     /^169\.254\./, // Link-local (169.254.0.0/16) - AWS/cloud metadata!
     /^0\./, // Current network (0.0.0.0/8)
-    /^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\./, // Shared address space (100.64.0.0/10)
+    /^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\./, // Shared address space (100.64.0.0/10) - Alibaba metadata 100.100.100.200, Tailscale
     /^192\.0\.0\./, // IETF Protocol Assignments (192.0.0.0/24)
     /^192\.0\.2\./, // TEST-NET-1 (192.0.2.0/24)
     /^198\.51\.100\./, // TEST-NET-2 (198.51.100.0/24)
@@ -34,11 +60,10 @@ export function isPrivateIP(ip) {
   // IPv6 private/reserved
   const ipv6Private = [
     /^::1$/, // Loopback
+    /^::$/, // Unspecified (review #14)
     /^fe80:/i, // Link-local
-    /^fc00:/i, // Unique local (fc00::/7)
-    /^fd00:/i, // Unique local
+    /^f[cd]/i, // Unique local (fc00::/7 — widened from fc00:/fd00: literal prefixes, review #14: fc01::1 must block too)
     /^ff00:/i, // Multicast
-    /^::ffff:(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|169\.254\.)/i, // IPv4-mapped
   ];
 
   // Check IPv4

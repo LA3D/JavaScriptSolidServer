@@ -1,7 +1,7 @@
 import * as storage from '../storage/filesystem.js';
 import { initializeQuota, checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders } from '../ldp/headers.js';
-import { isContainer, getEffectiveUrlPath, getPodName } from '../utils/url.js';
+import { isContainer, getEffectiveUrlPath, getPodName, isBodiedWithoutContentType, missingContentTypeProblem } from '../utils/url.js';
 import { generateProfile, generatePreferences, generateTypeIndex, serialize } from '../webid/profile.js';
 import { generateOwnerAcl, generatePrivateAcl, generateInboxAcl, generatePublicFolderAcl, serializeAcl, relativizeOwnerWebId } from '../wac/parser.js';
 import { provisionOwnerKey, assertProvisionKeysCompatible } from '../keys/provision.js';
@@ -11,7 +11,7 @@ import { emitChange } from '../notifications/events.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
-import { writeTypeConsistency } from '../lws/write-consistency.js';
+import { extensionForRdfType } from '../lws/write-consistency.js';
 
 /**
  * Get the storage path and resource URL for a request
@@ -36,6 +36,16 @@ export async function handlePost(request, reply) {
   }
 
   const { urlPath, storagePath } = getRequestPaths(request);
+
+  // P2 (Solid #server-content-type-missing MUST): a bodied write with no
+  // Content-Type must 400, not silently fall through to canAcceptInput('').
+  // (The target resource URL isn't assigned yet at POST time — the
+  // container URL is the closest "instance" available.)
+  if (request.lwsEnabled && isBodiedWithoutContentType(request)) {
+    const containerUrl = `${request.protocol}://${request.hostname}${urlPath}`;
+    return reply.code(400).type('application/problem+json')
+      .send(JSON.stringify(missingContentTypeProblem(containerUrl), null, 2));
+  }
 
   // Ensure target is a container
   if (!isContainer(urlPath)) {
@@ -88,8 +98,12 @@ export async function handlePost(request, reply) {
   // Check if creating a container (Link header contains ldp:Container or ldp:BasicContainer)
   const isCreatingContainer = linkHeader.includes('Container') || linkHeader.includes('BasicContainer');
 
-  // Generate unique filename
-  const filename = await storage.generateUniqueFilename(storagePath, slug, isCreatingContainer);
+  // Generate unique filename. #9: a slug-less RDF create derives its extension
+  // from the submitted type so the server's own name never trips the write-
+  // consistency gate (a name it assigned itself, extensionless, otherwise 400s).
+  const defaultExt = (request.lwsEnabled && !isCreatingContainer)
+    ? extensionForRdfType(contentType) : '';
+  const filename = await storage.generateUniqueFilename(storagePath, slug, isCreatingContainer, defaultExt);
   const newUrlPath = urlPath + filename + (isCreatingContainer ? '/' : '');
   const newStoragePath = storagePath + filename + (isCreatingContainer ? '/' : '');
   const resourceUrl = `${request.protocol}://${request.hostname}${newUrlPath}`;
@@ -110,16 +124,13 @@ export async function handlePost(request, reply) {
       content = Buffer.from('');
     }
 
-    // Spec §2: under --lws, store the submitted bytes verbatim; enforce
-    // write-time name/type consistency instead of converting (B1 root fix).
-    // The FINAL resource name (container path + slug) is what must agree
-    // with the submitted type — not the container's own path.
+    // Spec §2: under --lws, store the submitted bytes verbatim; the name/type
+    // gate now runs inside applyLwsWrite (review #2 — the choke point every
+    // write surface shares) against storagePath, which is the FINAL resource
+    // name (container path + slug) — not here.
     // --lws-off keeps the byte-identical legacy Turtle/N3→JSON-LD conversion.
     const inputType = contentType.split(';')[0].trim().toLowerCase();
-    if (request.lwsEnabled) {
-      const c = writeTypeConsistency({ urlPath: newUrlPath, submittedType: contentType, lwsEnabled: true });
-      if (!c.ok) return reply.code(400).type('application/problem+json').send(JSON.stringify(c.problem, null, 2));
-    } else if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
+    if (!request.lwsEnabled && connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
       try {
         const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: false });
         content = Buffer.from(JSON.stringify(jsonLd, null, 2));
@@ -153,6 +164,9 @@ export async function handlePost(request, reply) {
       lwsEnabled: request.lwsEnabled,
     });
     if (!w.ok) {
+      if (w.problem) {
+        return reply.code(400).type('application/problem+json').send(JSON.stringify(w.problem, null, 2));
+      }
       reply.header('content-type', 'application/problem+json');
       if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
       return reply.code(400).send(constraintProblem({

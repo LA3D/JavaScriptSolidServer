@@ -83,6 +83,24 @@ export function selectContentType(acceptHeader, connegEnabled = false, lwsEnable
   return RDF_TYPES.JSON_LD;
 }
 
+// P3 (LWS media-type MUST, FOLLOWUP.md conformance-audit 2026-07-12): does
+// this Accept explicitly prefer plain application/json over the ld+json/
+// lws+json spellings? Label-only — selectContentType above still resolves
+// the served representation to JSON-LD; this only decides which of the
+// three equivalent media-type spellings stamps the Content-Type header.
+// q-aware (first match by descending q wins), so an explicit
+// `application/ld+json` ranked ahead of `application/json;q=0.5` correctly
+// keeps the ld+json label.
+export function prefersPlainJson(acceptHeader) {
+  if (!acceptHeader) return false;
+  for (const { type, q } of parseAcceptHeader(acceptHeader)) {
+    if (q === 0) continue;
+    if (type === 'application/json') return true;
+    if (type === RDF_TYPES.JSON_LD || type === RDF_TYPES.LWS_JSON) return false;
+  }
+  return false;
+}
+
 /**
  * Parse Accept header into sorted list
  */
@@ -319,8 +337,12 @@ export function getVaryHeader(connegEnabled, mashlibEnabled = false, lwsEnabled 
  * strict contract that every media type matching the wildcard will be
  * accepted by canAcceptInput() (e.g., application/n-triples and
  * application/rdf+xml are not accepted).
+ *
+ * @param {boolean} lwsEnabled - P1 (LWS update-resource MUST: JSON Merge
+ *   Patch, RFC 7386): under --lws, PATCH also accepts merge-patch+json, so
+ *   advertise it. The --lws-off Accept-Patch value stays byte-identical.
  */
-export function getAcceptHeaders(connegEnabled, isContainer = false) {
+export function getAcceptHeaders(connegEnabled, isContainer = false, lwsEnabled = false) {
   const headers = {};
 
   if (isContainer) {
@@ -333,7 +355,8 @@ export function getAcceptHeaders(connegEnabled, isContainer = false) {
     ? `${RDF_TYPES.JSON_LD}, application/json, ${RDF_TYPES.TURTLE}, ${RDF_TYPES.N3}, */*`
     : `${RDF_TYPES.JSON_LD}, application/json, */*`;
 
-  headers['Accept-Patch'] = 'text/n3, application/sparql-update';
+  headers['Accept-Patch'] = 'text/n3, application/sparql-update'
+    + (lwsEnabled ? ', application/merge-patch+json' : '');
 
   return headers;
 }

@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import {
   startTestServer, stopTestServer, request, createTestPod, getBaseUrl, assertStatus,
 } from './helpers.js';
+import * as storage from '../src/storage/filesystem.js';
 import { generatePrivateAcl, serializeAcl } from '../src/wac/parser.js';
 
 const BARE_ETAG_RE = /^"[0-9a-f]{32}"$/;
@@ -189,5 +190,96 @@ describe('negative control: --lws off, ETags stay bare and byte-identical across
     const etag = ldjson.headers.get('etag');
     assert.match(etag, BARE_ETAG_RE);
     assert.equal(ttl.headers.get('etag'), etag);
+  });
+});
+
+describe('lws: JSON-LD conversion arm ETag (review #5)', () => {
+  let base;
+  const TTL = '/etagj/public/r.ttl';
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true });
+    base = getBaseUrl();
+    await createTestPod('etagj');
+    await request(TTL, { method: 'PUT', headers: { 'Content-Type': 'text/turtle' }, auth: 'etagj',
+      body: '<#s> <http://ex/p> "v".' });
+  });
+  after(stopTestServer);
+
+  it('the JSON-LD conversion of a .ttl source carries a -json variant ETag', async () => {
+    const r = await request(TTL, { headers: { Accept: 'application/ld+json' } });
+    assertStatus(r, 200);
+    assert.match(r.headers.get('etag'), /-json"$/);
+  });
+
+  it('own-format .ttl GET keeps the bare ETag; the two variants differ', async () => {
+    const ttl = await request(TTL, { headers: { Accept: 'text/turtle' } });
+    const json = await request(TTL, { headers: { Accept: 'application/ld+json' } });
+    assert.match(ttl.headers.get('etag'), BARE_ETAG_RE);
+    assert.notEqual(ttl.headers.get('etag'), json.headers.get('etag'));
+  });
+
+  it('a Turtle-variant If-None-Match never 304s the JSON-LD variant (cross-variant)', async () => {
+    const ttl = await request(TTL, { headers: { Accept: 'text/turtle' } });
+    const r = await request(TTL, { headers: { Accept: 'application/ld+json', 'If-None-Match': ttl.headers.get('etag') } });
+    assertStatus(r, 200);
+  });
+
+  it('same-variant If-None-Match still 304s', async () => {
+    const json = await request(TTL, { headers: { Accept: 'application/ld+json' } });
+    const r = await request(TTL, { headers: { Accept: 'application/ld+json', 'If-None-Match': json.headers.get('etag') } });
+    assertStatus(r, 304);
+    assert.match(r.headers.get('etag'), /-json"$/);
+  });
+
+  it('HEAD mirrors GET ETags on both arms', async () => {
+    const g = await request(TTL, { headers: { Accept: 'application/ld+json' } });
+    const h = await request(TTL, { method: 'HEAD', headers: { Accept: 'application/ld+json' } });
+    assert.equal(h.headers.get('etag'), g.headers.get('etag'));
+  });
+});
+
+describe('lws: representation-variant ETags under --lws without --conneg (review #5, task 4)', () => {
+  // Task 4 fixed predictFileEtag so variant ETags are keyed even when --lws
+  // is true and --conneg is false (previously the connegEnabled gate collapsed
+  // every variant onto the bare ETag in that config). This describe block
+  // exercises the --lws-without---conneg half of the fix: seeded .ttl source
+  // yields distinct ETags for own-format (bare) vs JSON-LD conversion (-json).
+  // PUT of RDF is rejected without conneg, so we use storage.write to seed the resource.
+  let base;
+  const TTL = '/etaglws/public/r.ttl';
+
+  before(async () => {
+    await startTestServer({ lws: true }); // conneg omitted/false
+    base = getBaseUrl();
+    await createTestPod('etaglws');
+    // Seed via storage.write since PUT text/turtle is rejected without conneg
+    await storage.write(TTL, Buffer.from('<#s> <http://ex/p> "v".'));
+  });
+  after(stopTestServer);
+
+  it('JSON-LD conversion of a .ttl source carries a -json variant ETag under --lws alone', async () => {
+    const r = await request(TTL, { headers: { Accept: 'application/ld+json' } });
+    assertStatus(r, 200);
+    assert.match(r.headers.get('etag'), /-json"$/);
+  });
+
+  it('own-format .ttl GET keeps the bare ETag; the two variants differ', async () => {
+    const ttl = await request(TTL, { headers: { Accept: 'text/turtle' } });
+    const json = await request(TTL, { headers: { Accept: 'application/ld+json' } });
+    assert.match(ttl.headers.get('etag'), BARE_ETAG_RE);
+    assert.notEqual(ttl.headers.get('etag'), json.headers.get('etag'));
+  });
+
+  it('a Turtle-variant If-None-Match never 304s the JSON-LD variant (cross-variant)', async () => {
+    const ttl = await request(TTL, { headers: { Accept: 'text/turtle' } });
+    const r = await request(TTL, { headers: { Accept: 'application/ld+json', 'If-None-Match': ttl.headers.get('etag') } });
+    assertStatus(r, 200);
+  });
+
+  it('same-variant If-None-Match still 304s', async () => {
+    const json = await request(TTL, { headers: { Accept: 'application/ld+json' } });
+    const r = await request(TTL, { headers: { Accept: 'application/ld+json', 'If-None-Match': json.headers.get('etag') } });
+    assertStatus(r, 304);
+    assert.match(r.headers.get('etag'), /-json"$/);
   });
 });

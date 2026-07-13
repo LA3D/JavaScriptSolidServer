@@ -1,13 +1,16 @@
 import crypto from 'crypto';
+import { DataFactory as N3DataFactory } from 'n3';
 import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders, representationLinks } from '../ldp/headers.js';
 import { generateContainerJsonLd, generateLwsContainer, serializeJsonLd } from '../ldp/container.js';
 import { generateLinkset } from '../lws/linkset.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
-import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl } from '../utils/url.js';
+import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, safeJsonParse, getPodName, parentContainerUrl, isBodiedWithoutContentType, missingContentTypeProblem } from '../utils/url.js';
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
+import { applyMergePatch } from '../patch/merge-patch.js';
+import { toDataset } from '../rdf/dataset.js';
 import {
   selectContentType,
   canAcceptInput,
@@ -17,7 +20,8 @@ import {
   getVaryHeader,
   negotiateProfile,
   acceptSatisfiable,
-  acceptsHtml
+  acceptsHtml,
+  prefersPlainJson
 } from '../rdf/conneg.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
@@ -28,9 +32,8 @@ import { turtleToJsonLd } from '../rdf/turtle.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
-import { writeTypeConsistency } from '../lws/write-consistency.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
-import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable } from '../rdf/serve.js';
+import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -42,6 +45,13 @@ const LIVE_RELOAD_SCRIPT = `<script>(function(){var ws=new WebSocket((location.p
 // across auth-state changes (WAC) and closes the mashlib render-race window
 // where a cached data variant was served on top-level navigation (#315).
 const RDF_CACHE_CONTROL = 'private, no-cache, must-revalidate';
+
+// #7 (Solid #server-patch-n3-accept MUST): stored types PATCH must parse by
+// real media type rather than blind JSON — the n3 family (verbatim under
+// --lws). JSON/JSON-LD stays on the legacy safeJsonParse-first flow below.
+const PATCH_TURTLE_FAMILY = new Set([
+  RDF_TYPES.TURTLE, RDF_TYPES.N3, RDF_TYPES.NTRIPLES, RDF_TYPES.NQUADS,
+]);
 
 // Detects when the request's Accept header explicitly names a JSON
 // media type. Used by the container/index.html branches of GET and HEAD
@@ -195,6 +205,15 @@ const VARIANT_KEYS = {
   [RDF_TYPES.NQUADS]: 'nq',
   [RDF_TYPES.LWS_JSON]: 'lws',
   [RDF_TYPES.LINKSET]: 'ls',
+  // P3 (LWS media-type MUST): the plain-application/json LABEL of a JSON-LD
+  // container listing needs its own variant key so it revalidates
+  // independently of the application/ld+json label (RFC 9110 §8.8.3) — same
+  // bytes, different Content-Type, different cache entry. Container-listing
+  // key only (containerListingEtag, keyed off a container's stats.etag); the
+  // file-arm '-json' conversion suffix (predictFileEtag, keyed off a FILE's
+  // stats.etag) never shares a base etag with this, so the reused string
+  // suffix can't collide across the two code paths.
+  'application/json': 'json',
 };
 
 function variantEtag(etag, key) {
@@ -248,13 +267,41 @@ function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storag
     return variantEtag(stats.etag, 'ls');
   }
   const storedContentType = getContentType(storagePath);
-  if (connegEnabled && isRdfSourceType(storedContentType)) {
-    const quadsTarget = negotiateQuadsTarget(acceptHeader, connegEnabled, true, urlPath);
+  // #5 (RFC 9110 §8.8.3 / LWS ETag MUST): keyed on the negotiation surface the
+  // serving arm actually runs (this function already early-returns unless
+  // lwsEnabled, and --lws mandates negotiation — spec §4a), and covering BOTH
+  // conversion arms: quads targets get their VARIANT_KEYS suffix, the JSON-LD
+  // conversion of a non-JSON-LD source gets '-json'. Before this, Turtle
+  // bytes and their JSON-LD conversion shared one bare ETag (cross-variant
+  // 304 reuse), and --lws-without---conneg collapsed every variant.
+  if (isRdfSourceType(storedContentType)) {
+    const quadsTarget = negotiateQuadsTarget(acceptHeader, true, true, urlPath);
     if (quadsTarget && quadsTarget !== storedContentType) {
       return variantEtag(stats.etag, VARIANT_KEYS[quadsTarget]);
     }
+    if (!quadsTarget && storedContentType !== RDF_TYPES.JSON_LD) {
+      return variantEtag(stats.etag, 'json');   // the ld+json conversion arm (~line 1097)
+    }
   }
   return stats.etag;
+}
+
+// #4 (RFC 9110 §13.2.2): a real RDF conversion can still 406 (parse-fail /
+// named-graph lossiness), and that outcome needs the bytes — so the zero-I/O
+// early 304 defers whenever a conversion arm will run; the arm re-checks
+// If-None-Match only after its outcome is known. Own-format reads (bytes are
+// bytes) can never 406 and keep the early check. Mirrors predictFileEtag's
+// negotiation exactly (same negotiateQuadsTarget call shape) — one seam for
+// both GET and HEAD.
+function pendingConversion(request, storagePath, urlPath) {
+  if (!request.lwsEnabled) return false;
+  const stored = getContentType(storagePath);
+  if (!isRdfSourceType(stored)) return false;
+  const acceptHeader = request.headers.accept || '';
+  if (selectContentType(acceptHeader, true) === RDF_TYPES.LINKSET) return false; // generated, never 406s
+  const quadsTarget = negotiateQuadsTarget(acceptHeader, true, true, urlPath);
+  if (quadsTarget) return !(QUADS_OUTPUTS[stored] === quadsTarget && stored !== RDF_TYPES.N3); // isOwnFormat mirror
+  return stored !== RDF_TYPES.JSON_LD;   // ld+json target: converts unless self
 }
 
 /**
@@ -308,16 +355,22 @@ export async function handleGet(request, reply) {
     && !isRdfSourceType(storedContentType)
     && !acceptSatisfiable(request.headers.accept || '', storedContentType);
   const hasAcceptProfile = !!(request.lwsProfileConneg && request.headers['accept-profile']);
+  // #4 (RFC 9110 §13.2.2): a real RDF conversion (quads or ld+json arm,
+  // ~line 1073/1097) can still 406 on parse-fail / named-graph lossiness —
+  // defer the early 304 until that arm knows its outcome (re-check lives in
+  // the serving arm itself, right after `served.ok` is known).
+  const conversionPending = !stats.isDirectory && !willServeMashlib && pendingConversion(request, storagePath, urlPath);
 
   // For non-containers, check If-None-Match early using the predicted
   // representation ETag (Task 10). For containers, defer the check until
   // we know which branch (index.html vs listing vs mashlib) will run —
   // each uses a different ETag source (#456). Deferred here too when a 406
-  // gate hasn't resolved yet (wouldNotNegotiate) or Accept-Profile was sent
+  // gate hasn't resolved yet (wouldNotNegotiate), Accept-Profile was sent
   // (hasAcceptProfile — the profile-negotiation block below decides; the
-  // deferred re-check sits right after it resolves, spec §3).
+  // deferred re-check sits right after it resolves, spec §3), or a real
+  // conversion is pending (conversionPending — re-checked in the serving arm).
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile) {
+  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
@@ -415,11 +468,23 @@ export async function handleGet(request, reply) {
               Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
               return reply.send(turtleContent);
             } else {
-              // Return JSON-LD directly
+              // Return JSON-LD directly. P3 (LWS media-type MUST, task-9
+              // review): the SAME label swap the listing branch applies
+              // (~line 555) — plain application/json is the identical
+              // data-island payload under its own label when the client
+              // prefers it (body untouched). Mirrors HEAD's shadowActive
+              // branch (~line 1594), which stamps this label onto
+              // `indexStats.etag` with NO variant suffix — so this branch
+              // keeps that same bare etag rather than adopting the
+              // listing's containerListingEtag/VARIANT_KEYS treatment;
+              // matching HEAD (not the listing) is what keeps GET==HEAD
+              // (#552) for the shadowed case.
+              const islandContentType = (request.lwsEnabled && prefersPlainJson(acceptHeader))
+                ? 'application/json' : 'application/ld+json';
               const headers = getAllHeaders({
                 isContainer: true,
                 etag: indexStats?.etag || stats.etag,
-                contentType: 'application/ld+json',
+                contentType: islandContentType,
                 origin,
                 resourceUrl,
                 connegEnabled,
@@ -493,12 +558,21 @@ export async function handleGet(request, reply) {
       : (request.lwsEnabled && QUADS_OUTPUTS[negotiated]) ? QUADS_OUTPUTS[negotiated]
       : wantsTurtle ? RDF_TYPES.TURTLE
       : RDF_TYPES.JSON_LD;
+    // P3 (LWS media-type MUST): plain application/json is the same JSON-LD
+    // payload under its own label — swap the label only, never the body
+    // (jsonLd/serializeJsonLd below stay keyed off listingContentType).
+    // Gated on listingContentType === JSON_LD so this never mislabels the
+    // lws+json/linkset/quads/turtle branches, and on request.lwsEnabled so
+    // an --lws-off pod stays byte-identical to pre-Task-9 behavior.
+    const labeledListingType = (request.lwsEnabled
+      && listingContentType === RDF_TYPES.JSON_LD && prefersPlainJson(acceptHeader))
+      ? 'application/json' : listingContentType;
     // --lws-off / mashlib-HTML keep the pre-Task-10 etag source (bare or
     // the mashlib '-html' suffix) — mashlib's embedded listing isn't part
     // of the altr: representation family this task scopes (brief: lws+json/
     // linkset/quads/turtle/ld+json).
     const listingEtag = (request.lwsEnabled && !willMashlib)
-      ? containerListingEtag(stats.etag, listingContentType, visKey)
+      ? containerListingEtag(stats.etag, labeledListingType, visKey)
       : effectiveEtag;
 
     // Deferred 304 check for container listings (#456) — compared against
@@ -747,7 +821,12 @@ export async function handleGet(request, reply) {
     const headers = getAllHeaders({
       isContainer: true,
       etag: listingEtag,
-      contentType: 'application/ld+json',
+      // P3: only relabel when JSON-LD was the actually-negotiated target —
+      // this line is also the unconditional bottom fallback reached after a
+      // failed Turtle/quads conversion (listingContentType would be that
+      // other type there, not JSON_LD), which must keep serving plain
+      // ld+json exactly as before Task 9.
+      contentType: listingContentType === RDF_TYPES.JSON_LD ? labeledListingType : 'application/ld+json',
       origin,
       resourceUrl,
       connegEnabled,
@@ -820,9 +899,10 @@ export async function handleGet(request, reply) {
   // Deferred 304 (spec §3): the early check above skipped when Accept-Profile
   // was sent, because the profile outcome wasn't known yet. It's known now —
   // redirect/notacceptable already returned above, so reaching here means the
-  // profile arm would succeed. wouldNotNegotiate (media F3 arm) still applies
-  // unconditionally: never 304 a request that F3 would 406 below.
-  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+  // profile arm would succeed. wouldNotNegotiate (media F3 arm) and
+  // conversionPending (#4 — a real RDF conversion could still 406 below)
+  // still apply unconditionally: never 304 a request either arm would 406.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
@@ -1072,9 +1152,21 @@ export async function handleGet(request, reply) {
         const quadsTarget = negotiateQuadsTarget(acceptHeader, negotiate, true, urlPath);
         if (quadsTarget) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: quadsTarget, baseIri: resourceUrl });
+          // #4 (RFC 9110 §13.2.2): the early check deferred here
+          // (conversionPending) because this conversion could 406 — the
+          // outcome is known now, so a successful conversion still honors a
+          // conditional revalidation instead of always paying the 200.
+          if (served.ok && ifNoneMatch) {
+            const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+            if (!check.ok && check.notModified) {
+              reply.header('ETag', fileEtag);
+              reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+              return reply.code(304).send();
+            }
+          }
           const headers = getAllHeaders({
             isContainer: false,
-            etag: fileEtag,
+            etag: served.ok ? fileEtag : null,   // #4: no replayable validator for a non-representation
             contentType: served.ok ? served.contentType : 'application/problem+json',
             origin,
             resourceUrl,
@@ -1096,9 +1188,18 @@ export async function handleGet(request, reply) {
         // arm below assumes JSON-parseable bytes, which no longer holds.
         if (storedContentType !== RDF_TYPES.JSON_LD) {
           const served = await serveStoredRdf({ bytes: content, sourceContentType: storedContentType, targetType: RDF_TYPES.JSON_LD, baseIri: resourceUrl });
+          // #4: same deferred re-check as the quads arm above.
+          if (served.ok && ifNoneMatch) {
+            const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+            if (!check.ok && check.notModified) {
+              reply.header('ETag', fileEtag);
+              reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+              return reply.code(304).send();
+            }
+          }
           const headers = getAllHeaders({
             isContainer: false,
-            etag: fileEtag,
+            etag: served.ok ? fileEtag : null,   // #4: no replayable validator for a non-representation
             contentType: served.ok ? served.contentType : 'application/problem+json',
             origin,
             resourceUrl,
@@ -1497,6 +1598,15 @@ export async function handleHead(request, reply) {
       else if (QUADS_OUTPUTS[lwsNeg]) contentType = QUADS_OUTPUTS[lwsNeg];
     }
 
+    // P3 (LWS media-type MUST): mirror GET's label swap — plain
+    // application/json is the same JSON-LD payload under its own label.
+    // Only fires when none of the overrides above claimed contentType (i.e.
+    // it's still the plain JSON-LD default), so containerListingEtag below
+    // gets the same label GET would compute (and thus the same ETag, #552).
+    if (request.lwsEnabled && contentType === RDF_TYPES.JSON_LD && prefersPlainJson(acceptHeader)) {
+      contentType = 'application/json';
+    }
+
     if (shadowActive) {
       // Mirror GET: containers with index.html use the index file's ETag
       const indexStats = await storage.stat(indexPath);
@@ -1557,10 +1667,15 @@ export async function handleHead(request, reply) {
     && !isRdfSourceType(storedContentType)
     && !acceptSatisfiable(request.headers.accept || '', storedContentType);
   const hasAcceptProfile = !skipProfileNegotiation && !!(request.lwsProfileConneg && request.headers['accept-profile']);
+  // #4 (RFC 9110 §13.2.2): mirrors GET's conversionPending — HEAD's
+  // negotiateHeadFileContentType (below) runs the same conversion arm and
+  // can answer notAcceptable the same way, so the early 304 defers the same.
+  const conversionPending = !stats.isDirectory && !isMashlibResponse
+    && pendingConversion(request, storagePath, urlPath);
 
   // Check If-None-Match using the final ETag (#456)
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile) {
+  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
@@ -1612,9 +1727,10 @@ export async function handleHead(request, reply) {
 
   // Deferred 304 (spec §3): reached only when the original check above
   // skipped for hasAcceptProfile — redirect/notacceptable already returned,
-  // so the profile arm would succeed. wouldNotNegotiate still applies
-  // unconditionally: never 304 a request the F3 gate below would 406.
-  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate) {
+  // so the profile arm would succeed. wouldNotNegotiate and conversionPending
+  // (#4 — the RDF conversion arm below could still 406) still apply
+  // unconditionally: never 304 a request either arm would 406.
+  if (ifNoneMatch && hasAcceptProfile && !wouldNotNegotiate && !conversionPending) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
@@ -1654,6 +1770,17 @@ export async function handleHead(request, reply) {
         if (negotiation.link) reply.header('Link', negotiation.link);
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(406).type('application/problem+json').send();
+      }
+      // #4: the early checks above deferred here (conversionPending) because
+      // this conversion could 406 — now that negotiateHeadFileContentType
+      // resolved without one, re-check If-None-Match before falling through.
+      if (ifNoneMatch && conversionPending) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', headEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
       }
       contentType = negotiation.contentType;
       negotiationConverted = negotiation.converted;
@@ -1711,6 +1838,15 @@ export async function handlePut(request, reply) {
   }
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
+
+  // P2 (Solid #server-content-type-missing MUST): a bodied write with no
+  // Content-Type must 400, not silently fall through to canAcceptInput('')
+  // (which treats absence as accept-anything).
+  if (request.lwsEnabled && isBodiedWithoutContentType(request)) {
+    return reply.code(400).type('application/problem+json')
+      .send(JSON.stringify(missingContentTypeProblem(resourceUrl), null, 2));
+  }
+
   const connegEnabled = request.connegEnabled || false;
   // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
   const negotiate = connegEnabled || request.lwsEnabled;
@@ -1824,14 +1960,12 @@ export async function handlePut(request, reply) {
     content = Buffer.from('');
   }
 
-  // Spec §2: under --lws, store the submitted bytes verbatim; enforce
-  // write-time name/type consistency instead of converting (B1 root fix).
+  // Spec §2: under --lws, store the submitted bytes verbatim; the name/type
+  // gate now runs inside applyLwsWrite (review #2 — the choke point every
+  // write surface shares), not here.
   // --lws-off keeps the byte-identical legacy Turtle/N3→JSON-LD conversion.
   const inputType = contentType.split(';')[0].trim().toLowerCase();
-  if (request.lwsEnabled) {
-    const c = writeTypeConsistency({ urlPath, submittedType: contentType, lwsEnabled: true });
-    if (!c.ok) return reply.code(400).type('application/problem+json').send(JSON.stringify(c.problem, null, 2));
-  } else if (connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
+  if (!request.lwsEnabled && connegEnabled && (inputType === RDF_TYPES.TURTLE || inputType === RDF_TYPES.N3)) {
     try {
       const jsonLd = await toJsonLd(content, contentType, resourceUrl, connegEnabled, { graphEnvelope: false });
       content = Buffer.from(JSON.stringify(jsonLd, null, 2));
@@ -1866,6 +2000,9 @@ export async function handlePut(request, reply) {
     lwsEnabled: request.lwsEnabled,
   });
   if (!w.ok) {
+    if (w.problem) {
+      return reply.code(400).type('application/problem+json').send(JSON.stringify(w.problem, null, 2));
+    }
     reply.header('content-type', 'application/problem+json');
     if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
     return reply.code(400).send(constraintProblem({
@@ -1992,6 +2129,135 @@ export async function handleOptions(request, reply) {
   return reply.code(204).send();
 }
 
+// task-6 review (owner directive): PATCH on a verbatim-stored resource
+// applies at the RDF TERM level — no JSON-LD document detour. n3-patch.js
+// and sparql-update.js both hand back ground triples {subject, predicate,
+// object}; object is a plain string (URI or literal — parseN3Patch's own
+// ambiguity, resolved the same way its legacy convertToJsonLd did: a bare
+// http(s) string is a URI, anything else a plain literal), an {'@id': ...}
+// / {value|@value, type|@type} / {value|@value, language|@language} object
+// (sparql-update.js's shape), or an N3-Patch-only {blankNode} marker.
+// termFromId/termFromPatchObject below build real n3 DataFactory terms from
+// either shape uniformly.
+const { namedNode: patchNamedNode, literal: patchLiteral, blankNode: patchBlankNode,
+  quad: patchQuad, defaultGraph: patchDefaultGraph } = N3DataFactory;
+
+function termFromId(value) {
+  return typeof value === 'string' && value.startsWith('_:')
+    ? patchBlankNode(value.slice(2))
+    : patchNamedNode(value);
+}
+
+function termFromPatchObject(object) {
+  if (typeof object === 'string') {
+    return (object.startsWith('http://') || object.startsWith('https://'))
+      ? patchNamedNode(object)
+      : patchLiteral(object);
+  }
+  if (object && typeof object === 'object') {
+    if (object.blankNode !== undefined) return patchBlankNode(object.blankNode);
+    if (object['@id'] !== undefined) return termFromId(object['@id']);
+    const val = object.value !== undefined ? object.value : object['@value'];
+    const type = object.type !== undefined ? object.type : object['@type'];
+    const lang = object.language !== undefined ? object.language : object['@language'];
+    if (val !== undefined && type !== undefined) return patchLiteral(val, patchNamedNode(type));
+    if (val !== undefined && lang !== undefined) return patchLiteral(val, lang);
+    if (val !== undefined) return patchLiteral(val);
+  }
+  return patchLiteral(String(object));
+}
+
+// Applies {deletes, inserts} directly on the rdf-ext dataset, scoped to the
+// DEFAULT graph only: deletes that match nothing are silent no-ops (dataset
+// deleteMatches over an empty match set is a no-op by construction — same
+// observable behavior the old document-level deleteTriple had), and named
+// graph quads in .nq-stored docs (non-default graph) are never touched, so
+// they survive untouched. solid:where stays ignored (pre-existing gap, out
+// of scope — neither parser's `where` array is consulted here either).
+function applyPatchToDataset(dataset, { deletes = [], inserts = [] }) {
+  for (const t of deletes) {
+    dataset.deleteMatches(
+      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object), patchDefaultGraph());
+  }
+  for (const t of inserts) {
+    dataset.add(patchQuad(
+      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object), patchDefaultGraph()));
+  }
+}
+
+/**
+ * #7 (Solid #server-patch-n3-accept MUST): PATCH a verbatim-stored
+ * Turtle-family resource (resourceExists && storedType is Turtle/N3/NT/NQ).
+ * Parses stored bytes -> RDF dataset (toDataset) and applies the parsed
+ * patch directly on that dataset (applyPatchToDataset) — no JSON-LD
+ * document projection — then serializes back through datasetToFormat so
+ * the write lands in the SAME stored format — Content-Type identity is
+ * preserved.
+ */
+async function patchTurtleFamilyResource(request, reply, { storagePath, resourceUrl, storedType, isSparqlUpdate }) {
+  const existingContent = await storage.read(storagePath);
+  if (existingContent === null) {
+    return reply.code(500).send({ error: 'Read error' });
+  }
+
+  let dataset;
+  try {
+    dataset = await toDataset(existingContent, storedType, resourceUrl);
+  } catch (e) {
+    return reply.code(409).type('application/problem+json').send(JSON.stringify({
+      type: 'about:blank', title: 'Conflict', status: 409,
+      detail: `the stored document did not parse as ${storedType} (${e.message}).`,
+      instance: resourceUrl,
+    }, null, 2));
+  }
+
+  const patchContent = Buffer.isBuffer(request.body) ? request.body.toString() : request.body;
+
+  if (isSparqlUpdate) {
+    let update;
+    try {
+      update = parseSparqlUpdate(patchContent, resourceUrl);
+    } catch (e) {
+      return reply.code(400).send({ error: 'Bad Request', message: 'Invalid SPARQL Update: ' + e.message });
+    }
+    try {
+      applyPatchToDataset(dataset, update);
+    } catch (e) {
+      return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply SPARQL Update: ' + e.message });
+    }
+  } else {
+    let patch;
+    try {
+      patch = parseN3Patch(patchContent, resourceUrl);
+    } catch (e) {
+      return reply.code(400).send({ error: 'Bad Request', message: 'Invalid N3 Patch format: ' + e.message });
+    }
+    try {
+      applyPatchToDataset(dataset, patch);
+    } catch (e) {
+      return reply.code(409).send({ error: 'Conflict', message: 'Failed to apply patch: ' + e.message });
+    }
+  }
+
+  const updatedContent = await datasetToFormat(dataset, QUADS_OUTPUTS[storedType] || RDF_TYPES.NQUADS);
+
+  const success = await storage.write(storagePath, Buffer.from(updatedContent));
+  if (!success) {
+    return reply.code(500).send({ error: 'Write failed' });
+  }
+
+  const origin = request.headers.origin;
+  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled });
+  Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+
+  if (request.notificationsEnabled) {
+    emitChange(resourceUrl);
+  }
+
+  // The resource already existed (dispatch precondition) — always 204.
+  return reply.code(204).send();
+}
+
 /**
  * Handle PATCH request
  * Supports N3 Patch format (text/n3) and SPARQL Update for updating RDF resources
@@ -2004,6 +2270,13 @@ export async function handlePatch(request, reply) {
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
 
+  // P2 (Solid #server-content-type-missing MUST): a bodied write with no
+  // Content-Type must 400, not fall through to a guessed patch type.
+  if (request.lwsEnabled && isBodiedWithoutContentType(request)) {
+    return reply.code(400).type('application/problem+json')
+      .send(JSON.stringify(missingContentTypeProblem(resourceUrl), null, 2));
+  }
+
   // Don't allow PATCH to containers
   if (isContainer(urlPath)) {
     return reply.code(409).send({ error: 'Cannot PATCH containers' });
@@ -2013,11 +2286,18 @@ export async function handlePatch(request, reply) {
   const contentType = request.headers['content-type'] || '';
   const isN3Patch = contentType.includes('text/n3') || contentType.includes('application/n3');
   const isSparqlUpdate = contentType.includes('application/sparql-update');
+  // P1 (LWS update-resource MUST: JSON Merge Patch, RFC 7386) — --lws only;
+  // the --lws-off 415 gate below stays byte-identical (isMergePatch false).
+  const isMergePatch = request.lwsEnabled
+    && contentType.split(';')[0].trim().toLowerCase() === 'application/merge-patch+json';
 
-  if (!isN3Patch && !isSparqlUpdate) {
+  if (!isN3Patch && !isSparqlUpdate && !isMergePatch) {
+    // task-6 review #2: the --lws-off base string is byte-identical to the
+    // pre-round wording; the merge-patch clause is appended only under --lws.
     return reply.code(415).send({
       error: 'Unsupported Media Type',
       message: 'PATCH requires Content-Type: text/n3 (N3 Patch) or application/sparql-update (SPARQL Update)'
+        + (request.lwsEnabled ? ' or application/merge-patch+json (JSON Merge Patch)' : '')
     });
   }
 
@@ -2034,6 +2314,21 @@ export async function handlePatch(request, reply) {
         return reply.code(check.status).send({ error: check.error });
       }
     }
+  }
+
+  // #7: a verbatim-stored Turtle-family resource is parsed by its real media
+  // type (src/rdf/dataset.js toDataset), not blindly as JSON-LD — the legacy
+  // flow below assumes JSON-LD and 409s every Turtle/N3/NT/NQ PATCH target.
+  const storedType = (request.lwsEnabled && resourceExists) ? getContentType(storagePath) : null;
+  if (storedType && PATCH_TURTLE_FAMILY.has(storedType)) {
+    if (isMergePatch) {
+      return reply.code(415).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Unsupported Media Type', status: 415,
+        detail: `JSON Merge Patch applies to JSON documents; this resource is ${storedType} — use text/n3 (N3 Patch) or application/sparql-update.`,
+        instance: resourceUrl,
+      }, null, 2));
+    }
+    return patchTurtleFamilyResource(request, reply, { storagePath, resourceUrl, storedType, isSparqlUpdate });
   }
 
   // Read existing content or start with empty JSON-LD document
@@ -2177,7 +2472,20 @@ export async function handlePatch(request, reply) {
 
   let updatedDocument;
 
-  if (isSparqlUpdate) {
+  if (isMergePatch) {
+    // P1 (LWS update-resource MUST, RFC 7386): merge-patch applies straight
+    // to the stored JSON/JSON-LD document — no triple-level projection needed.
+    let patchObj;
+    try {
+      patchObj = safeJsonParse(patchContent);
+    } catch (e) {
+      return reply.code(400).send({
+        error: 'Bad Request',
+        message: 'Invalid JSON Merge Patch: ' + e.message
+      });
+    }
+    updatedDocument = applyMergePatch(document, patchObj);
+  } else if (isSparqlUpdate) {
     // Handle SPARQL Update
     let update;
     try {

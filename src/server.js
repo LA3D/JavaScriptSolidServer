@@ -36,7 +36,7 @@ import { terminalPlugin } from './terminal/index.js';
 import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
-import { buildStorageDescription } from './lws/storage-description.js';
+import { buildStorageDescription, storageDescriptionContentType } from './lws/storage-description.js';
 import { makePodConfig } from './lws/pod-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1062,7 +1062,9 @@ export function createServer(options = {}) {
     fastify.get(lwsStoragePath, async (request, reply) => {
       const origin = `${request.protocol}://${request.hostname}`;
       reply.header('Cache-Control', 'public, max-age=3600');
-      reply.type('application/lws+json');
+      // P3 (LWS media-type MUST): label-only conneg — same body, whichever
+      // of lws+json/ld+json/json spelling was asked for (storage-description.js).
+      reply.type(storageDescriptionContentType(request.headers.accept));
       // Use request.notificationsEnabled (the onRequest-decorated OR of
       // notificationsEnabled || liveReloadEnabled, ~line 397) rather than the
       // raw notificationsEnabled local, so this matches both the actual

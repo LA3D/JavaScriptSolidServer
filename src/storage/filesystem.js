@@ -206,11 +206,13 @@ export async function listContainer(urlPath) {
  * @param {string} containerPath
  * @param {string} slug
  * @param {boolean} isDir
+ * @param {string} defaultExt - extension for a server-assigned (slug-less) name;
+ *   #9: lets a slug-less RDF create derive a name the write-consistency gate accepts.
  * @returns {Promise<string>}
  */
-export async function generateUniqueFilename(containerPath, slug, isDir = false) {
+export async function generateUniqueFilename(containerPath, slug, isDir = false, defaultExt = '') {
   const basePath = urlToPath(containerPath);
-  let name = slug || crypto.randomUUID();
+  let name = slug || (crypto.randomUUID() + (isDir ? '' : defaultExt));
 
   // Security: Remove any path traversal attempts and problematic characters
   name = name.replace(/[/\\]/g, '-');

@@ -291,6 +291,43 @@ export function isRdfContentType(contentType) {
   return rdfTypes.includes(contentType);
 }
 
+/**
+ * P2 (Solid #server-content-type-missing MUST): a request that carries a
+ * body must carry Content-Type. Fastify's wildcard content-type parser
+ * (server.js addContentTypeParser('*')) happily buffers a body under a
+ * missing/empty Content-Type — nothing upstream 400s this, so the write
+ * handlers (PUT/POST/PATCH) must guard it themselves. Content-Length is
+ * the ground truth for "carries a body" (set by the client on the wire);
+ * request.body is a fallback for transports that omit it.
+ * @param {import('fastify').FastifyRequest} request
+ * @returns {boolean}
+ */
+export function isBodiedWithoutContentType(request) {
+  const ct = (request.headers['content-type'] || '').trim();
+  if (ct) return false;
+  const len = request.headers['content-length'];
+  if (len !== undefined) return parseInt(len, 10) > 0;
+  const body = request.body;
+  if (Buffer.isBuffer(body)) return body.length > 0;
+  if (typeof body === 'string') return body.length > 0;
+  if (body && typeof body === 'object') return Object.keys(body).length > 0;
+  return false;
+}
+
+/**
+ * Build the P2 400 problem+json body. Callers gate the call on
+ * request.lwsEnabled and isBodiedWithoutContentType(request).
+ * @param {string} instance - resourceUrl
+ * @returns {object}
+ */
+export function missingContentTypeProblem(instance) {
+  return {
+    type: 'about:blank', title: 'Bad Request', status: 400,
+    detail: 'a request with content must carry Content-Type (Solid #server-content-type-missing)',
+    instance,
+  };
+}
+
 // Security: Maximum JSON size for parsing (10MB)
 const MAX_JSON_SIZE = 10 * 1024 * 1024;
 

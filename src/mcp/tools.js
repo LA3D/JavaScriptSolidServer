@@ -15,6 +15,7 @@ import { resourceEvents, emitChange } from '../notifications/events.js';
 import { toolText, toolError, toolJson } from './protocol.js';
 import { admissionError } from './errors.js';
 import { applyLwsWrite } from '../lws/write.js';
+import { extensionForRdfType } from '../lws/write-consistency.js';
 import { collectAuthorizedResources } from '../lws/authorized-resources.js';
 import { parseFilter, matchesFilter, containerItemTypes } from '../lws/type-index.js';
 import { generateLinkset } from '../lws/linkset.js';
@@ -22,7 +23,7 @@ import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sanitizeTypes } from './sanitize.js';
+import { sanitizeTypes, sanitizeField, sanitizeReps } from './sanitize.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
 import { isLocalUri, uriToPath } from './uri.js';
@@ -59,7 +60,7 @@ async function write_resource({ path, content, contentType, types }, ctx) {
     declaredTypes: Array.isArray(types) ? types : [],
     lwsEnabled: ctx.lwsEnabled
   });
-  if (!w.ok) return admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
+  if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${path}`);
   emitChange(buildUrl(ctx, path));
   return toolText(`wrote ${path} (${Buffer.byteLength(content, 'utf8')} bytes)`);
@@ -75,7 +76,10 @@ async function create_resource({ container, slug, content, contentType, isContai
   if (!(await storage.exists(container))) {
     return toolError(`container not found: ${container}`);
   }
-  const name = await storage.generateUniqueFilename(container, slug || null, !!isContainer);
+  // #9: a slug-less RDF create derives its extension from the submitted type,
+  // same as the HTTP POST-to-container path — see src/handlers/container.js.
+  const name = await storage.generateUniqueFilename(container, slug || null, !!isContainer,
+    (!isContainer && ctx.lwsEnabled) ? extensionForRdfType(contentType || 'text/plain') : '');
   const childPath = `${container}${name}${isContainer ? '/' : ''}`;
   if (isContainer) {
     await storage.createContainer(childPath);
@@ -91,7 +95,7 @@ async function create_resource({ container, slug, content, contentType, isContai
     declaredTypes: Array.isArray(types) ? types : [],
     lwsEnabled: ctx.lwsEnabled
   });
-  if (!w.ok) return admissionError(childPath, { violations: w.violations, shapeUrl: w.shapeUrl });
+  if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(childPath, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${childPath}`);
   emitChange(buildUrl(ctx, childPath));
   return toolText(`created ${childPath}`);
@@ -322,9 +326,11 @@ async function lws_type_search(args, ctx) {
     agentWebId: ctx.webId, origin: ctx.origin, neededRelations,
   });
   const matched = resources.filter((r) => matchesFilter(r, filter));
+  // id/type are client-controlled (resource path, declared rel="type" values)
+  // — strip hidden chars before they reach the model (review #12).
   return toolJson({
     type: 'ContainerPage', totalItems: matched.length,
-    items: matched.map((r) => ({ id: r.id, type: containerItemTypes(r.types) })),
+    items: matched.map((r) => ({ id: sanitizeField(r.id), type: sanitizeTypes(containerItemTypes(r.types)) })),
   });
 }
 
@@ -372,6 +378,7 @@ async function put_typed_resource({ path, content, contentType, types, described
       if (metaSnapshot === null) await storage.remove(metaPath);
       else await storage.write(metaPath, metaSnapshot, { contentType: 'application/ld+json' });
     }
+    if (w.problem) return toolError(w.problem.detail);      // gate reject (review #2/#10)
     return w.ok ? toolError(`write failed: ${path}`) : admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   }
   emitChange(buildUrl(ctx, path));
@@ -430,8 +437,12 @@ async function describe_resource({ path, uri }, ctx) {
   // read the MCP links carrier uses (read-tools.js localLinks) and the HTTP
   // linkset advertises, so conneg-by-profile is discoverable from inside MCP
   // too (probe #7 A2).
-  const representations = await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
-    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public });
+  // href/format/profile are client-controlled (declared on .meta) — strip
+  // hidden chars before this feeds the linkset below (review #3, second
+  // site; the wrap happens here so BOTH generateLinkset and any direct
+  // field read the sanitized object).
+  const representations = sanitizeReps(await readAuthorizedRepresentations(storage, path + '.meta', buildUrl(ctx, path),
+    { origin: ctx.origin, agentWebId: ctx.webId, public: ctx.public }));
   const linkset = generateLinkset(buildUrl(ctx, path), {
     parentUrl: buildUrl(ctx, parentPath(path)),
     isContainer, describedByShapes: shapes, declaredTypes: declared, conformsTo,
