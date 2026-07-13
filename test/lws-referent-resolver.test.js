@@ -22,6 +22,12 @@ describe('resolveReferent (pure)', () => {
     const noSlash = [{ pathPrefix: '/id', container: '/c/' }];
     assert.equal(resolveReferent('/identity', noSlash), null);
   });
+  it('appends the declared content-file suffix (extensionless slug -> stored file)', () => {
+    // wiki: subject IRI .../id/a#it, card stored at /alice/wiki/a.md
+    const withSuffix = [{ pathPrefix: '/id/', container: '/alice/wiki/', suffix: '.md' }];
+    assert.equal(resolveReferent('/id/a', withSuffix), '/alice/wiki/a.md');
+    assert.equal(resolveReferent('/id/', withSuffix), null);
+  });
 });
 
 describe('303 referent resolver (live)', () => {
