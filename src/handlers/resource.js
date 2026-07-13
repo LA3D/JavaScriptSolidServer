@@ -25,6 +25,9 @@ import {
 } from '../rdf/conneg.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
+import { resolveReferent } from '../lws/referent-resolver.js';
+import { checkAccess } from '../wac/checker.js';
+import { AccessMode } from '../wac/parser.js';
 import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
@@ -103,6 +106,41 @@ async function authorizedRepresentations(request, storagePath, resourceUrl) {
     agentWebId,
     public: !!request.config?.public,
   });
+}
+
+/**
+ * Referent identity & discovery (Task 3, 2026-07-13): the !stats seam for a
+ * minted subject-IRI name (e.g. /id/{slug}) with no stored resource of its
+ * own. Reads the pathPrefix->container plane-mapping from pod-config
+ * (request.podConfig, decorated in server.js's onRequest hook) and resolves
+ * the name to its backing resource's urlPath via the pure resolveReferent.
+ * no-oracle: returns a target ONLY when it both exists and the requester may
+ * READ it (same checkAccess the type-index walk uses,
+ * src/lws/authorized-resources.js) — a missing or unreadable target returns
+ * null so the caller falls through to the ordinary 404 (never a 303 that
+ * leaks existence to an unauthorized requester). --lws-gated.
+ */
+async function resolveReferentTarget(request, urlPath) {
+  if (!request.lwsEnabled || !request.podConfig) return null;
+  const cfg = await request.podConfig.get();
+  const target = resolveReferent(urlPath, cfg.uriSpaces || []);
+  if (!target) return null;
+  // pod-relative storage path == urlPath in non-subdomain mode
+  const targetStoragePath = target;
+  const tStat = await storage.stat(targetStoragePath);
+  if (!tStat) return null;
+  const origin = `${request.protocol}://${request.hostname}`;
+  const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+  const { allowed } = await checkAccess({
+    resourceUrl: `${origin}${target}`,
+    resourcePath: targetStoragePath,
+    isContainer: tStat.isDirectory,
+    agentWebId,
+    requiredMode: AccessMode.READ,
+    aclCache: new Map(),
+  });
+  if (!allowed) return null;
+  return { target, origin };
 }
 
 // F5 (spec 2026-07-11 §3): the profile-406 body — same RFC 9457 problem+json
@@ -312,6 +350,14 @@ export async function handleGet(request, reply) {
   const stats = await storage.stat(storagePath);
 
   if (!stats) {
+    // Task 3: a minted subject-IRI name (e.g. /id/{slug}) with no stored
+    // resource of its own — try the uriSpace 303 resolver BEFORE the plain
+    // 404, so a non-resolving name still 404s exactly as before.
+    const referent = await resolveReferentTarget(request, urlPath);
+    if (referent) {
+      const location = `${referent.origin}${referent.target}`;
+      return reply.code(303).header('Location', location).header('Link', `<${location}>; rel="canonical"`).send();
+    }
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
     const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });
@@ -1527,6 +1573,12 @@ export async function handleHead(request, reply) {
   const stats = await storage.stat(storagePath);
 
   if (!stats) {
+    // Task 3: mirror handleGet's uriSpace 303 resolver, bodyless.
+    const referent = await resolveReferentTarget(request, urlPath);
+    if (referent) {
+      const location = `${referent.origin}${referent.target}`;
+      return reply.code(303).header('Location', location).header('Link', `<${location}>; rel="canonical"`).send();
+    }
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
     const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });

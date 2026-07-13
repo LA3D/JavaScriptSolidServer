@@ -419,9 +419,11 @@ export function createServer(options = {}) {
   fastify.decorateRequest('liveReloadEnabled', null);
   fastify.decorateRequest('singleUser', null);
   fastify.decorateRequest('singleUserName', null);
+  fastify.decorateRequest('podConfig', null);
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
+    request.podConfig = podConfig;
     request.typeIndexEnabled = typeIndexEnabled;
     request.lwsProfileConneg = profileConnegEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;

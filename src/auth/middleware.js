@@ -10,6 +10,7 @@ import { AccessMode } from '../wac/parser.js';
 import * as storage from '../storage/filesystem.js';
 import { getEffectiveUrlPath } from '../utils/url.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml } from '../mashlib/index.js';
+import { resolveReferent } from '../lws/referent-resolver.js';
 
 /**
  * Build a resource URL for WAC checking, normalizing path-based pod access
@@ -106,6 +107,30 @@ export async function authorize(request, reply, options = {}) {
   const stats = await storage.stat(storagePath);
   const resourceExists = stats !== null;
   const isContainer = stats?.isDirectory || urlPath.endsWith('/');
+
+  // Task 3 (referent identity & discovery): a minted subject-IRI name (e.g.
+  // /id/{slug}) is a virtual uriSpace entry with no resource — and no
+  // ACL — of its own. The blanket WAC check below would find no applicable
+  // ACL walking up from it and deny by default, returning 401/403 BEFORE
+  // the request ever reaches the resolver's own no-oracle check
+  // (src/handlers/resource.js resolveReferentTarget), which is what's
+  // actually meant to decide readability — of the RESOLVED TARGET, not the
+  // name. Letting the blanket check run here would also violate no-oracle:
+  // 401/403-vs-404 on the name would itself leak whether it resolves.
+  // So: for GET/HEAD on a path that (a) has no resource of its own and
+  // (b) actually resolves per the declared uriSpaces, defer the whole
+  // access decision to the resolver, same as /.well-known/*, /types/*, /mcp
+  // (server.js's static bypass list) — this is that list's dynamic-data
+  // analogue, since uriSpaces are pod-config data, not a fixed path set.
+  // Scoped to `!resourceExists`: a real resource later PUT directly at the
+  // name's path makes `resourceExists` true and this exemption stops
+  // applying — the blanket WAC check below protects it as normal.
+  if (!resourceExists && (method === 'GET' || method === 'HEAD') && request.lwsEnabled && request.podConfig) {
+    const cfg = await request.podConfig.get();
+    if (resolveReferent(urlPath, cfg.uriSpaces || [])) {
+      return { authorized: true, webId, wacAllow: 'user="", public=""', authError: null };
+    }
+  }
 
   // Build resource URL, normalizing path-based pod access to subdomain form for WAC
   const resourceUrl = buildResourceUrl(request, urlPath);
