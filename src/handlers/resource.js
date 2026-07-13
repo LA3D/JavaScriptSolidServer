@@ -1774,6 +1774,14 @@ export async function handleHead(request, reply) {
       // #4: the early checks above deferred here (conversionPending) because
       // this conversion could 406 — now that negotiateHeadFileContentType
       // resolved without one, re-check If-None-Match before falling through.
+      // Review finding 2: for RDF files > HEAD_FULL_READ_MAX_BYTES,
+      // negotiateHeadFileContentType already skipped the checkServable probe
+      // (its own large-file optimism, docstring above) and resolved
+      // optimistically — so this 304 can fire where a real GET would 406.
+      // Same #13.2.2 divergence budget as that optimism: a corrupt >1 MiB
+      // RDF document is far rarer than a valid one, HEAD-only (a client can
+      // only have gotten the variant validator from a prior HEAD), and GET
+      // still 406s with no ETag either way. Not a new gap — inherited.
       if (ifNoneMatch && conversionPending) {
         const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
         if (!check.ok && check.notModified) {
@@ -2560,7 +2568,14 @@ export async function handlePatch(request, reply) {
   }
 
   const origin = request.headers.origin;
-  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl });
+  // Finding 3 (review round): align with patchTurtleFamilyResource's 204 —
+  // pass lwsEnabled so a --lws pod's .jsonld PATCH 204 carries the same
+  // LWS Link/Accept-Patch headers a .ttl PATCH 204 already does. Safe: every
+  // lwsEnabled use in getAllHeaders/getResponseHeaders is a truthy check, so
+  // this is byte-identical to the prior call when request.lwsEnabled is
+  // false/undefined (the --lws-off case) — only the --lws-ON output gains
+  // the headers it was already missing.
+  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled });
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
 
   // Emit change notification for WebSocket subscribers
