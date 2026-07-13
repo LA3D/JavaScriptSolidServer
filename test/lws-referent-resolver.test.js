@@ -18,6 +18,10 @@ describe('resolveReferent (pure)', () => {
     assert.equal(resolveReferent('/id/', spaces), null);
     assert.equal(resolveReferent('/other/x', spaces), null);
   });
+  it('skips a uriSpaces entry whose pathPrefix lacks a trailing slash (footgun guard)', () => {
+    const noSlash = [{ pathPrefix: '/id', container: '/c/' }];
+    assert.equal(resolveReferent('/identity', noSlash), null);
+  });
 });
 
 describe('303 referent resolver (live)', () => {
@@ -29,7 +33,14 @@ describe('303 referent resolver (live)', () => {
     await request(`${base}/alice/profiles/pod-config.jsonld`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
       body: JSON.stringify({ profileIndex: '/alice/profiles/index.jsonld', void: '/alice/profiles/void.jsonld',
-        uriSpaces: [{ pathPrefix: '/id/', container: '/alice/concepts/' }] }) });
+        // second entry ('/alice/vid/') is in-pod so the "real resource wins"
+        // test below can PUT there under alice's own inherited owner ACL —
+        // top-level '/id/' has no writer (root .acl is public-read-only, see
+        // ui/server-root.js), so it can't host that test's setup PUT.
+        uriSpaces: [
+          { pathPrefix: '/id/', container: '/alice/concepts/' },
+          { pathPrefix: '/alice/vid/', container: '/alice/concepts/' }
+        ] }) });
     // a real, PUBLIC-READ target the name resolves to
     await request(`${base}/alice/concepts/alpha`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
@@ -65,6 +76,27 @@ describe('303 referent resolver (live)', () => {
     assert.equal(r.headers.get('location'), `${base}/alice/concepts/alpha`);
     const body = await r.text();
     assert.equal(body, '');
+  });
+  it('no write-bypass: anonymous PUT to a virtual uriSpace name is WAC-gated, not exempted', async () => {
+    const r = await request(`${base}/id/beta`, { method: 'PUT',
+      headers: { 'content-type': 'application/ld+json' }, body: JSON.stringify({ 'http://purl.org/dc/terms/title': 'Beta' }) });
+    assert.ok(r.status === 401 || r.status === 403, `expected 401/403, got ${r.status}`);
+  });
+  it('no write-bypass: anonymous POST to a virtual uriSpace name is WAC-gated, not exempted', async () => {
+    const r = await request(`${base}/id/beta`, { method: 'POST',
+      headers: { 'content-type': 'application/ld+json' }, body: JSON.stringify({ 'http://purl.org/dc/terms/title': 'Beta' }) });
+    assert.ok(r.status === 401 || r.status === 403, `expected 401/403, got ${r.status}`);
+  });
+  it('real resource wins: owner PUT at the virtual path makes resourceExists true, GET stops being 303-exempted', async () => {
+    // '/alice/vid/gamma' is a second, in-pod uriSpace name (see the
+    // pod-config comment above) — it lets the owner actually create the
+    // real resource (root-level '/id/' has no writer to set that up).
+    const put = await request(`${base}/alice/vid/gamma`, { method: 'PUT',
+      headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
+      body: JSON.stringify({ 'http://purl.org/dc/terms/title': 'Gamma' }) });
+    assert.equal(put.status, 201);
+    const r = await request(`${base}/alice/vid/gamma`, { headers: { authorization: `Bearer ${tok}` }, redirect: 'manual' });
+    assert.equal(r.status, 200);
   });
 });
 
