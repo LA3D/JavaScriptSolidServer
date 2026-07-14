@@ -367,4 +367,23 @@ describe('.lwstypes/.lwsprov/.meta sidecars require READ-on-subject (C1)', () =>
     const del = await request(`${PRIV}.lwsprov`, { method: 'DELETE', auth: 'alice' });
     assert.equal(del.status, 405, `expected 405, got ${del.status}`);
   });
+
+  // PATCH bypasses applyLwsWrite entirely (handlePatch never routes through
+  // writeTypeConsistency), so — like DELETE — it needs its own mirrored guard
+  // (the handlePatch guard, review Critical 2026-07-14). Cover it explicitly
+  // so a regression here (the bug class this cluster keeps closing) is caught.
+  it('a client cannot PATCH a System-Managed .lwstypes sidecar (405)', async () => {
+    const patch = await request(`${OPEN}.lwstypes`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/merge-patch+json' }, auth: 'alice',
+      body: '{}',
+    });
+    assert.equal(patch.status, 405, `expected 405, got ${patch.status}`);
+    assert.match(patch.headers.get('allow') || '', /GET/, 'Allow header names GET');
+    // still there, unmodified — the guard refused before any write ran
+    const stillThere = await request(`${OPEN}.lwstypes`, { auth: 'alice' });
+    assert.equal(stillThere.status, 200, `expected .lwstypes to survive the refused PATCH, got ${stillThere.status}`);
+    const body = await stillThere.json();
+    assert.ok(Array.isArray(body) && body.includes('https://example.org/ex#Thing'),
+      `expected .lwstypes content unchanged: ${JSON.stringify(body)}`);
+  });
 });

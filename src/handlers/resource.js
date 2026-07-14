@@ -2361,6 +2361,19 @@ export async function handlePatch(request, reply) {
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
 
+  // PATCH bypasses applyLwsWrite (never routes through writeTypeConsistency)
+  // so mirror the System-Managed sidecar rejection here — a client must not be
+  // able to PATCH a server-derived .lwstypes/.lwsprov sidecar either. Mirrors
+  // the handleDelete guard above.
+  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(storagePath)) {
+    reply.header('Allow', 'GET, HEAD');
+    return reply.code(405).type('application/problem+json').send(JSON.stringify({
+      type: 'about:blank', title: 'Method Not Allowed', status: 405,
+      detail: 'This is a System-Managed sidecar; it is read-only to clients.',
+      instance: resourceUrl,
+    }, null, 2));
+  }
+
   // P2 (Solid #server-content-type-missing MUST): a bodied write with no
   // Content-Type must 400, not fall through to a guessed patch type.
   if (request.lwsEnabled && isBodiedWithoutContentType(request)) {

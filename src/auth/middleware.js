@@ -110,9 +110,11 @@ export async function authorize(request, reply, options = {}) {
   // READ-of-subject (this branch was method-agnostic), letting anyone with
   // read access overwrite/delete server-derived data. Writes now fall through
   // to the blanket check below and are refused downstream: the
-  // writeTypeConsistency gate inside applyLwsWrite for PUT/POST/PATCH (the
-  // choke point every write surface, incl. MCP, shares), and the mirrored
-  // guard in handleDelete for DELETE. So no write path is READ-gated any more.
+  // writeTypeConsistency gate inside applyLwsWrite for PUT/POST (the choke
+  // point every write surface, incl. MCP, shares), and the mirrored guards in
+  // handleDelete for DELETE and handlePatch for PATCH (PATCH never routes
+  // through applyLwsWrite, so it needs its own guard same as DELETE). So no
+  // write path is READ-gated any more.
   if (request.lwsEnabled && (method === 'GET' || method === 'HEAD') && /\.(lwstypes|lwsprov)$/.test(urlPath)) {
     return authorizeSidecarAccess(request, urlPath, webId, authError);
   }
