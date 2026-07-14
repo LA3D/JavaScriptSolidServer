@@ -131,7 +131,7 @@ export async function authorize(request, reply, options = {}) {
   // MEMBER, closing the leak both ways. --lws-gated to match the sibling
   // suffixes and keep this scoped to the C1 line of fixes.
   if (request.lwsEnabled && urlPath.endsWith('.meta')) {
-    const mode = (method === 'GET' || method === 'HEAD') ? AccessMode.READ : AccessMode.WRITE;
+    const mode = getRequiredMode(method);
     return authorizeSidecarAccess(request, urlPath, webId, authError, mode);
   }
 
