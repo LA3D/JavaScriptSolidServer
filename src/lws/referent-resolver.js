@@ -20,3 +20,15 @@ export function resolveReferent(urlPath, uriSpaces = []) {
   }
   return null;
 }
+
+// The recognition prefixes advertised on the ReferentResolution capability
+// (`${origin}/${pathPrefix}` for each uriSpace entry). MUST mirror
+// resolveReferent's own guard so a prefix is never advertised that can't
+// 303-resolve (T10): an entry needs a string `pathPrefix` ending in '/' AND a
+// string `container`. Shared by the HTTP surface (src/server.js) and the MCP
+// surface (src/mcp/index.js) so the two can't drift on what they advertise.
+export function uriSpacePrefixesFor(uriSpaces = [], origin) {
+  return uriSpaces
+    .filter((u) => u && typeof u.pathPrefix === 'string' && u.pathPrefix.endsWith('/') && typeof u.container === 'string' && u.container)
+    .map((u) => `${origin}/${u.pathPrefix.replace(/^\//, '')}`);
+}

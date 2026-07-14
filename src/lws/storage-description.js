@@ -56,10 +56,10 @@ export function generateStorageDescription(storageRootUrl, services = []) {
  * resource (read at /.well-known/lws-storage) both call this so the advertised
  * service set can never drift between the two surfaces.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
  * @returns {object}
  */
-export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, mcpEnabled = false, anonRateLimitMax = null } = {}) {
+export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, uriSpacePrefixes = [], mcpEnabled = false, anonRateLimitMax = null } = {}) {
   const lwsStoragePath = '/.well-known/lws-storage';
   const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
   if (typeIndexEnabled) {
@@ -139,12 +139,19 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
     });
   }
   if (referentResolutionEnabled) {
-    capability.push({
+    const cap = {
       // Parallel to DX-PROF-CONNEG above: this storage resolves minted
       // subject-IRI names (a declared void:uriSpace) by 303 redirect.
       type: 'https://w3id.org/lws-pod/capability/ReferentResolution',
-      hint: 'This storage dereferences minted subject-IRI names by 303 redirect to their backing resource. A resource in a declared void:uriSpace resolves via GET; the referent is the #it fragment. Discover typed referents via the Type Search service.',
-    });
+      hint: 'This storage dereferences minted subject-IRI names by 303 redirect to their backing resource. A name under one of the uriSpace prefixes below resolves via GET; the referent is the #it fragment. Discover typed referents via the Type Search service.',
+    };
+    // Recognition prefixes (steering, unmapped like the sibling hints): the
+    // void:uriSpace values, so a cold agent recognizes a minted IRI on its
+    // FIRST read of the storage description instead of confirming the prefix
+    // from the VoID document two hops later (probe #2). Prefixes only — the
+    // container/suffix mapping stays internal; the 303 is the resolver.
+    if (uriSpacePrefixes.length) cap.uriSpace = uriSpacePrefixes;
+    capability.push(cap);
   }
   if (capability.length > 0) base.capability = capability;
   return base;

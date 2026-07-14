@@ -23,6 +23,7 @@ import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { wac, buildUrl, parentPath } from './wac.js';
+import { sidecarSubject } from '../utils/url.js';
 import { sanitizeTypes, sanitizeField, sanitizeReps } from './sanitize.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
@@ -48,7 +49,18 @@ async function write_resource({ path, content, contentType, types }, ctx) {
   if (!path) return toolError('path required');
   if (path.endsWith('/')) return toolError('cannot PUT a container; use create_resource');
   if (content == null) return toolError('content required');
-  if (!(await wac(ctx, path, AccessMode.WRITE))) {
+  // I1 (sidecar-authz parity, 2026-07-14): a `.meta` write must bind the
+  // SUBJECT's ACL (WRITE on X, i.e. X.meta -> X; a container's bare
+  // /foo/.meta -> /foo/ stays container-bound), not the sidecar's own path —
+  // which findApplicableAcl walks UP to the container default, letting a
+  // delegated container-writer overwrite a private member's governance. This
+  // is the MCP twin of the HTTP authorizeSidecarAccess `.meta` branch. Only
+  // `.meta` is stripped here: `.lwstypes`/`.lwsprov` writes are 405'd
+  // downstream by the write-consistency gate inside applyLwsWrite (same as
+  // the HTTP write branch, which is `.meta`-only). --lws-gated to keep the
+  // --lws-off path byte-identical.
+  const authPath = (ctx.lwsEnabled && path.endsWith('.meta')) ? sidecarSubject(path).subject : path;
+  if (!(await wac(ctx, authPath, AccessMode.WRITE))) {
     return toolError(`access denied: write ${path}`);
   }
   const w = await applyLwsWrite({
@@ -103,6 +115,9 @@ async function create_resource({ container, slug, content, contentType, isContai
 
 async function delete_resource({ path }, ctx) {
   if (!path) return toolError('path required');
+  if (ctx.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(path)) {
+    return toolError(`cannot delete ${path}: System-Managed sidecar (read-only to clients)`);
+  }
   if (!(await wac(ctx, path, AccessMode.WRITE))) {
     return toolError(`access denied: delete ${path}`);
   }

@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectAuthorizedResources } from '../src/lws/authorized-resources.js';
 import { callTool } from '../src/mcp/tools.js';
-import { startLwsPod, ownerCtx, seedTyped, startTestServer, stopTestServer, getBaseUrl } from './helpers.js';
+import { startLwsPod, ownerCtx, seedTyped, startTestServer, stopTestServer, getBaseUrl, request } from './helpers.js';
+import { generatePrivateAcl, serializeAcl } from '../src/wac/parser.js';
 import * as storage from '../src/storage/filesystem.js';
 
 test('collectAuthorizedResources drops resources the agent cannot read (no oracle)', async (t) => {
@@ -52,6 +53,59 @@ test('describe_resource returns anchor/type in its linkset, WAC-gated', async (t
   const denied = await callTool('describe_resource', { path: '/lwsmcp/priv/b' }, { webId: null, origin: pod.origin });
   assert.equal(denied.isError, true, 'anonymous must be denied the linkset for a private resource');
   assert.match(denied.content[0].text, /not found or not authorized/i);
+});
+
+// --- I2 (whole-branch review, 2026-07-14): an MCP read of a private member's
+// .lwstypes/.lwsprov must bind READ on the SUBJECT, not the sidecar's own path
+// (which walks up to the container default). MCP twin of the HTTP C1 fix. ---
+
+test('I2: MCP read of a private member .lwstypes binds READ on the subject, not the container default', async (t) => {
+  const pod = await startLwsPod(t);
+  const base = pod.base;
+  const MEMBER = `/${pod.podName}/public/secret.jsonld`;   // sits in the public-read container
+
+  // Typed member -> the server writes its .lwstypes sidecar. Then tighten the
+  // member with its OWN alice-only .acl, so the member is private while the
+  // /public/ container stays public-read (the exact C1 topology).
+  await seedTyped(pod, MEMBER, 'https://ex/Note');
+  const acl = await request(`${MEMBER}.acl`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: pod.podName,
+    body: serializeAcl(generatePrivateAcl(`${base}${MEMBER}`, pod.webId, false)),
+  });
+  assert.ok([200, 201, 204].includes(acl.status), `member .acl PUT ${acl.status}`);
+
+  const anonC = { webId: null, origin: base, lwsEnabled: true };
+  const sidecarUri = `${base}${MEMBER}.lwstypes`;
+
+  // sanity: anon is denied the private member itself
+  const subj = await callTool('read_resource', { uri: `${base}${MEMBER}` }, anonC);
+  assert.equal(subj.isError, true, 'anon must be denied the private member');
+
+  // RED (pre-fix): .lwstypes falls to readBody, which requireReads the
+  // sidecar's own path -> resolves the public-read container default -> LEAKS
+  // the subject's rdf:type. GREEN (post-fix): READ is bound to the stripped
+  // subject -> denied.
+  const anonRes = await callTool('read_resource', { uri: sidecarUri }, anonC);
+  assert.equal(anonRes.isError, true, `anon must be denied the private member's .lwstypes: ${JSON.stringify(anonRes)}`);
+  assert.match(anonRes.content[0].text, /not found or not authorized/i);
+
+  // NO OVER-BLOCK: the owner still reads the .lwstypes and sees the type.
+  const ownerRes = await callTool('read_resource', { uri: sidecarUri }, { ...ownerCtx(pod), lwsEnabled: true });
+  assert.equal(ownerRes.isError, false, `owner must read the .lwstypes: ${JSON.stringify(ownerRes)}`);
+  assert.match(ownerRes.content[0].text, /https:\/\/ex\/Note/);
+});
+
+test('I2: a PUBLIC member .lwstypes stays anon-readable (no over-blocking)', async (t) => {
+  const pod = await startLwsPod(t);
+  const base = pod.base;
+  const OPEN = `/${pod.podName}/public/open.jsonld`;
+  // publicRead writes the member its own owner+foaf:Agent-Read .acl.
+  await seedTyped(pod, OPEN, 'https://ex/Note', { publicRead: true });
+
+  const anonC = { webId: null, origin: base, lwsEnabled: true };
+  const res = await callTool('read_resource', { uri: `${base}${OPEN}.lwstypes` }, anonC);
+  assert.equal(res.isError, false, `anon must read a public member's .lwstypes: ${JSON.stringify(res)}`);
+  assert.match(res.content[0].text, /https:\/\/ex\/Note/);
 });
 
 // Round-trips through the real /mcp HTTP route (not a hand-built ctx) so

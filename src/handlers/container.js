@@ -165,7 +165,9 @@ export async function handlePost(request, reply) {
     });
     if (!w.ok) {
       if (w.problem) {
-        return reply.code(400).type('application/problem+json').send(JSON.stringify(w.problem, null, 2));
+        const reply2 = reply.code(w.problem.status || 400).type('application/problem+json');
+        if (w.problem.status === 405) reply2.header('Allow', 'GET, HEAD');
+        return reply2.send(JSON.stringify(w.problem, null, 2));
       }
       reply.header('content-type', 'application/problem+json');
       if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);

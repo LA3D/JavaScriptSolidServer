@@ -61,9 +61,9 @@ export function isPrivateIP(ip) {
   const ipv6Private = [
     /^::1$/, // Loopback
     /^::$/, // Unspecified (review #14)
-    /^fe80:/i, // Link-local
-    /^f[cd]/i, // Unique local (fc00::/7 — widened from fc00:/fd00: literal prefixes, review #14: fc01::1 must block too)
-    /^ff00:/i, // Multicast
+    /^fe[89ab]/i, // Link-local fe80::/10 (first hextet fe80–febf; widened from the fe80: literal)
+    /^f[cd]/i, // Unique local (fc00::/7)
+    /^ff/i, // Multicast ff00::/8 (first hextet ff00–ffff; widened from the ff00: literal)
   ];
 
   // Check IPv4

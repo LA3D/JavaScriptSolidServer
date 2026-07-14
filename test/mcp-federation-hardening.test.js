@@ -19,7 +19,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { isBlockedHost } from '../src/mcp/ssrf.js';
+import dns from 'node:dns/promises';
+import { isBlockedHost, resolvesToBlockedHost } from '../src/mcp/ssrf.js';
 import { isPrivateIP } from '../src/utils/ssrf.js';
 import { MAX_BODY_BYTES } from '../src/mcp/read.js';
 import { callTool } from '../src/mcp/tools.js';
@@ -44,6 +45,44 @@ test('isBlockedHost: allowPrivate overrides every check, including cloud metadat
   for (const h of ['127.0.0.1', '169.254.169.254', '10.0.0.1', '[fc00::1]', '0.0.0.0', '[::]']) {
     assert.equal(isBlockedHost(h, { allowPrivate: true }), false, `expected ${h} allowed under allowPrivate`);
   }
+});
+
+// --- resolvesToBlockedHost: the resolve-and-check gap isBlockedHost can't
+// close (a public-looking NAME that resolves to a private IP) ---
+
+test('resolvesToBlockedHost blocks a name that resolves to a private IP', async () => {
+  // localhost resolves to 127.0.0.1 / ::1 — both private, deterministic offline.
+  assert.equal(await resolvesToBlockedHost('localhost', {}), true);
+});
+
+test('resolvesToBlockedHost allows a name that resolves to a public IP', async (t) => {
+  // example.com resolves to public addresses — network-dependent; skip if
+  // DNS is unreachable (offline/sandboxed CI) rather than false-fail.
+  let addrs;
+  try {
+    addrs = await Promise.all([dns.resolve4('example.com'), dns.resolve6('example.com').catch(() => [])]);
+  } catch {
+    t.skip('no network / DNS resolution unavailable for example.com');
+    return;
+  }
+  if (addrs[0].length === 0) {
+    t.skip('example.com did not resolve to any A record');
+    return;
+  }
+  const blocked = await resolvesToBlockedHost('example.com', {});
+  assert.equal(blocked, false);
+});
+
+test('resolvesToBlockedHost is a no-op when allowPrivate', async () => {
+  assert.equal(await resolvesToBlockedHost('localhost', { allowPrivate: true }), false);
+});
+
+test('resolvesToBlockedHost skips IP literals (handled by isBlockedHost)', async () => {
+  assert.equal(await resolvesToBlockedHost('93.184.216.34', {}), false);
+});
+
+test('resolvesToBlockedHost fails closed when resolution errors (name does not exist)', async () => {
+  assert.equal(await resolvesToBlockedHost('this-name-does-not-resolve.invalid', {}), true);
 });
 
 // --- isBlockedHost: IPv6, driven through the REAL production shape ---
@@ -95,6 +134,22 @@ test('isBlockedHost blocks 100.64/10 incl. Alibaba metadata, mapped-IPv6 form to
 
 test('utils isPrivateIP gains the hex-group mapped form (importers inherit)', () => {
   assert.equal(isPrivateIP('::ffff:a9fe:a9fe'), true);       // 169.254.169.254
+});
+
+// fe80::/10 link-local (first hextet fe80–febf), not just literal fe80
+test('isPrivateIP: full fe80::/10 link-local range (fe80–febf) is blocked', () => {
+  for (const ip of ['fe80::1', 'fe81::1', 'fe9f::1', 'feaf::1', 'febf::1']) {
+    assert.equal(isPrivateIP(ip), true, `${ip} is link-local (fe80::/10)`);
+  }
+  // fec0:: is site-local-deprecated, OUTSIDE fe80::/10 — must stay unblocked
+  assert.equal(isPrivateIP('fec0::1'), false, 'fec0:: is not in fe80::/10');
+});
+
+// ff00::/8 multicast (first hextet ff00–ffff), not just literal ff00
+test('isPrivateIP: full ff00::/8 multicast range (ff00–ffff) is blocked', () => {
+  for (const ip of ['ff00::1', 'ff02::1', 'ff02::2', 'ff05::1', 'ff0e::1', 'ffff::1']) {
+    assert.equal(isPrivateIP(ip), true, `${ip} is multicast (ff00::/8)`);
+  }
 });
 
 // --- readRemote: the same bypasses, driven end-to-end through read_resource ---
@@ -187,6 +242,13 @@ test('read_resource remote: a redirect hop to a blocked host is refused with a t
   // startLwsPod itself uses fetch (pod bootstrap) — install the mock AFTER
   // the pod is up, so only readRemote's own fetch calls are intercepted.
   const p = await startLwsPod(t);
+  // hop 0's hostname (example.com) now goes through the per-hop DNS
+  // pre-check (resolvesToBlockedHost) — mock it to a public IP so this test
+  // stays hermetic (no live DNS) and reaches the mocked redirect below. The
+  // redirect target (169.254.169.254) is an IP literal, so isBlockedHost
+  // catches it directly without a DNS call.
+  t.mock.method(dns, 'resolve4', async () => ['93.184.216.34']);
+  t.mock.method(dns, 'resolve6', async () => []);
   const fetchMock = t.mock.method(globalThis, 'fetch', async (input) => {
     const u = typeof input === 'string' ? input : input.url;
     if (u === 'https://example.com/void') {
@@ -205,6 +267,12 @@ test('read_resource remote: a redirect hop to a blocked host is refused with a t
 
 test('read_resource remote: stops after MAX_REDIRECT_HOPS with a teaching error (no unbounded redirect chain)', async (t) => {
   const p = await startLwsPod(t);
+  // every hop here is the hostname example.com (never an IP literal), so
+  // each iteration of the loop re-triggers the DNS pre-check — mock it to a
+  // public IP so the test stays hermetic and the hop-cap logic (not a
+  // live-DNS failure) is what's actually exercised.
+  t.mock.method(dns, 'resolve4', async () => ['93.184.216.34']);
+  t.mock.method(dns, 'resolve6', async () => []);
   let calls = 0;
   const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
     calls++;
@@ -259,6 +327,47 @@ test('read_resource remote: --lws-federation-private (ctx.federationPrivate) opt
   assert.equal(res.isError ?? false, false, JSON.stringify(res));
   const out = JSON.parse(res.content[0].text);
   assert.match(out.body, /"ok":true/);
+});
+
+// --- readRemote: DNS pre-check (resolvesToBlockedHost wired into the hop
+// loop) — a hostname whose LITERAL form isBlockedHost lets through but which
+// RESOLVES to a private address must still be blocked before the fetch. ---
+
+test('read_resource remote: a public-looking hostname that resolves to a private IP is blocked (never dialed)', async (t) => {
+  const p = await startLwsPod(t);
+  t.mock.method(dns, 'resolve4', async () => ['169.254.169.254']);
+  t.mock.method(dns, 'resolve6', async () => []);
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
+    throw new Error('must not be dialed — blocked at the DNS pre-check');
+  });
+
+  const res = await callTool('read_resource', { uri: 'https://sneaky.example.invalid/x' },
+    { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true });
+  assert.equal(res.isError, true);
+  assert.match(res.content[0].text, /federation blocked/);
+  assert.match(res.content[0].text, /resolves to a private\/internal address/);
+  assert.equal(fetchMock.mock.callCount(), 0, 'DNS-resolved-private host must never be dialed');
+});
+
+test('read_resource remote: --lws-federation-private also opts out of the DNS pre-check (rig hostnames resolve to 127.0.0.1)', async (t) => {
+  const stub = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end('{"ok":true}');
+  });
+  await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+  t.after(() => stub.close());
+  const port = stub.address().port;
+
+  const p = await startLwsPod(t);
+  t.mock.method(dns, 'resolve4', async () => ['127.0.0.1']);
+  t.mock.method(dns, 'resolve6', async () => []);
+  const realFetch = globalThis.fetch;
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => realFetch(`http://127.0.0.1:${port}/x`));
+
+  const res = await callTool('read_resource', { uri: 'https://rig.example.invalid/x' },
+    { ...ownerCtx(p), federationDepth: 0, lwsEnabled: true, federationPrivate: true });
+  assert.equal(res.isError ?? false, false, JSON.stringify(res));
+  assert.equal(fetchMock.mock.callCount(), 1);
 });
 
 // --- readRemote: response-size bound ---

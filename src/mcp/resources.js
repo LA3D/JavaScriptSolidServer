@@ -7,6 +7,7 @@
 // leaving this module). Every resolver reuses the same read logic + wac() as
 // the HTTP layer, so the no-oracle property is inherited, not reimplemented.
 import { uriToPath, isLocalUri } from './uri.js';
+import { sidecarSubject } from '../utils/url.js';
 import { wac, buildUrl } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
@@ -74,6 +75,7 @@ async function readStorageDescription(ctx, uri) {
     profileIndexPath: ctx.profileIndexPath, voidPath: ctx.voidPath,
     profileConnegEnabled: ctx.profileConnegEnabled,
     referentResolutionEnabled: ctx.referentResolutionEnabled,
+    uriSpacePrefixes: ctx.uriSpacePrefixes,
     mcpEnabled: true,
     anonRateLimitMax: ctx.anonRateLimitMax,
   });
@@ -180,13 +182,34 @@ async function readBody(path, ctx, uri) {
   return { contents: [{ uri, mimeType, text }] };
 }
 
+// I2 (sidecar-authz parity, 2026-07-14): `.lwstypes`/`.lwsprov` leak the
+// SUBJECT's rdf:type / earned profile, so reading one requires acl:Read on the
+// STRIPPED SUBJECT — not the sidecar's own path, which requireRead (via
+// findApplicableAcl) walks UP to the container default, never the subject's
+// own (possibly tighter) `.acl`. This is the MCP twin of the HTTP C1 fix
+// (authorizeSidecarAccess); without it these sidecars fell through to
+// readBody, leaking a private member's type/provenance to a container-read
+// agent. The sidecar's own bytes are still returned (bounded/fenced, same as
+// readBody) — only the AUTHZ target changes. `.meta` is handled by
+// readMetaView above (already subject-stripped); this covers its two siblings.
+async function readSidecarView(path, ctx, uri) {
+  const { subject } = sidecarSubject(path);
+  await requireRead(ctx, subject, uri);
+  const r = await readBounded(path);
+  requireExists(r, uri);
+  const { mimeType, text } = sanitizeForTrust(path, r);
+  return { contents: [{ uri, mimeType, text }] };
+}
+
 // Dispatch on the resource itself — no synthetic kind. Each view carries its
-// own WAC gate (Read for container/meta/body, Control for the ACL document)
-// so the no-oracle order (WAC before exists) is preserved per branch.
+// own WAC gate (Read for container/meta/body, Read-on-subject for the
+// type/provenance sidecars, Control for the ACL document) so the no-oracle
+// order (WAC before exists) is preserved per branch.
 async function readByResource(path, ctx, uri) {
   if (path.endsWith('/')) return readContainerView(path, ctx, uri);
   if (path.endsWith('.acl')) return readAclView(path, ctx, uri);
   if (path.endsWith('.meta')) return readMetaView(path, ctx, uri);
+  if (ctx.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(path)) return readSidecarView(path, ctx, uri);
   return readBody(path, ctx, uri);
 }
 

@@ -174,18 +174,18 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
  * @param {object} options
  * @returns {object}
  */
-export function getNotFoundHeaders({ resourceUrl = null, origin = null, connegEnabled = false, mashlibEnabled = false }) {
+export function getNotFoundHeaders({ resourceUrl = null, origin = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false }) {
   // Determine if this would be a container based on URL ending with /
   const isContainer = resourceUrl?.endsWith('/') || false;
   const aclUrl = resourceUrl ? getAclUrl(resourceUrl, isContainer) : null;
 
   // Get Accept-* headers
-  const acceptHeaders = getAcceptHeaders(connegEnabled, isContainer);
+  const acceptHeaders = getAcceptHeaders(connegEnabled, isContainer, lwsEnabled);
 
   const headers = {
     ...getCorsHeaders(origin),
     'Link': aclUrl ? `<${aclUrl}>; rel="acl"` : '',
-    'Accept-Patch': 'text/n3, application/sparql-update',
+    'Accept-Patch': acceptHeaders['Accept-Patch'],   // lws-aware (adds merge-patch under --lws)
     'Accept-Put': acceptHeaders['Accept-Put'] || 'application/ld+json, */*',
     'Allow': 'GET, HEAD, PUT, PATCH, OPTIONS' + (isContainer ? ', POST' : ''),
     'Vary': getVaryHeader(connegEnabled, mashlibEnabled)

@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import { DataFactory as N3DataFactory } from 'n3';
 import * as storage from '../storage/filesystem.js';
 import { checkQuota, updateQuotaUsage } from '../storage/quota.js';
 import { getAllHeaders, getNotFoundHeaders, representationLinks } from '../ldp/headers.js';
@@ -10,6 +9,7 @@ import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, saf
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
 import { applyMergePatch } from '../patch/merge-patch.js';
+import { applyPatchToDataset, patchDeletesExist, resolveWhere } from '../patch/dataset-patch.js';
 import { toDataset } from '../rdf/dataset.js';
 import {
   selectContentType,
@@ -360,7 +360,7 @@ export async function handleGet(request, reply) {
     }
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
-    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });
+    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled, lwsEnabled: request.lwsEnabled });
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
     return reply.code(404).send({ error: 'Not Found' });
   }
@@ -1581,7 +1581,7 @@ export async function handleHead(request, reply) {
     }
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
-    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });
+    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled, lwsEnabled: request.lwsEnabled });
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
     return reply.code(404).send();
   }
@@ -2061,7 +2061,9 @@ export async function handlePut(request, reply) {
   });
   if (!w.ok) {
     if (w.problem) {
-      return reply.code(400).type('application/problem+json').send(JSON.stringify(w.problem, null, 2));
+      const reply2 = reply.code(w.problem.status || 400).type('application/problem+json');
+      if (w.problem.status === 405) reply2.header('Allow', 'GET, HEAD');
+      return reply2.send(JSON.stringify(w.problem, null, 2));
     }
     reply.header('content-type', 'application/problem+json');
     if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
@@ -2115,12 +2117,24 @@ export async function handleDelete(request, reply) {
 
   const { storagePath, resourceUrl } = getRequestPaths(request);
 
+  // DELETE bypasses applyLwsWrite (no body to gate through writeTypeConsistency)
+  // so mirror the System-Managed sidecar rejection here — a client must not be
+  // able to delete a server-derived .lwstypes/.lwsprov sidecar either.
+  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(storagePath)) {
+    reply.header('Allow', 'GET, HEAD');
+    return reply.code(405).type('application/problem+json').send(JSON.stringify({
+      type: 'about:blank', title: 'Method Not Allowed', status: 405,
+      detail: 'This is a System-Managed sidecar; it is read-only to clients.',
+      instance: resourceUrl,
+    }, null, 2));
+  }
+
   // Check if resource exists and get current ETag
   const stats = await storage.stat(storagePath);
   if (!stats) {
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
-    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });
+    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled, lwsEnabled: request.lwsEnabled });
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
     return reply.code(404).send({ error: 'Not Found' });
   }
@@ -2189,79 +2203,6 @@ export async function handleOptions(request, reply) {
   return reply.code(204).send();
 }
 
-// task-6 review (owner directive): PATCH on a verbatim-stored resource
-// applies at the RDF TERM level — no JSON-LD document detour. n3-patch.js
-// and sparql-update.js both hand back ground triples {subject, predicate,
-// object}; object is a plain string, an {'@id': ...} / {value|@value,
-// type|@type} / {value|@value, language|@language} object (sparql-update.js's
-// shape), or an N3-Patch-only {blankNode} marker. A bare STRING object is
-// only ambiguous (URI or literal) when it came from parseN3Patch — its own
-// regex parser hands back the same bare-string shape for both (resolved
-// the same way its legacy convertToJsonLd did: a bare http(s) string is a
-// URI, anything else a plain literal). parseSparqlUpdate's bare strings are
-// NEVER ambiguous — termToJsonLdValue only flattens a KNOWN xsd:string
-// literal that way, always wrapping IRIs as {'@id':...} — so the
-// http-heuristic must not run on SPARQL-sourced strings (finding 1, review
-// round: it was corrupting URL-valued string literals into NamedNodes).
-// termFromId/termFromPatchObject below build real n3 DataFactory terms;
-// termFromPatchObject takes an `ambiguous` flag so each caller in
-// applyPatchToDataset can say which shape-origin it's feeding it.
-const { namedNode: patchNamedNode, literal: patchLiteral, blankNode: patchBlankNode,
-  quad: patchQuad, defaultGraph: patchDefaultGraph } = N3DataFactory;
-
-function termFromId(value) {
-  return typeof value === 'string' && value.startsWith('_:')
-    ? patchBlankNode(value.slice(2))
-    : patchNamedNode(value);
-}
-
-// `ambiguous` is true only for N3-Patch-sourced objects, whose parser hands
-// back a bare string for BOTH IRIs and plain literals (genuine ambiguity —
-// resolveValue in n3-patch.js, see comment above). SPARQL's parser KNOWS
-// the difference (termToJsonLdValue in sparql-update.js wraps IRIs as
-// {'@id':...} and only flattens a KNOWN xsd:string literal to a bare
-// string) — so a bare string from the SPARQL path must always be a
-// literal, never run through the http-heuristic (finding 1: a
-// "https://example.org" string literal was being corrupted into a
-// NamedNode on INSERT, and DELETE against that same literal silently
-// no-op'd because deleteMatches never matched a mistyped NamedNode).
-function termFromPatchObject(object, ambiguous) {
-  if (typeof object === 'string') {
-    return (ambiguous && (object.startsWith('http://') || object.startsWith('https://')))
-      ? patchNamedNode(object)
-      : patchLiteral(object);
-  }
-  if (object && typeof object === 'object') {
-    if (object.blankNode !== undefined) return patchBlankNode(object.blankNode);
-    if (object['@id'] !== undefined) return termFromId(object['@id']);
-    const val = object.value !== undefined ? object.value : object['@value'];
-    const type = object.type !== undefined ? object.type : object['@type'];
-    const lang = object.language !== undefined ? object.language : object['@language'];
-    if (val !== undefined && type !== undefined) return patchLiteral(val, patchNamedNode(type));
-    if (val !== undefined && lang !== undefined) return patchLiteral(val, lang);
-    if (val !== undefined) return patchLiteral(val);
-  }
-  return patchLiteral(String(object));
-}
-
-// Applies {deletes, inserts} directly on the rdf-ext dataset, scoped to the
-// DEFAULT graph only: deletes that match nothing are silent no-ops (dataset
-// deleteMatches over an empty match set is a no-op by construction — same
-// observable behavior the old document-level deleteTriple had), and named
-// graph quads in .nq-stored docs (non-default graph) are never touched, so
-// they survive untouched. solid:where stays ignored (pre-existing gap, out
-// of scope — neither parser's `where` array is consulted here either).
-function applyPatchToDataset(dataset, { deletes = [], inserts = [] }, ambiguous) {
-  for (const t of deletes) {
-    dataset.deleteMatches(
-      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object, ambiguous), patchDefaultGraph());
-  }
-  for (const t of inserts) {
-    dataset.add(patchQuad(
-      termFromId(t.subject), patchNamedNode(t.predicate), termFromPatchObject(t.object, ambiguous), patchDefaultGraph()));
-  }
-}
-
 /**
  * #7 (Solid #server-patch-n3-accept MUST): PATCH a verbatim-stored
  * Turtle-family resource (resourceExists && storedType is Turtle/N3/NT/NQ).
@@ -2309,6 +2250,29 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
     } catch (e) {
       return reply.code(400).send({ error: 'Bad Request', message: 'Invalid N3 Patch format: ' + e.message });
     }
+    // Task 8, contract 2: a non-empty solid:where binds a SINGLE solution into
+    // deletes/inserts BEFORE they are applied — zero/multiple solutions 409, so
+    // a conditional patch never applies unconditionally. Runs before the write
+    // choke point (applyLwsWrite, below), so nothing is stored on rejection.
+    if (patch.where && patch.where.length) {
+      const w = resolveWhere(dataset, patch, true);
+      if (!w.ok) {
+        return reply.code(409).type('application/problem+json').send(JSON.stringify({
+          type: 'about:blank', title: 'Conflict', status: 409, detail: w.detail, instance: resourceUrl,
+        }, null, 2));
+      }
+      patch = { deletes: w.deletes, inserts: w.inserts, where: [] };
+    }
+    // Task 8, contract 1: every delete triple MUST already exist — a delete of
+    // an absent triple is a 409, not a silent no-op (Solid N3-Patch).
+    const exist = patchDeletesExist(dataset, patch, true);
+    if (!exist.ok) {
+      return reply.code(409).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Conflict', status: 409,
+        detail: `N3 Patch delete of a triple absent from the target graph: ${JSON.stringify(exist.missing)}`,
+        instance: resourceUrl,
+      }, null, 2));
+    }
     try {
       applyPatchToDataset(dataset, patch, true); // N3-Patch: bare strings are AMBIGUOUS (IRI or literal)
     } catch (e) {
@@ -2318,13 +2282,43 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
 
   const updatedContent = await datasetToFormat(dataset, QUADS_OUTPUTS[storedType] || RDF_TYPES.NQUADS);
 
-  const success = await storage.write(storagePath, Buffer.from(updatedContent));
-  if (!success) {
+  // task-6: route the Turtle-family dataset patch through the shared write
+  // choke point (applyLwsWrite) so SHACL admission holds on PATCH — a patch
+  // whose RESULT violates the container shape 400s instead of silently 204ing
+  // — and .lwstypes/.lwsprov re-derive from the patched bytes. contentType is
+  // the RESOURCE's own stored RDF type (storedType), NEVER the patch media
+  // type, so subjectTypesFromBody / the gate read the right serialization.
+  // (Only reachable under --lws — the dispatch guard sets storedType only when
+  // request.lwsEnabled && resourceExists.)
+  const w = await applyLwsWrite({
+    storage, storagePath, resourceUrl,
+    content: Buffer.from(updatedContent),
+    contentType: storedType,
+    declaredTypes: [],
+    lwsEnabled: request.lwsEnabled,
+  });
+  if (!w.ok) {
+    if (w.problem) {
+      const r = reply.code(w.problem.status || 400).type('application/problem+json');
+      if (w.problem.status === 405) r.header('Allow', 'GET, HEAD');
+      return r.send(JSON.stringify(w.problem, null, 2));
+    }
+    reply.header('content-type', 'application/problem+json');
+    if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
+    return reply.code(400).send(constraintProblem({ shapeUrl: w.shapeUrl, violations: w.violations, instance: resourceUrl }));
+  }
+  if (!w.wrote) {
     return reply.code(500).send({ error: 'Write failed' });
   }
 
   const origin = request.headers.origin;
   const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled });
+  // Append the describedby Link when admission resolved a governing shape —
+  // mirrors handlePut's success-path shape advertisement.
+  if (w.shapeUrl) {
+    const shapeLink = `<${w.shapeUrl}>; rel="describedby"`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${shapeLink}` : shapeLink;
+  }
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
 
   if (request.notificationsEnabled) {
@@ -2346,6 +2340,19 @@ export async function handlePatch(request, reply) {
   }
 
   const { urlPath, storagePath, resourceUrl } = getRequestPaths(request);
+
+  // PATCH bypasses applyLwsWrite (never routes through writeTypeConsistency)
+  // so mirror the System-Managed sidecar rejection here — a client must not be
+  // able to PATCH a server-derived .lwstypes/.lwsprov sidecar either. Mirrors
+  // the handleDelete guard above.
+  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(storagePath)) {
+    reply.header('Allow', 'GET, HEAD');
+    return reply.code(405).type('application/problem+json').send(JSON.stringify({
+      type: 'about:blank', title: 'Method Not Allowed', status: 405,
+      detail: 'This is a System-Managed sidecar; it is read-only to clients.',
+      instance: resourceUrl,
+    }, null, 2));
+  }
 
   // P2 (Solid #server-content-type-missing MUST): a bodied write with no
   // Content-Type must 400, not fall through to a guessed patch type.
@@ -2454,6 +2461,13 @@ export async function handlePatch(request, reply) {
       } catch (e) {
         // Not JSON - might be Turtle, handle with RDF store for SPARQL Update
         if (isSparqlUpdate) {
+          // task-6: this legacy Turtle-in-SPARQL fallback is NOT reachable under
+          // --lws — a verbatim Turtle-family resource diverts to
+          // patchTurtleFamilyResource above (branch a), and the --lws write gate
+          // (writeTypeConsistency) refuses ever storing a non-JSON RDF body at a
+          // non-Turtle-family / extensionless name, so no --lws resource lands
+          // here. It stays a DIRECT storage.write: the --lws-off (or pre-gate)
+          // path, kept byte-identical (no admission on that path anyway).
           // Parse Turtle and apply SPARQL Update directly
           const { Parser, Writer } = await import('n3');
           const parser = new Parser({ baseIRI: resourceUrl });
@@ -2594,6 +2608,32 @@ export async function handlePatch(request, reply) {
       });
     }
 
+    // Task 8 (FLOOR, contract 2): the JSON-LD-document path does not bind a
+    // solid:where — a full BGP evaluator over the projected node structure is
+    // out of proportion for this arm (the Turtle-family/dataset path binds
+    // where; store the resource as RDF to use it). The one outcome conformance
+    // forbids is applying a conditional patch UNCONDITIONALLY, so a
+    // where-carrying patch is rejected 409 rather than silently applied.
+    if (patch.where && patch.where.length) {
+      return reply.code(409).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Conflict', status: 409,
+        detail: 'conditional patch (solid:where) is not supported for this resource; store it as a Turtle-family RDF resource to use solid:where.',
+        instance: resourceUrl,
+      }, null, 2));
+    }
+
+    // Task 8 (contract 1): every delete triple MUST already exist —
+    // validatePatch turns a delete of an absent triple into a 409, not a
+    // silent no-op. Runs before applyN3Patch/the write, so nothing is stored
+    // on rejection.
+    const check = validatePatch(document, patch, resourceUrl);
+    if (!check.valid) {
+      return reply.code(409).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Conflict', status: 409,
+        detail: check.error, instance: resourceUrl,
+      }, null, 2));
+    }
+
     try {
       updatedDocument = applyN3Patch(document, patch, resourceUrl);
     } catch (e) {
@@ -2604,19 +2644,48 @@ export async function handlePatch(request, reply) {
     }
   }
 
-  // Write updated document
-  let updatedContent;
+  // Write updated document.
+  // task-6: split the two stored shapes — the pure-JSON-LD document rides the
+  // shared write choke point (admission holds; .lwstypes/.lwsprov re-derive),
+  // while an HTML data-island document stays a DIRECT write. The HTML case's
+  // stored bytes are HTML, NOT a governed RDF source; routing them through
+  // applyLwsWrite with contentType: application/ld+json would make the gate /
+  // admission misread the HTML wrapper as a JSON-LD body.
   if (htmlWrapper) {
-    // Re-embed JSON-LD into HTML wrapper
+    // Re-embed JSON-LD into HTML wrapper — direct write (not RDF-governed).
     const jsonLdStr = JSON.stringify(updatedDocument, null, 2);
-    updatedContent = htmlWrapper.before + '\n' + jsonLdStr + '\n  ' + htmlWrapper.after;
+    const updatedContent = htmlWrapper.before + '\n' + jsonLdStr + '\n  ' + htmlWrapper.after;
+    const success = await storage.write(storagePath, Buffer.from(updatedContent));
+    if (!success) {
+      return reply.code(500).send({ error: 'Write failed' });
+    }
   } else {
-    updatedContent = JSON.stringify(updatedDocument, null, 2);
-  }
-  const success = await storage.write(storagePath, Buffer.from(updatedContent));
-
-  if (!success) {
-    return reply.code(500).send({ error: 'Write failed' });
+    // Pure JSON-LD → applyLwsWrite. contentType is the resource's effective
+    // type (application/ld+json by this point), NEVER the patch media type.
+    // Under --lws-off, writeTypeConsistency returns ok and the admission block
+    // is skipped, so the stored bytes are byte-identical to the prior direct
+    // storage.write (verified by the --lws-off patch.test.js suite).
+    const updatedContent = JSON.stringify(updatedDocument, null, 2);
+    const w = await applyLwsWrite({
+      storage, storagePath, resourceUrl,
+      content: Buffer.from(updatedContent),
+      contentType: RDF_TYPES.JSON_LD,
+      declaredTypes: [],
+      lwsEnabled: request.lwsEnabled,
+    });
+    if (!w.ok) {
+      if (w.problem) {
+        const r = reply.code(w.problem.status || 400).type('application/problem+json');
+        if (w.problem.status === 405) r.header('Allow', 'GET, HEAD');
+        return r.send(JSON.stringify(w.problem, null, 2));
+      }
+      reply.header('content-type', 'application/problem+json');
+      if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
+      return reply.code(400).send(constraintProblem({ shapeUrl: w.shapeUrl, violations: w.violations, instance: resourceUrl }));
+    }
+    if (!w.wrote) {
+      return reply.code(500).send({ error: 'Write failed' });
+    }
   }
 
   const origin = request.headers.origin;

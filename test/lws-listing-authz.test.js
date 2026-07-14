@@ -78,4 +78,36 @@ describe('WAC-filtered container listing (--lws)', () => {
     const body = await r.text();
     assert.ok(!body.includes(`${getBaseUrl()}/alice/public/.acl"`));
   });
+
+  // A member's `.meta` sidecar leaks the same class of thing the direct-GET
+  // fix (db9cdaa/16530a1) closed, but on the LISTING surface: the `else`
+  // branch in filterReadableEntries checks READ on `PRIV.meta`'s OWN path,
+  // which walks up to the container's public-read default — not PRIV's own
+  // tighter `.acl` — so the sidecar's bare presence in items[] leaks the
+  // private member's name to an anonymous listing even though PRIV itself is
+  // correctly hidden (the two tests above).
+  it('a private member .meta is hidden from an anonymous listing, shown to the owner', async () => {
+    const base = getBaseUrl();
+    // PRIV already carries its own tighter .acl (see `before`); write its
+    // .meta as owner.
+    const metaRes = await request(`${PRIV}.meta`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'alice',
+      body: JSON.stringify({ '@id': `${base}${PRIV}`,
+        'http://purl.org/dc/terms/conformsTo': { '@id': 'https://example.org/prof/ex' } }),
+    });
+    assert.ok([200, 201, 204].includes(metaRes.status), `setup .meta PUT ${metaRes.status}`);
+    const metaName = PRIV.split('/').pop() + '.meta';
+
+    const anon = await request('/alice/public/', { headers: { Accept: 'application/lws+json' } });
+    assertStatus(anon, 200);
+    const anonBody = JSON.parse(await anon.text());
+    assert.ok(!anonBody.items.some(i => i.id.endsWith(metaName)),
+      `anon listing must not contain ${metaName}`);
+
+    const owner = await request('/alice/public/', { headers: { Accept: 'application/lws+json' }, auth: 'alice' });
+    assertStatus(owner, 200);
+    const ownerBody = JSON.parse(await owner.text());
+    assert.ok(ownerBody.items.some(i => i.id.endsWith(metaName)),
+      `owner listing must contain ${metaName} (DT7)`);
+  });
 });
