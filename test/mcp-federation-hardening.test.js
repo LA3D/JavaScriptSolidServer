@@ -97,6 +97,22 @@ test('utils isPrivateIP gains the hex-group mapped form (importers inherit)', ()
   assert.equal(isPrivateIP('::ffff:a9fe:a9fe'), true);       // 169.254.169.254
 });
 
+// fe80::/10 link-local (first hextet fe80–febf), not just literal fe80
+test('isPrivateIP: full fe80::/10 link-local range (fe80–febf) is blocked', () => {
+  for (const ip of ['fe80::1', 'fe81::1', 'fe9f::1', 'feaf::1', 'febf::1']) {
+    assert.equal(isPrivateIP(ip), true, `${ip} is link-local (fe80::/10)`);
+  }
+  // fec0:: is site-local-deprecated, OUTSIDE fe80::/10 — must stay unblocked
+  assert.equal(isPrivateIP('fec0::1'), false, 'fec0:: is not in fe80::/10');
+});
+
+// ff00::/8 multicast (first hextet ff00–ffff), not just literal ff00
+test('isPrivateIP: full ff00::/8 multicast range (ff00–ffff) is blocked', () => {
+  for (const ip of ['ff00::1', 'ff02::1', 'ff02::2', 'ff05::1', 'ff0e::1', 'ffff::1']) {
+    assert.equal(isPrivateIP(ip), true, `${ip} is multicast (ff00::/8)`);
+  }
+});
+
 // --- readRemote: the same bypasses, driven end-to-end through read_resource ---
 
 test('read_resource remote: bracketed IPv6 (ULA/link-local/loopback) targets are blocked by default (no live listener needed)', async (t) => {
