@@ -6,10 +6,17 @@
 // deliberate opt-in (the local rig fetching across containers on one host).
 //
 // Scoped fix: checks the LITERAL hostname/IP in the URL, not a network-layer
-// translation of it. Three literal forms that a fabric/gateway could still
-// translate to a private target are OUT of scope by the same rule, recorded
-// (not expanded) — revisit only for a public IPv6-only build (dt8):
-//   - DNS rebinding: a public name resolving to a private IP.
+// translation of it. A public NAME resolving to a private IP is now closed
+// too — resolvesToBlockedHost (below) resolves A/AAAA and is called on every
+// hop in the readRemote loop (src/mcp/read-tools.js), so a name that answers
+// private at request time is blocked before the fetch. Two literal/timing
+// forms remain OUT of scope by the same rule, recorded (not expanded) —
+// revisit only for a public IPv6-only build (dt8):
+//   - Connect-time TOCTOU rebinding: a name resolves PUBLIC at this
+//     resolve-and-check but the resolver answers PRIVATE by the time the
+//     global `fetch` actually connects. Closing this needs an undici
+//     dispatcher with a pinned-lookup `connect` — the global fetch used here
+//     doesn't take one.
 //   - NAT64 64:ff9b::/96: on an IPv6-only host with a NAT64 gateway,
 //     [64:ff9b::a9fe:a9fe] translates to 169.254.169.254.
 //   - IPv4-compatible ::a.b.c.d (deprecated, RFC 4291 §2.5.5.1): modern
@@ -24,6 +31,7 @@
 // net.isIP dispatch, the localhost/unspecified literals) that keeps this
 // module's own literal-hostname-scope contract above.
 import net from 'node:net';
+import dns from 'node:dns/promises';
 import { isPrivateIP, embeddedV4 } from '../utils/ssrf.js';
 
 export function isBlockedHost(hostname, { allowPrivate = false } = {}) {
@@ -41,4 +49,30 @@ export function isBlockedHost(hostname, { allowPrivate = false } = {}) {
   }
   if (net.isIP(h)) return isPrivateIP(h);
   return false;
+}
+
+// Resolve a hostname and block if ANY A/AAAA answer is a private/internal
+// address — shrinks the literal-only window (isBlockedHost checks only the
+// literal hostname) to a per-request resolve-and-check on the federation arm.
+// Fail-closed: a name that won't resolve can't be fetched anyway, so treat a
+// resolution error as blocked. No-op under allowPrivate or for IP literals
+// (isBlockedHost already covers literals).
+export async function resolvesToBlockedHost(hostname, { allowPrivate = false } = {}) {
+  if (allowPrivate) return false;
+  const h = (hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (net.isIP(h)) return false;               // literal — isBlockedHost handled it
+  try {
+    const [v4, v6] = await Promise.all([
+      dns.resolve4(h).catch(() => []),
+      dns.resolve6(h).catch(() => []),
+    ]);
+    const all = [...v4, ...v6];
+    if (all.length === 0) return true;         // fail-closed: no address = block
+    return all.some(ip => {
+      const mapped = embeddedV4(ip);
+      return isPrivateIP(mapped || ip);
+    });
+  } catch {
+    return true;                               // fail-closed
+  }
 }

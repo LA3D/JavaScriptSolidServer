@@ -22,7 +22,7 @@ import { readResource } from './resources.js';
 import { ResourceError } from './errors.js';
 import { isLocalUri, uriToPath } from './uri.js';
 import { listFixed, RESOURCE_TEMPLATE } from './surface.js';
-import { isBlockedHost } from './ssrf.js';
+import { isBlockedHost, resolvesToBlockedHost } from './ssrf.js';
 import { MAX_BODY_BYTES } from './read.js';
 
 const JSONLD_CONTEXT_REL = 'http://www.w3.org/ns/json-ld#context';
@@ -137,6 +137,16 @@ async function readRemote(url, ctx) {
   let r;
   for (let hop = 0; ; hop++) {
     if (isBlockedHost(target.hostname, { allowPrivate: ctx.federationPrivate })) {
+      return toolError(
+        `federation blocked: ${target.href} resolves to a private/internal address (set --lws-federation-private to allow)`
+      );
+    }
+    // DNS pre-check (dt8 cluster 3): isBlockedHost above only catches the
+    // LITERAL hostname/IP — a public-looking NAME that resolves to a private
+    // address slips past it. resolvesToBlockedHost resolves A/AAAA and closes
+    // that gap per hop, re-entering on every redirect just like the literal
+    // check above.
+    if (await resolvesToBlockedHost(target.hostname, { allowPrivate: ctx.federationPrivate })) {
       return toolError(
         `federation blocked: ${target.href} resolves to a private/internal address (set --lws-federation-private to allow)`
       );
