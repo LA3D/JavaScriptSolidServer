@@ -18,14 +18,22 @@
 // `.meta` sidecar leaks the same class of thing — a private member's own
 // governance metadata (dct:conformsTo/powder:describedby) plus its
 // existence — through the identical hole. GET/HEAD of `*.meta` now routes
-// through the SAME authorizeSidecarAccess (READ-on-stripped-subject);
-// PUT/PATCH/DELETE of `.meta` are untouched (still WRITE via the blanket
-// check — `.meta` is legitimately client-writable, unlike `.lwstypes`/
-// `.lwsprov`). The stripped-subject computation is suffix-agnostic: a
-// CONTAINER's own bare `.meta` (`/foo/.meta` → strip → `/foo/`) checks READ
-// on the CONTAINER, preserving the public governance up-walk; a MEMBER's
-// `.meta` (`/foo/bar.meta` → strip → `/foo/bar`) checks READ on the MEMBER,
-// closing the leak.
+// through the SAME authorizeSidecarAccess (READ-on-stripped-subject). The
+// stripped-subject computation is suffix-agnostic: a CONTAINER's own bare
+// `.meta` (`/foo/.meta` → strip → `/foo/`) checks READ on the CONTAINER,
+// preserving the public governance up-walk; a MEMBER's `.meta`
+// (`/foo/bar.meta` → strip → `/foo/bar`) checks READ on the MEMBER, closing
+// the leak.
+//
+// Task 1 (2026-07-13): PUT/PATCH/DELETE of `.meta` route through the SAME
+// authorizeSidecarAccess too, now with `mode: AccessMode.WRITE` — closing
+// the write-side twin of the same hole, where a delegated container-writer
+// (WRITE on the container, no grant on a private member's own tighter
+// `.acl`) could overwrite that member's `.meta` via the container-default
+// resolution the old GET/HEAD-only carve-out left the blanket check to
+// perform. Container bare `.meta` writes still resolve to the CONTAINER
+// (governance up-walk preserved for writers too); a member's `.meta` write
+// now resolves to the MEMBER.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -59,11 +67,12 @@ function typedBody(base, path) {
 }
 
 describe('.lwstypes/.lwsprov/.meta sidecars require READ-on-subject (C1)', () => {
-  let alice, base;
+  let alice, base, bob;
 
   before(async () => {
     await startTestServer({ lws: true, conneg: true });
     alice = await createTestPod('alice');
+    bob = await createTestPod('bob');
     base = getBaseUrl();
 
     // Public member — no resource-specific .acl, inherits the /public/
@@ -128,10 +137,9 @@ describe('.lwstypes/.lwsprov/.meta sidecars require READ-on-subject (C1)', () =>
     // (tighter own .acl) and OPEN (public, container default) — distinct
     // from the CONTAINER's own bare `.meta` PUT above (which already
     // carries describedby+conformsTo and is reused as-is for the up-walk
-    // case). Owner-authored via alice; write.js resolves `.meta` writes
-    // through the container's default ACL (not the stripped-subject rule
-    // — that's GET/HEAD-only), so these PUTs succeed regardless of PRIV's
-    // tighter own .acl.
+    // case). Owner-authored via alice, who has Write on both the container
+    // AND (via generatePrivateAcl) the member's own tighter .acl, so these
+    // PUTs succeed either way.
     const privMetaPut = await request(`${PRIV}.meta`, {
       method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'alice',
       body: JSON.stringify({
@@ -150,6 +158,48 @@ describe('.lwstypes/.lwsprov/.meta sidecars require READ-on-subject (C1)', () =>
       }),
     });
     assert.ok(openMetaPut.ok, `open .meta PUT ${openMetaPut.status}`);
+
+    // Delegated container-writer fixture (Task 1, 2026-07-13): bob has WRITE
+    // on the /alice/public/ CONTAINER (a real collaborator grant) but no
+    // grant at all on PRIV's own tighter .acl (alice-only). This is the
+    // actual escalation the fix closes: before the fix, a `.meta` WRITE fell
+    // through to the blanket check, which resolves the CONTAINER's ACL for
+    // ANY path under it (including a member's `.meta`) — so bob's
+    // container-Write let him overwrite PRIV's private governance metadata
+    // despite having no access to PRIV itself. Overwrites the container's
+    // auto-provisioned owner+public-read default ACL, keeping both grants
+    // and adding bob's collaborator Write.
+    const containerAcl = {
+      '@context': { acl: 'http://www.w3.org/ns/auth/acl#', foaf: 'http://xmlns.com/foaf/0.1/' },
+      '@graph': [
+        {
+          '@id': '#owner', '@type': 'acl:Authorization',
+          'acl:agent': { '@id': alice.webId },
+          'acl:accessTo': { '@id': `${base}/alice/public/` },
+          'acl:default': { '@id': `${base}/alice/public/` },
+          'acl:mode': [{ '@id': 'acl:Read' }, { '@id': 'acl:Write' }, { '@id': 'acl:Control' }],
+        },
+        {
+          '@id': '#public', '@type': 'acl:Authorization',
+          'acl:agentClass': { '@id': 'foaf:Agent' },
+          'acl:accessTo': { '@id': `${base}/alice/public/` },
+          'acl:default': { '@id': `${base}/alice/public/` },
+          'acl:mode': [{ '@id': 'acl:Read' }],
+        },
+        {
+          '@id': '#bob-collaborator', '@type': 'acl:Authorization',
+          'acl:agent': { '@id': bob.webId },
+          'acl:accessTo': { '@id': `${base}/alice/public/` },
+          'acl:default': { '@id': `${base}/alice/public/` },
+          'acl:mode': [{ '@id': 'acl:Read' }, { '@id': 'acl:Write' }],
+        },
+      ],
+    };
+    const containerAclPut = await request('/alice/public/.acl', {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'alice',
+      body: serializeAcl(containerAcl),
+    });
+    assert.ok(containerAclPut.ok, `container .acl PUT ${containerAclPut.status}`);
   });
   after(async () => { await stopTestServer(); });
 
@@ -236,6 +286,45 @@ describe('.lwstypes/.lwsprov/.meta sidecars require READ-on-subject (C1)', () =>
     assert.equal(r.status, 200, `expected 200, got ${r.status}`);
     const body = await r.json();
     assert.equal(body[DCT_CONFORMS]?.['@id'], PROFILE_URI, `expected conformsTo in body: ${JSON.stringify(body)}`);
+  });
+
+  it('member .meta WRITE requires WRITE on the stripped subject, not the container', async () => {
+    // alice (owner) can write the private member's .meta
+    const ownerPut = await request(`${PRIV}.meta`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'alice',
+      body: JSON.stringify({ '@id': `${base}${PRIV}`, [DCT_CONFORMS]: { '@id': PROFILE_URI } }),
+    });
+    assert.ok([200, 201, 204].includes(ownerPut.status), `owner .meta PUT ${ownerPut.status}`);
+
+    // anonymous cannot write the private member's .meta (subject is READ-private,
+    // so WRITE is certainly denied) — must be 401/403, NOT 2xx
+    const anonPut = await request(`${PRIV}.meta`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({ '@id': `${base}${PRIV}`, [DCT_CONFORMS]: { '@id': PROFILE_URI } }),
+    });
+    assert.ok([401, 403].includes(anonPut.status), `anon .meta PUT should deny, got ${anonPut.status}`);
+  });
+
+  it('a CONTAINER bare .meta write still checks the container (governance up-walk preserved)', async () => {
+    // alice controls /alice/public/ so she can write its bare .meta
+    const put = await request('/alice/public/.meta', {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'alice',
+      body: JSON.stringify({ '@id': `${base}/alice/public/`, [DCT_CONFORMS]: { '@id': PROFILE_URI } }),
+    });
+    assert.ok([200, 201, 204].includes(put.status), `container .meta PUT ${put.status}`);
+  });
+
+  it('LEAK CLOSED: a delegated container-writer without a grant on the member cannot write its .meta', async () => {
+    // bob has WRITE on the /alice/public/ CONTAINER but no grant on PRIV's
+    // own (alice-only) .acl. Before the fix, this PUT fell through to the
+    // blanket check, which resolves the CONTAINER's ACL for the .meta path
+    // — bob's container-Write let him overwrite a private member's
+    // governance metadata he has no access to. Must be 401/403, not 2xx.
+    const r = await request(`${PRIV}.meta`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'bob',
+      body: JSON.stringify({ '@id': `${base}${PRIV}`, [DCT_CONFORMS]: { '@id': PROFILE_URI } }),
+    });
+    assert.ok([401, 403].includes(r.status), `delegated writer .meta PUT should deny, got ${r.status}`);
   });
 
   it('sanity: .acl stays CONTROL-protected (unchanged by the .meta fix)', async () => {

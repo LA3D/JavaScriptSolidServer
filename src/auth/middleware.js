@@ -116,23 +116,23 @@ export async function authorize(request, reply, options = {}) {
   // tighter own `.acl`, because the blanket check below resolves `.meta`'s
   // ACL by walking up from `.meta`'s OWN path (never the member's own
   // `.acl` — same findApplicableAcl gap as above) and lands on the
-  // container default. Route it through the SAME authorizeSidecarAccess
-  // (READ-on-stripped-subject) — but GET/HEAD ONLY: unlike `.lwstypes`/
-  // `.lwsprov` (never client-writable), `.meta` IS legitimately
-  // client-PUT/PATCH/DELETE-able (pod owners declare describedby/conformsTo
-  // on it), and those methods must keep requiring WRITE via the unmodified
-  // blanket check below — routing them through authorizeSidecarAccess too
-  // would silently downgrade a `.meta` write from WRITE-gated to
-  // READ-gated. authorizeSidecarAccess strips the suffix and re-derives
-  // isContainer from the stripped path's trailing slash, so a CONTAINER's
-  // own bare `.meta` (`/foo/.meta` → strip → `/foo/`) still checks READ on
-  // the CONTAINER — preserving the public governance up-walk (a cold agent
-  // reading a public container's `.meta` for its conformsTo/describedby) —
-  // while a MEMBER's `.meta` (`/foo/bar.meta` → strip → `/foo/bar`) checks
-  // READ on the MEMBER, closing the leak. --lws-gated to match the sibling
+  // container default. Route it through the SAME authorizeSidecarAccess —
+  // READ-on-stripped-subject for GET/HEAD, WRITE-on-stripped-subject for
+  // PUT/PATCH/DELETE (Task 1, same day: the identical gap let a delegated
+  // container-writer — WRITE on the container but no grant on the member's
+  // own tighter `.acl` — overwrite a private member's `.meta` via that same
+  // container-default resolution). authorizeSidecarAccess strips the
+  // suffix and re-derives isContainer from the stripped path's trailing
+  // slash, so a CONTAINER's own bare `.meta` (`/foo/.meta` → strip →
+  // `/foo/`) still checks the CONTAINER — preserving the public governance
+  // up-walk (a cold agent reading a public container's `.meta` for its
+  // conformsTo/describedby, and a container controller writing it) — while
+  // a MEMBER's `.meta` (`/foo/bar.meta` → strip → `/foo/bar`) checks the
+  // MEMBER, closing the leak both ways. --lws-gated to match the sibling
   // suffixes and keep this scoped to the C1 line of fixes.
-  if (request.lwsEnabled && (method === 'GET' || method === 'HEAD') && urlPath.endsWith('.meta')) {
-    return authorizeSidecarAccess(request, urlPath, webId, authError);
+  if (request.lwsEnabled && urlPath.endsWith('.meta')) {
+    const mode = (method === 'GET' || method === 'HEAD') ? AccessMode.READ : AccessMode.WRITE;
+    return authorizeSidecarAccess(request, urlPath, webId, authError, mode);
   }
 
   // Log auth failures for debugging
@@ -536,8 +536,9 @@ async function authorizeAclAccess(request, urlPath, method, webId, authError) {
  * `.lwstypes`/`.lwsprov` reveal the SUBJECT resource's rdf:type / validating
  * profile; `.meta` reveals the subject's governance metadata
  * (dct:conformsTo, powder:describedby) and existence — so reading any of
- * them requires acl:Read on the subject, exactly the access the subject's
- * own `.acl` already governs.
+ * them requires acl:Read on the subject (writing a `.meta` requires
+ * acl:Write on the subject), exactly the access the subject's own `.acl`
+ * already governs.
  *
  * Without this, a direct GET of e.g. `secret.jsonld.lwstypes` (or
  * `secret.jsonld.meta`) falls through the dotfile guard (`secret.jsonld.*`
@@ -563,18 +564,25 @@ async function authorizeAclAccess(request, urlPath, method, webId, authError) {
  * against the MEMBER, closing the leak for a private member sitting in a
  * public container.
  *
- * Callers gate `.meta` dispatch to GET/HEAD only (unlike `.lwstypes`/
- * `.lwsprov`, which are never client-writable) — PUT/PATCH/DELETE of
- * `.meta` must keep going through the unmodified blanket WAC check (WRITE
- * required), not this READ-only path.
+ * `.lwstypes`/`.lwsprov` are never client-writable, so callers only ever
+ * dispatch them here for GET/HEAD (`mode` stays the READ default). `.meta`
+ * IS legitimately client-PUT/PATCH/DELETE-able (pod owners declare
+ * describedby/conformsTo on it) — callers pass `mode: AccessMode.WRITE` for
+ * those methods, so the WRITE gate lands on the stripped SUBJECT (mirroring
+ * the READ gate) instead of the container-default the blanket check would
+ * otherwise resolve for the sidecar's own path (Task 1, 2026-07-13: closed
+ * a delegated container-writer's escalation to a private member's `.meta`).
  *
  * @param {object} request - Fastify request
  * @param {string} urlPath - URL path to the `.lwstypes`/`.lwsprov`/`.meta` sidecar
  * @param {string|null} webId - Authenticated user's WebID
  * @param {string|null} authError - Authentication error if any
+ * @param {string} [mode] - Access mode to check on the stripped subject
+ *   (AccessMode.READ or AccessMode.WRITE). Defaults to READ — byte-identical
+ *   to pre-Task-1 behavior for GET/HEAD callers.
  * @returns {Promise<{authorized: boolean, webId: string|null, wacAllow: string, authError: string|null}>}
  */
-async function authorizeSidecarAccess(request, urlPath, webId, authError) {
+async function authorizeSidecarAccess(request, urlPath, webId, authError, mode = AccessMode.READ) {
   // Strip the sidecar suffix to get the subject these describe.
   // `foo.jsonld.lwstypes` describes `foo.jsonld`; `foo.jsonld.meta`
   // describes `foo.jsonld`; bare `.meta` describes the container it sits in
@@ -587,19 +595,23 @@ async function authorizeSidecarAccess(request, urlPath, webId, authError) {
 
   const storagePath = getEffectiveUrlPath(request).replace(/\.(lwstypes|lwsprov|meta)$/, '');
 
-  // READ on the subject — the same mode the subject's own GET requires.
+  // mode is READ for GET/HEAD (the subject's own read gate) and WRITE for
+  // PUT/PATCH/DELETE of a client-managed `.meta` (the subject's own write
+  // gate) — never the container-default the blanket check would resolve
+  // for the sidecar's own path.
   const { allowed, wacAllow } = await checkAccess({
     resourceUrl: subjectUrl,
     resourcePath: storagePath,
     isContainer: isSubjectContainer,
     agentWebId: webId,
-    requiredMode: AccessMode.READ
+    requiredMode: mode
   });
 
-  // WAC-Allow describes the REQUESTED resource (the sidecar), which only
-  // ever supports GET/HEAD — narrow the subject's mode set (which may
-  // legitimately include write/append/control) down to "read", so the
-  // header never over-claims modes the sidecar doesn't support.
+  // WAC-Allow always describes READ visibility of the sidecar regardless of
+  // `mode` — narrow the subject's mode set (which may legitimately include
+  // write/append/control) down to "read", so the header never over-claims
+  // modes irrelevant to what WAC-Allow communicates (readability), even on
+  // a WRITE-mode call.
   const readOnly = (modes) => modes.split(/\s+/).filter(m => m === 'read').join(' ');
   const sidecarWacAllow = wacAllow.replace(/user="([^"]*)"/, (_, m) => `user="${readOnly(m)}"`)
                                    .replace(/public="([^"]*)"/, (_, m) => `public="${readOnly(m)}"`);
