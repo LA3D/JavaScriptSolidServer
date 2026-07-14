@@ -74,6 +74,7 @@ async function readStorageDescription(ctx, uri) {
     profileIndexPath: ctx.profileIndexPath, voidPath: ctx.voidPath,
     profileConnegEnabled: ctx.profileConnegEnabled,
     referentResolutionEnabled: ctx.referentResolutionEnabled,
+    uriSpacePrefixes: ctx.uriSpacePrefixes,
     mcpEnabled: true,
     anonRateLimitMax: ctx.anonRateLimitMax,
   });

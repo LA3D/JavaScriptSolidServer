@@ -1076,7 +1076,15 @@ export function createServer(options = {}) {
       // notifications is off.
       const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
       const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, referentResolutionEnabled, mcpEnabled, anonRateLimitMax });
+      // Task 10: recognition prefixes for the capability (void:uriSpace form,
+      // {origin}/{pathPrefix} — same footgun guard resolveReferent applies, so
+      // a malformed uriSpaces entry that resolveReferent would skip is never
+      // advertised as recognizable either).
+      const uriSpacePrefixes = referentResolutionEnabled
+        ? uriSpaces.filter((u) => u && typeof u.pathPrefix === 'string' && u.pathPrefix.endsWith('/'))
+            .map((u) => `${origin}/${u.pathPrefix.replace(/^\//, '')}`)
+        : [];
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, referentResolutionEnabled, uriSpacePrefixes, mcpEnabled, anonRateLimitMax });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

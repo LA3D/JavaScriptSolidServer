@@ -246,9 +246,18 @@ export async function mcpPlugin(fastify, options = {}) {
 
     const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
     const lwsEnabled = request.lwsEnabled || false;
+    const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
+    const origin = originOf(request);
+    // Task 10: same recognition-prefix computation as the HTTP surface
+    // (server.js) — identical builder + identical input, so the two surfaces
+    // can never drift on the advertised uriSpace array.
+    const uriSpacePrefixes = referentResolutionEnabled
+      ? uriSpaces.filter((u) => u && typeof u.pathPrefix === 'string' && u.pathPrefix.endsWith('/'))
+          .map((u) => `${origin}/${u.pathPrefix.replace(/^\//, '')}`)
+      : [];
     const ctx = {
       webId: webId || null,
-      origin: originOf(request),
+      origin,
       federationDepth,
       federationPrivate,
       lwsEnabled,
@@ -257,7 +266,8 @@ export async function mcpPlugin(fastify, options = {}) {
       voidPath: voidPath || null,
       notificationsEnabled: request.notificationsEnabled || false,
       profileConnegEnabled: request.lwsProfileConneg || false,
-      referentResolutionEnabled: lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0,
+      referentResolutionEnabled,
+      uriSpacePrefixes,
       anonRateLimitMax
     };
 
