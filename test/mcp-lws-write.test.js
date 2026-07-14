@@ -133,3 +133,31 @@ test('create_resource container-creation branch is unaffected (no body to admit)
   }, ctx);
   assert.equal(res.isError ?? false, false, JSON.stringify(res));
 });
+
+// --- Task 3: System-Managed sidecars are read-only to clients ---
+
+test('write_resource cannot overwrite a System-Managed .lwstypes sidecar', async (t) => {
+  const pod = await startLwsPod(t);
+  const ctx = { ...ownerCtx(pod), lwsEnabled: true };
+
+  const res = await callTool('write_resource', {
+    path: `/${pod.podName}/notes/subject.lwstypes`,
+    content: JSON.stringify(['https://example.org/ex#Injected']),
+    contentType: 'application/json',
+  }, ctx);
+
+  assert.equal(res.isError, true);
+  assert.match(JSON.stringify(res), /System-Managed/i);
+});
+
+test('delete_resource cannot delete a System-Managed .lwstypes sidecar', async (t) => {
+  const pod = await startLwsPod(t);
+  const ctx = { ...ownerCtx(pod), lwsEnabled: true };
+
+  const res = await callTool('delete_resource', {
+    path: `/${pod.podName}/notes/subject.lwstypes`,
+  }, ctx);
+
+  assert.equal(res.isError, true);
+  assert.match(JSON.stringify(res), /System-Managed/i);
+});

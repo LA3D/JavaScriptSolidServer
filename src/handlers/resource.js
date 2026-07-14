@@ -2061,7 +2061,9 @@ export async function handlePut(request, reply) {
   });
   if (!w.ok) {
     if (w.problem) {
-      return reply.code(400).type('application/problem+json').send(JSON.stringify(w.problem, null, 2));
+      const reply2 = reply.code(w.problem.status || 400).type('application/problem+json');
+      if (w.problem.status === 405) reply2.header('Allow', 'GET, HEAD');
+      return reply2.send(JSON.stringify(w.problem, null, 2));
     }
     reply.header('content-type', 'application/problem+json');
     if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
@@ -2114,6 +2116,18 @@ export async function handleDelete(request, reply) {
   }
 
   const { storagePath, resourceUrl } = getRequestPaths(request);
+
+  // DELETE bypasses applyLwsWrite (no body to gate through writeTypeConsistency)
+  // so mirror the System-Managed sidecar rejection here — a client must not be
+  // able to delete a server-derived .lwstypes/.lwsprov sidecar either.
+  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(storagePath)) {
+    reply.header('Allow', 'GET, HEAD');
+    return reply.code(405).type('application/problem+json').send(JSON.stringify({
+      type: 'about:blank', title: 'Method Not Allowed', status: 405,
+      detail: 'This is a System-Managed sidecar; it is read-only to clients.',
+      instance: resourceUrl,
+    }, null, 2));
+  }
 
   // Check if resource exists and get current ETag
   const stats = await storage.stat(storagePath);

@@ -103,6 +103,9 @@ async function create_resource({ container, slug, content, contentType, isContai
 
 async function delete_resource({ path }, ctx) {
   if (!path) return toolError('path required');
+  if (ctx.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(path)) {
+    return toolError(`cannot delete ${path}: System-Managed sidecar (read-only to clients)`);
+  }
   if (!(await wac(ctx, path, AccessMode.WRITE))) {
     return toolError(`access denied: delete ${path}`);
   }

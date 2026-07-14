@@ -104,7 +104,16 @@ export async function authorize(request, reply, options = {}) {
   // src/wac/checker.js). Mirrors the `.acl` carve-out above, READ instead of
   // Control. --lws-gated: these sidecars can't exist with `--lws` off (the
   // write path that creates them is gated), so this is a no-op there.
-  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(urlPath)) {
+  //
+  // GET/HEAD-scoped (Task 3, 2026-07-14): these sidecars are server-derived
+  // and read-only to clients — a write here was previously authorized on
+  // READ-of-subject (this branch was method-agnostic), letting anyone with
+  // read access overwrite/delete server-derived data. Writes now fall through
+  // to the blanket check below and are refused downstream: the
+  // writeTypeConsistency gate inside applyLwsWrite for PUT/POST/PATCH (the
+  // choke point every write surface, incl. MCP, shares), and the mirrored
+  // guard in handleDelete for DELETE. So no write path is READ-gated any more.
+  if (request.lwsEnabled && (method === 'GET' || method === 'HEAD') && /\.(lwstypes|lwsprov)$/.test(urlPath)) {
     return authorizeSidecarAccess(request, urlPath, webId, authError);
   }
 

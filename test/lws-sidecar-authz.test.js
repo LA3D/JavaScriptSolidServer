@@ -331,4 +331,40 @@ describe('.lwstypes/.lwsprov/.meta sidecars require READ-on-subject (C1)', () =>
     const r = await request(`${PRIV}.acl`);
     assert.ok([401, 403].includes(r.status), `expected 401/403, got ${r.status}: ${await r.text()}`);
   });
+
+  // --- Task 3: System-Managed sidecars are read-only to clients (405) ---
+
+  it('a client cannot PUT a System-Managed .lwstypes sidecar (405)', async () => {
+    const put = await request(`${OPEN}.lwstypes`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, auth: 'alice',
+      body: JSON.stringify(['https://example.org/ex#Injected']),
+    });
+    assert.equal(put.status, 405, `expected 405, got ${put.status}`);
+    assert.match(put.headers.get('allow') || '', /GET/, 'Allow header names GET');
+  });
+
+  it('a client cannot PUT a System-Managed .lwsprov sidecar (405)', async () => {
+    const put = await request(`${OPEN}.lwsprov`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, auth: 'alice',
+      body: JSON.stringify(['https://example.org/prof/injected']),
+    });
+    assert.equal(put.status, 405, `expected 405, got ${put.status}`);
+  });
+
+  // DELETE bypasses applyLwsWrite entirely (no body to gate), so it needs its
+  // own mirrored guard (handleDelete) — cover it explicitly so a regression
+  // there (the bug class this cluster keeps closing) is caught.
+  it('a client cannot DELETE a System-Managed .lwstypes sidecar (405)', async () => {
+    const del = await request(`${OPEN}.lwstypes`, { method: 'DELETE', auth: 'alice' });
+    assert.equal(del.status, 405, `expected 405, got ${del.status}`);
+    assert.match(del.headers.get('allow') || '', /GET/, 'Allow header names GET');
+    // still there afterward — the guard refused before storage.remove ran
+    const stillThere = await request(`${OPEN}.lwstypes`, { auth: 'alice' });
+    assert.equal(stillThere.status, 200, `expected .lwstypes to survive the refused DELETE, got ${stillThere.status}`);
+  });
+
+  it('a client cannot DELETE a System-Managed .lwsprov sidecar (405)', async () => {
+    const del = await request(`${PRIV}.lwsprov`, { method: 'DELETE', auth: 'alice' });
+    assert.equal(del.status, 405, `expected 405, got ${del.status}`);
+  });
 });
