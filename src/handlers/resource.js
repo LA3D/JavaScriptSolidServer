@@ -2332,13 +2332,43 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
 
   const updatedContent = await datasetToFormat(dataset, QUADS_OUTPUTS[storedType] || RDF_TYPES.NQUADS);
 
-  const success = await storage.write(storagePath, Buffer.from(updatedContent));
-  if (!success) {
+  // task-6: route the Turtle-family dataset patch through the shared write
+  // choke point (applyLwsWrite) so SHACL admission holds on PATCH — a patch
+  // whose RESULT violates the container shape 400s instead of silently 204ing
+  // — and .lwstypes/.lwsprov re-derive from the patched bytes. contentType is
+  // the RESOURCE's own stored RDF type (storedType), NEVER the patch media
+  // type, so subjectTypesFromBody / the gate read the right serialization.
+  // (Only reachable under --lws — the dispatch guard sets storedType only when
+  // request.lwsEnabled && resourceExists.)
+  const w = await applyLwsWrite({
+    storage, storagePath, resourceUrl,
+    content: Buffer.from(updatedContent),
+    contentType: storedType,
+    declaredTypes: [],
+    lwsEnabled: request.lwsEnabled,
+  });
+  if (!w.ok) {
+    if (w.problem) {
+      const r = reply.code(w.problem.status || 400).type('application/problem+json');
+      if (w.problem.status === 405) r.header('Allow', 'GET, HEAD');
+      return r.send(JSON.stringify(w.problem, null, 2));
+    }
+    reply.header('content-type', 'application/problem+json');
+    if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
+    return reply.code(400).send(constraintProblem({ shapeUrl: w.shapeUrl, violations: w.violations, instance: resourceUrl }));
+  }
+  if (!w.wrote) {
     return reply.code(500).send({ error: 'Write failed' });
   }
 
   const origin = request.headers.origin;
   const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled });
+  // Append the describedby Link when admission resolved a governing shape —
+  // mirrors handlePut's success-path shape advertisement.
+  if (w.shapeUrl) {
+    const shapeLink = `<${w.shapeUrl}>; rel="describedby"`;
+    headers['Link'] = headers['Link'] ? `${headers['Link']}, ${shapeLink}` : shapeLink;
+  }
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
 
   if (request.notificationsEnabled) {
@@ -2481,6 +2511,13 @@ export async function handlePatch(request, reply) {
       } catch (e) {
         // Not JSON - might be Turtle, handle with RDF store for SPARQL Update
         if (isSparqlUpdate) {
+          // task-6: this legacy Turtle-in-SPARQL fallback is NOT reachable under
+          // --lws — a verbatim Turtle-family resource diverts to
+          // patchTurtleFamilyResource above (branch a), and the --lws write gate
+          // (writeTypeConsistency) refuses ever storing a non-JSON RDF body at a
+          // non-Turtle-family / extensionless name, so no --lws resource lands
+          // here. It stays a DIRECT storage.write: the --lws-off (or pre-gate)
+          // path, kept byte-identical (no admission on that path anyway).
           // Parse Turtle and apply SPARQL Update directly
           const { Parser, Writer } = await import('n3');
           const parser = new Parser({ baseIRI: resourceUrl });
@@ -2631,19 +2668,48 @@ export async function handlePatch(request, reply) {
     }
   }
 
-  // Write updated document
-  let updatedContent;
+  // Write updated document.
+  // task-6: split the two stored shapes — the pure-JSON-LD document rides the
+  // shared write choke point (admission holds; .lwstypes/.lwsprov re-derive),
+  // while an HTML data-island document stays a DIRECT write. The HTML case's
+  // stored bytes are HTML, NOT a governed RDF source; routing them through
+  // applyLwsWrite with contentType: application/ld+json would make the gate /
+  // admission misread the HTML wrapper as a JSON-LD body.
   if (htmlWrapper) {
-    // Re-embed JSON-LD into HTML wrapper
+    // Re-embed JSON-LD into HTML wrapper — direct write (not RDF-governed).
     const jsonLdStr = JSON.stringify(updatedDocument, null, 2);
-    updatedContent = htmlWrapper.before + '\n' + jsonLdStr + '\n  ' + htmlWrapper.after;
+    const updatedContent = htmlWrapper.before + '\n' + jsonLdStr + '\n  ' + htmlWrapper.after;
+    const success = await storage.write(storagePath, Buffer.from(updatedContent));
+    if (!success) {
+      return reply.code(500).send({ error: 'Write failed' });
+    }
   } else {
-    updatedContent = JSON.stringify(updatedDocument, null, 2);
-  }
-  const success = await storage.write(storagePath, Buffer.from(updatedContent));
-
-  if (!success) {
-    return reply.code(500).send({ error: 'Write failed' });
+    // Pure JSON-LD → applyLwsWrite. contentType is the resource's effective
+    // type (application/ld+json by this point), NEVER the patch media type.
+    // Under --lws-off, writeTypeConsistency returns ok and the admission block
+    // is skipped, so the stored bytes are byte-identical to the prior direct
+    // storage.write (verified by the --lws-off patch.test.js suite).
+    const updatedContent = JSON.stringify(updatedDocument, null, 2);
+    const w = await applyLwsWrite({
+      storage, storagePath, resourceUrl,
+      content: Buffer.from(updatedContent),
+      contentType: RDF_TYPES.JSON_LD,
+      declaredTypes: [],
+      lwsEnabled: request.lwsEnabled,
+    });
+    if (!w.ok) {
+      if (w.problem) {
+        const r = reply.code(w.problem.status || 400).type('application/problem+json');
+        if (w.problem.status === 405) r.header('Allow', 'GET, HEAD');
+        return r.send(JSON.stringify(w.problem, null, 2));
+      }
+      reply.header('content-type', 'application/problem+json');
+      if (w.shapeUrl) reply.header('Link', `<${w.shapeUrl}>; rel="describedby"`);
+      return reply.code(400).send(constraintProblem({ shapeUrl: w.shapeUrl, violations: w.violations, instance: resourceUrl }));
+    }
+    if (!w.wrote) {
+      return reply.code(500).send({ error: 'Write failed' });
+    }
   }
 
   const origin = request.headers.origin;
