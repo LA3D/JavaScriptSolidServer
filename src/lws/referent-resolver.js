@@ -29,6 +29,6 @@ export function resolveReferent(urlPath, uriSpaces = []) {
 // surface (src/mcp/index.js) so the two can't drift on what they advertise.
 export function uriSpacePrefixesFor(uriSpaces = [], origin) {
   return uriSpaces
-    .filter((u) => u && typeof u.pathPrefix === 'string' && u.pathPrefix.endsWith('/') && typeof u.container === 'string')
+    .filter((u) => u && typeof u.pathPrefix === 'string' && u.pathPrefix.endsWith('/') && typeof u.container === 'string' && u.container)
     .map((u) => `${origin}/${u.pathPrefix.replace(/^\//, '')}`);
 }
