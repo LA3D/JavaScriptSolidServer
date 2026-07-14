@@ -242,6 +242,13 @@ test('read_resource remote: a redirect hop to a blocked host is refused with a t
   // startLwsPod itself uses fetch (pod bootstrap) — install the mock AFTER
   // the pod is up, so only readRemote's own fetch calls are intercepted.
   const p = await startLwsPod(t);
+  // hop 0's hostname (example.com) now goes through the per-hop DNS
+  // pre-check (resolvesToBlockedHost) — mock it to a public IP so this test
+  // stays hermetic (no live DNS) and reaches the mocked redirect below. The
+  // redirect target (169.254.169.254) is an IP literal, so isBlockedHost
+  // catches it directly without a DNS call.
+  t.mock.method(dns, 'resolve4', async () => ['93.184.216.34']);
+  t.mock.method(dns, 'resolve6', async () => []);
   const fetchMock = t.mock.method(globalThis, 'fetch', async (input) => {
     const u = typeof input === 'string' ? input : input.url;
     if (u === 'https://example.com/void') {
@@ -260,6 +267,12 @@ test('read_resource remote: a redirect hop to a blocked host is refused with a t
 
 test('read_resource remote: stops after MAX_REDIRECT_HOPS with a teaching error (no unbounded redirect chain)', async (t) => {
   const p = await startLwsPod(t);
+  // every hop here is the hostname example.com (never an IP literal), so
+  // each iteration of the loop re-triggers the DNS pre-check — mock it to a
+  // public IP so the test stays hermetic and the hop-cap logic (not a
+  // live-DNS failure) is what's actually exercised.
+  t.mock.method(dns, 'resolve4', async () => ['93.184.216.34']);
+  t.mock.method(dns, 'resolve6', async () => []);
   let calls = 0;
   const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
     calls++;
