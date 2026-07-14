@@ -9,7 +9,7 @@ import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, saf
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
 import { applyMergePatch } from '../patch/merge-patch.js';
-import { termFromId, termFromPatchObject, applyPatchToDataset } from '../patch/dataset-patch.js';
+import { termFromId, termFromPatchObject, applyPatchToDataset, patchDeletesExist, resolveWhere } from '../patch/dataset-patch.js';
 import { toDataset } from '../rdf/dataset.js';
 import {
   selectContentType,
@@ -2250,6 +2250,29 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
     } catch (e) {
       return reply.code(400).send({ error: 'Bad Request', message: 'Invalid N3 Patch format: ' + e.message });
     }
+    // Task 8, contract 2: a non-empty solid:where binds a SINGLE solution into
+    // deletes/inserts BEFORE they are applied — zero/multiple solutions 409, so
+    // a conditional patch never applies unconditionally. Runs before the write
+    // choke point (applyLwsWrite, below), so nothing is stored on rejection.
+    if (patch.where && patch.where.length) {
+      const w = resolveWhere(dataset, patch, true);
+      if (!w.ok) {
+        return reply.code(409).type('application/problem+json').send(JSON.stringify({
+          type: 'about:blank', title: 'Conflict', status: 409, detail: w.detail, instance: resourceUrl,
+        }, null, 2));
+      }
+      patch = { deletes: w.deletes, inserts: w.inserts, where: [] };
+    }
+    // Task 8, contract 1: every delete triple MUST already exist — a delete of
+    // an absent triple is a 409, not a silent no-op (Solid N3-Patch).
+    const exist = patchDeletesExist(dataset, patch, true);
+    if (!exist.ok) {
+      return reply.code(409).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Conflict', status: 409,
+        detail: `N3 Patch delete of a triple absent from the target graph: ${JSON.stringify(exist.missing)}`,
+        instance: resourceUrl,
+      }, null, 2));
+    }
     try {
       applyPatchToDataset(dataset, patch, true); // N3-Patch: bare strings are AMBIGUOUS (IRI or literal)
     } catch (e) {
@@ -2583,6 +2606,32 @@ export async function handlePatch(request, reply) {
         error: 'Bad Request',
         message: 'Invalid N3 Patch format: ' + e.message
       });
+    }
+
+    // Task 8 (FLOOR, contract 2): the JSON-LD-document path does not bind a
+    // solid:where — a full BGP evaluator over the projected node structure is
+    // out of proportion for this arm (the Turtle-family/dataset path binds
+    // where; store the resource as RDF to use it). The one outcome conformance
+    // forbids is applying a conditional patch UNCONDITIONALLY, so a
+    // where-carrying patch is rejected 409 rather than silently applied.
+    if (patch.where && patch.where.length) {
+      return reply.code(409).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Conflict', status: 409,
+        detail: 'conditional patch (solid:where) is not supported for this resource; store it as a Turtle-family RDF resource to use solid:where.',
+        instance: resourceUrl,
+      }, null, 2));
+    }
+
+    // Task 8 (contract 1): every delete triple MUST already exist —
+    // validatePatch turns a delete of an absent triple into a 409, not a
+    // silent no-op. Runs before applyN3Patch/the write, so nothing is stored
+    // on rejection.
+    const check = validatePatch(document, patch, resourceUrl);
+    if (!check.valid) {
+      return reply.code(409).type('application/problem+json').send(JSON.stringify({
+        type: 'about:blank', title: 'Conflict', status: 409,
+        detail: check.error, instance: resourceUrl,
+      }, null, 2));
     }
 
     try {

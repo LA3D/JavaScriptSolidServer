@@ -300,10 +300,26 @@ export function applyN3Patch(document, patch, baseUri) {
 }
 
 /**
+ * Task 8: a blank-node SUBJECT arrives as a { blankNode } marker (resolveValue).
+ * Materialize it as a `_:`-prefixed @id string so insertTriple produces a
+ * well-formed node ({'@id':'_:b0'}, not {'@id':{blankNode:'b0'}}) and
+ * deleteTriple/tripleExists can structurally match it. The dataset path already
+ * handles `_:` subjects via termFromId; this aligns the older JSON-LD path.
+ * (Scope: SUBJECTS only — a blank-node OBJECT on this path is a separate,
+ * untouched gap.)
+ */
+function subjectId(subject) {
+  return (subject && typeof subject === 'object' && subject.blankNode !== undefined)
+    ? '_:' + subject.blankNode
+    : subject;
+}
+
+/**
  * Delete a triple from JSON-LD nodes
  */
 function deleteTriple(nodes, triple, baseUri) {
-  const { subject, predicate, object } = triple;
+  const { predicate, object } = triple;
+  const subject = subjectId(triple.subject);
 
   for (const node of nodes) {
     const nodeId = node['@id'] || '';
@@ -339,7 +355,8 @@ function deleteTriple(nodes, triple, baseUri) {
  * Insert a triple into JSON-LD nodes
  */
 function insertTriple(nodes, triple, baseUri) {
-  const { subject, predicate, object } = triple;
+  const { predicate, object } = triple;
+  const subject = subjectId(triple.subject);   // Task 8: {blankNode} → '_:b0'
 
   // Find or create the subject node
   let subjectNode = nodes.find(n => {
@@ -516,7 +533,8 @@ export function validatePatch(document, patch, baseUri) {
  */
 function tripleExists(document, triple, baseUri) {
   const nodes = document['@graph'] || [document];
-  const { subject, predicate, object } = triple;
+  const { predicate, object } = triple;
+  const subject = subjectId(triple.subject);   // Task 8: match blank-node subjects too
 
   for (const node of nodes) {
     const nodeId = node['@id'] || '';
