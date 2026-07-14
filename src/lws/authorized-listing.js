@@ -6,6 +6,7 @@
 // (probe #3: anonymous listings advertised members that then 401'd).
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
+import { AUX_SUFFIX } from '../storage/filesystem.js';
 
 export async function filterReadableEntries({ entries, containerUrl, containerStoragePath, agentWebId }) {
   const baseUrl = containerUrl.endsWith('/') ? containerUrl : containerUrl + '/';
@@ -31,6 +32,19 @@ export async function filterReadableEntries({ entries, containerUrl, containerSt
       ({ allowed } = await checkAccess({
         resourceUrl: baseUrl + protectedName, resourcePath: basePath + protectedName,
         isContainer: false, agentWebId, requiredMode: AccessMode.CONTROL, aclCache,
+      }));
+    } else if (e.name !== '.meta' && AUX_SUFFIX.test(e.name)) {
+      // A suffixed sidecar (`name.meta`, and defensively `name.lwstypes`/
+      // `name.lwsprov`) is Read-gated on the SUBJECT it describes, not on the
+      // sidecar's own path — else its bare presence in the listing is the
+      // existence oracle this filter exists to close (same findApplicableAcl
+      // gap direct-GET closed in db9cdaa/16530a1). `.acl` is handled above;
+      // bare `.meta` (the container's own governance sidecar) is excluded here
+      // so it keeps resolving against the container via the else branch.
+      const subjectName = e.name.replace(AUX_SUFFIX, '');
+      ({ allowed } = await checkAccess({
+        resourceUrl: baseUrl + subjectName, resourcePath: basePath + subjectName,
+        isContainer: false, agentWebId, requiredMode: AccessMode.READ, aclCache,
       }));
     } else {
       const suffix = e.isDirectory ? '/' : '';
