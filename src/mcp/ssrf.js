@@ -58,6 +58,11 @@ export function isBlockedHost(hostname, { allowPrivate = false } = {}) {
 // resolution error as blocked. No-op under allowPrivate or for IP literals
 // (isBlockedHost already covers literals).
 export async function resolvesToBlockedHost(hostname, { allowPrivate = false } = {}) {
+  // M3: this uses dns.resolve4/6 (real DNS queries), NOT getaddrinfo — so a
+  // host that only resolves via /etc/hosts (or another non-DNS nsswitch
+  // source) returns no A/AAAA answers here and fails closed (blocked), masked
+  // only by --lws-federation-private. This is deliberate: the SSRF guard's job
+  // is to refuse anything it can't prove is public.
   if (allowPrivate) return false;
   const h = (hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
   if (net.isIP(h)) return false;               // literal — isBlockedHost handled it

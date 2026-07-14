@@ -8,7 +8,7 @@ import { getWebIdFromRequestAsync } from './token.js';
 import { checkAccess, getRequiredMode } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import * as storage from '../storage/filesystem.js';
-import { getEffectiveUrlPath } from '../utils/url.js';
+import { getEffectiveUrlPath, sidecarSubject, SIDECAR_SUFFIX } from '../utils/url.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml } from '../mashlib/index.js';
 import { resolveReferent } from '../lws/referent-resolver.js';
 
@@ -597,14 +597,14 @@ async function authorizeSidecarAccess(request, urlPath, webId, authError, mode =
   // Strip the sidecar suffix to get the subject these describe.
   // `foo.jsonld.lwstypes` describes `foo.jsonld`; `foo.jsonld.meta`
   // describes `foo.jsonld`; bare `.meta` describes the container it sits in
-  // (see the isSubjectContainer derivation below — trailing slash after
-  // stripping decides resource-vs-container per-request, no suffix-specific
-  // branching needed).
-  const subjectPath = urlPath.replace(/\.(lwstypes|lwsprov|meta)$/, '');
-  const isSubjectContainer = subjectPath.endsWith('/');
+  // (trailing slash after stripping decides resource-vs-container
+  // per-request, no suffix-specific branching needed). sidecarSubject is the
+  // ONE stripping rule the MCP surface shares (src/utils/url.js), so HTTP and
+  // MCP resolve the identical subject.
+  const { subject: subjectPath, isContainer: isSubjectContainer } = sidecarSubject(urlPath);
   const subjectUrl = buildResourceUrl(request, subjectPath);
 
-  const storagePath = getEffectiveUrlPath(request).replace(/\.(lwstypes|lwsprov|meta)$/, '');
+  const storagePath = getEffectiveUrlPath(request).replace(SIDECAR_SUFFIX, '');
 
   // mode is READ for GET/HEAD (the subject's own read gate) and WRITE for
   // PUT/PATCH/DELETE of a client-managed `.meta` (the subject's own write

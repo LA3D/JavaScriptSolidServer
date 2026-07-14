@@ -9,7 +9,7 @@ import { isContainer, getContentType, isRdfContentType, getEffectiveUrlPath, saf
 import { parseN3Patch, applyN3Patch, validatePatch } from '../patch/n3-patch.js';
 import { parseSparqlUpdate, applySparqlUpdate } from '../patch/sparql-update.js';
 import { applyMergePatch } from '../patch/merge-patch.js';
-import { termFromId, termFromPatchObject, applyPatchToDataset, patchDeletesExist, resolveWhere } from '../patch/dataset-patch.js';
+import { applyPatchToDataset, patchDeletesExist, resolveWhere } from '../patch/dataset-patch.js';
 import { toDataset } from '../rdf/dataset.js';
 import {
   selectContentType,

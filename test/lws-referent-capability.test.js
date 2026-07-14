@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildStorageDescription } from '../src/lws/storage-description.js';
+import { uriSpacePrefixesFor, resolveReferent } from '../src/lws/referent-resolver.js';
 
 const CAP = 'https://w3id.org/lws-pod/capability/ReferentResolution';
 
@@ -44,4 +45,33 @@ test('uriSpacePrefixes absent/empty leaves the capability byte-identical to toda
   const sd2 = buildStorageDescription('https://pod.example', { referentResolutionEnabled: true, uriSpacePrefixes: [] });
   const cap2 = sd2.capability.find((c) => c.type === CAP);
   assert.ok(!('uriSpace' in cap2), 'no uriSpace key when uriSpacePrefixes empty');
+});
+
+// T10 (whole-branch review, 2026-07-14): the prefix filter (shared by both
+// surfaces via uriSpacePrefixesFor) must mirror resolveReferent's FULL guard.
+// resolveReferent skips an entry with no `container` (:13 `!container`), so a
+// pathPrefix-only entry would be advertised on the capability yet never
+// 303-resolve. The filter now also requires a string container.
+test('T10: a uriSpace entry with pathPrefix but no container is NOT advertised', () => {
+  const origin = 'https://pod.example';
+  const out = uriSpacePrefixesFor([
+    { pathPrefix: '/id/', container: '/cards/' },   // resolvable  -> advertised
+    { pathPrefix: '/broken/' },                     // no container -> skipped
+    { pathPrefix: '/x/', container: 123 },          // non-string container -> skipped
+    { pathPrefix: 'no-slash/', container: '/c/' },  // pathPrefix without leading context still fine
+    { pathPrefix: 'noslash', container: '/c/' },    // no trailing slash -> skipped
+  ], origin);
+  assert.deepEqual(out, [`${origin}/id/`, `${origin}/no-slash/`]);
+});
+
+test('T10: advertised prefixes are exactly the ones resolveReferent can 303-resolve', () => {
+  const spaces = [
+    { pathPrefix: '/id/', container: '/cards/', suffix: '.md' },
+    { pathPrefix: '/broken/' },                     // no container
+  ];
+  const advertised = uriSpacePrefixesFor(spaces, 'https://pod.example');
+  assert.deepEqual(advertised, ['https://pod.example/id/']);
+  // parity with the resolver: the advertised one resolves, the skipped one never does
+  assert.ok(resolveReferent('/id/alice', spaces), 'advertised prefix must resolve');
+  assert.equal(resolveReferent('/broken/alice', spaces), null, 'un-advertised prefix must not resolve');
 });

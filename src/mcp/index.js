@@ -27,6 +27,7 @@ import { listToolsForRpc, callTool, TOOLS } from './tools.js';
 import { readResource } from './resources.js';
 import { listFixed, RESOURCE_TEMPLATE } from './surface.js';
 import { ResourceError } from './errors.js';
+import { uriSpacePrefixesFor } from '../lws/referent-resolver.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { hasLwsCidAuth } from '../auth/lws-cid.js';
 import { hasSolidOidcAuth } from '../auth/solid-oidc.js';
@@ -249,12 +250,10 @@ export async function mcpPlugin(fastify, options = {}) {
     const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
     const origin = originOf(request);
     // Task 10: same recognition-prefix computation as the HTTP surface
-    // (server.js) — identical builder + identical input, so the two surfaces
-    // can never drift on the advertised uriSpace array.
-    const uriSpacePrefixes = referentResolutionEnabled
-      ? uriSpaces.filter((u) => u && typeof u.pathPrefix === 'string' && u.pathPrefix.endsWith('/'))
-          .map((u) => `${origin}/${u.pathPrefix.replace(/^\//, '')}`)
-      : [];
+    // (server.js) — the SAME uriSpacePrefixesFor helper on identical input, so
+    // the two surfaces can never drift on the advertised uriSpace array (and
+    // both mirror resolveReferent's guard, incl. the required container).
+    const uriSpacePrefixes = referentResolutionEnabled ? uriSpacePrefixesFor(uriSpaces, origin) : [];
     const ctx = {
       webId: webId || null,
       origin,

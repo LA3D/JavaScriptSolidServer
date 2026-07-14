@@ -166,6 +166,34 @@ export function getResourceName(urlPath) {
 }
 
 /**
+ * The sidecar suffixes whose authorization binds to the SUBJECT they describe,
+ * not to the sidecar's own path: `.lwstypes`/`.lwsprov` (System-Managed
+ * type/provenance) and `.meta` (client-managed governance). `foo.jsonld.meta`
+ * describes `foo.jsonld`; a container's bare `/foo/.meta` describes `/foo/`.
+ */
+export const SIDECAR_SUFFIX = /\.(lwstypes|lwsprov|meta)$/;
+
+/**
+ * Resolve the SUBJECT a sidecar path describes, so both surfaces bind the
+ * subject's own ACL rather than the container-default the sidecar's own path
+ * would walk up to (the "middleware enforces, MCP bypasses" bug class). Shared
+ * by the HTTP `authorizeSidecarAccess` (src/auth/middleware.js) and the MCP
+ * surface (src/mcp/tools.js write, src/mcp/resources.js read).
+ *
+ * `X.meta` -> { subject:'X', isContainer:false }; a container's own bare
+ * `/foo/.meta` -> { subject:'/foo/', isContainer:true } (trailing slash
+ * preserved, so the governance up-walk still binds the container). Returns
+ * null when `urlPath` is not a sidecar.
+ * @param {string} urlPath
+ * @returns {{ subject: string, isContainer: boolean } | null}
+ */
+export function sidecarSubject(urlPath) {
+  const subject = urlPath.replace(SIDECAR_SUFFIX, '');
+  if (subject === urlPath) return null;
+  return { subject, isContainer: subject.endsWith('/') };
+}
+
+/**
  * Extract pod name from URL path or request
  *
  * Resolves to one of four shapes, by deployment mode:

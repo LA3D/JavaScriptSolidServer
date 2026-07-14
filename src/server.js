@@ -38,6 +38,7 @@ import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescription, storageDescriptionContentType } from './lws/storage-description.js';
 import { makePodConfig } from './lws/pod-config.js';
+import { uriSpacePrefixesFor } from './lws/referent-resolver.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1077,13 +1078,12 @@ export function createServer(options = {}) {
       const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
       const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
       // Task 10: recognition prefixes for the capability (void:uriSpace form,
-      // {origin}/{pathPrefix} — same footgun guard resolveReferent applies, so
-      // a malformed uriSpaces entry that resolveReferent would skip is never
-      // advertised as recognizable either).
-      const uriSpacePrefixes = referentResolutionEnabled
-        ? uriSpaces.filter((u) => u && typeof u.pathPrefix === 'string' && u.pathPrefix.endsWith('/'))
-            .map((u) => `${origin}/${u.pathPrefix.replace(/^\//, '')}`)
-        : [];
+      // {origin}/{pathPrefix}). uriSpacePrefixesFor mirrors resolveReferent's
+      // FULL guard — string pathPrefix ending in '/' AND string container — so
+      // a malformed uriSpaces entry that resolveReferent would skip (e.g. a
+      // pathPrefix with no container) is never advertised as recognizable
+      // either. Shared with the MCP surface (src/mcp/index.js).
+      const uriSpacePrefixes = referentResolutionEnabled ? uriSpacePrefixesFor(uriSpaces, origin) : [];
       return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, referentResolutionEnabled, uriSpacePrefixes, mcpEnabled, anonRateLimitMax });
     });
     // Block writes — this is a read-only well-known resource.
