@@ -360,7 +360,7 @@ export async function handleGet(request, reply) {
     }
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
-    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });
+    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled, lwsEnabled: request.lwsEnabled });
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
     return reply.code(404).send({ error: 'Not Found' });
   }
@@ -1581,7 +1581,7 @@ export async function handleHead(request, reply) {
     }
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
-    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });
+    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled, lwsEnabled: request.lwsEnabled });
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
     return reply.code(404).send();
   }
@@ -2134,7 +2134,7 @@ export async function handleDelete(request, reply) {
   if (!stats) {
     const origin = request.headers.origin;
     const connegEnabled = request.connegEnabled || false;
-    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled });
+    const headers = getNotFoundHeaders({ resourceUrl, origin, connegEnabled, lwsEnabled: request.lwsEnabled });
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
     return reply.code(404).send({ error: 'Not Found' });
   }
