@@ -37,6 +37,7 @@ import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-me
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
+import { renderContainerView } from '../navigator/views.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -440,7 +441,14 @@ export async function handleGet(request, reply) {
     // branch below — lws+json/linkset/turtle/quads all become reachable
     // there (including the WAC filter and A1 alternates), and rel="linkset"
     // is no longer suppressed since the affordance is now honest.
-    if (indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader))) {
+    // ?view=nav (Task 5, spec 2026-07-15) is a second escape: an explicit
+    // request for the navigator view must reach the listing branch below
+    // even when index.html exists and the Accept is HTML-shaped. Folded
+    // into the SAME `request.lwsEnabled &&` guard as the non-HTML escape
+    // above (not a bare `&& query.view !== 'nav'` tacked on unconditionally)
+    // — a non-lws pod must stay byte-identical to pre-Task-5 behavior, and
+    // an unguarded clause would let `?view=nav` skip the shadow there too.
+    if (indexExists && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav'))) {
       // Serve index.html (contains JSON-LD structured data)
       const content = await storage.read(indexPath);
       const indexStats = await storage.stat(indexPath);
@@ -597,7 +605,17 @@ export async function handleGet(request, reply) {
     const wantsTurtle = negotiated === RDF_TYPES.TURTLE
       || negotiated === RDF_TYPES.N3
       || negotiated === 'application/n-triples';
-    const willMashlib = shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json');
+    // Navigator (Task 5, spec 2026-07-15) replaces mashlib for containers
+    // once --lws is on — shouldServeMashlib already requires browserWantsHtml,
+    // so scoping willMashlib to !request.lwsEnabled here means: (a) every
+    // variable below that's keyed off willMashlib (listingContentType,
+    // labeledListingType, listingEtag) resolves through the REAL negotiated
+    // listing shape instead of the mashlib-HTML override whenever lwsEnabled,
+    // which is exactly the base the navigator's own ETag mirrors (see the
+    // navigator arm below); (b) the legacy `if (willMashlib)` block further
+    // down becomes reachable only for !request.lwsEnabled pods.
+    const willMashlib = !request.lwsEnabled
+      && shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json');
     const listingContentType = willMashlib ? 'text/html'
       : negotiated === RDF_TYPES.LWS_JSON ? RDF_TYPES.LWS_JSON
       : negotiated === RDF_TYPES.LINKSET ? RDF_TYPES.LINKSET
@@ -637,6 +655,60 @@ export async function handleGet(request, reply) {
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(304).send();
       }
+    }
+
+    // Navigator (Task 5, spec 2026-07-15): a typed, WAC-filtered,
+    // server-rendered HTML container view — takes over for every browser-
+    // shaped request once --lws is on (willMashlib above is now scoped to
+    // !request.lwsEnabled for exactly this reason, so the legacy mashlib
+    // block below can never also fire for this same request). Items come
+    // from `entries` (already WAC-filtered above, S1) via the same
+    // generateLwsContainer builder the lws+json branch uses, enriched with
+    // per-member declared rdf:type (readDeclaredTypes) and authorized
+    // alternate-representation "faces" (readAuthorizedRepresentations).
+    if (request.lwsEnabled && browserWantsHtml(request)) {
+      const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+      const originStr = new URL(resourceUrl).origin;
+      const isPublicPod = !!request.config?.public;
+      const baseStoragePath = storagePath.endsWith('/') ? storagePath : storagePath + '/';
+      const baseUrlNav = resourceUrl.endsWith('/') ? resourceUrl : resourceUrl + '/';
+      const navListing = generateLwsContainer(resourceUrl, entries || []);
+      const items = await Promise.all(navListing.items.map(async (it) => {
+        const memberStoragePath = baseStoragePath + it.id.slice(baseUrlNav.length);
+        const [rdfTypes, memberReps] = await Promise.all([
+          readDeclaredTypes(storage, memberStoragePath),
+          readAuthorizedRepresentations(storage, memberStoragePath + '.meta', it.id, {
+            origin: originStr, agentWebId, public: isPublicPod,
+          }),
+        ]);
+        // text/html first (a browser reading this listing wants the human
+        // face at the top); everything else keeps its declared order.
+        const faces = (memberReps.alternates || [])
+          .map((r) => ({ href: r.href, format: r.format }))
+          .sort((a, b) => (a.format === 'text/html' ? -1 : b.format === 'text/html' ? 1 : 0));
+        return { ...it, rdfTypes, faces };
+      }));
+      const navConformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
+      // Mirrors getMashlibEtag's '-html' suffixing (~line 223): the listing
+      // ETag above (containerListingEtag, now the REAL negotiated-listing
+      // value since willMashlib is false whenever lwsEnabled) further
+      // suffixed '-nav' — distinct from every other representation's ETag,
+      // including the visibility key already folded into listingEtag (S1).
+      const navEtag = variantEtag(listingEtag, 'nav');
+      const html = renderContainerView({ url: resourceUrl, items, conformsTo: navConformsTo });
+      const headers = getAllHeaders({
+        isContainer: true,
+        etag: navEtag,
+        contentType: 'text/html',
+        origin,
+        resourceUrl,
+        connegEnabled,
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled
+      });
+      headers['Cache-Control'] = RDF_CACHE_CONTROL;
+      Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+      return reply.type('text/html').send(html);
     }
 
     const jsonLd = generateContainerJsonLd(resourceUrl, entries || []);
