@@ -308,6 +308,21 @@ function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) 
   return QUADS_OUTPUTS[negotiatedLws];
 }
 
+// Shared GET/HEAD navigator decisions (review follow-up to Task 8): the two
+// predicates were being computed once for GET's container branch
+// (~predictFileEtag's siblings below) and re-derived inline in HEAD's
+// container branch — the exact duplicate-logic drift class Task 8 fixed for
+// the '-nav'/'-navroot' ETag suffix itself. Extracted here so predict and
+// serve on BOTH methods call the SAME functions, following the
+// predictFileEtag precedent (one function, two call sites) instead of
+// re-deriving.
+function willServeNavigatorView(request) {
+  return request.lwsEnabled && browserWantsHtml(request);
+}
+function willServeRootStorageView(request, urlPath) {
+  return willServeNavigatorView(request) && urlPath === '/' && request.query?.view === 'nav';
+}
+
 function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
   if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
   const storedContentType = getContentType(storagePath);
@@ -679,7 +694,7 @@ export async function handleGet(request, reply) {
     // non-navigator representation's ETag — and a machine lws+json
     // conditional GET (willServeNav false) keeps comparing against the
     // un-suffixed etag, so it can never 304 off a stray '-nav' value.
-    const willServeNav = request.lwsEnabled && browserWantsHtml(request);
+    const willServeNav = willServeNavigatorView(request);
     // Review fix (root-view ETag key): the SAME urlPath==='/' && view==='nav'
     // predicate the render branch below (~line 749) uses to pick the ROOT
     // STORAGE view over the generic container view — hoisted here, before
@@ -690,7 +705,7 @@ export async function handleGet(request, reply) {
     // predicted the identical '-nav' suffix off the same
     // stats.etag+labeledListingType+visKey inputs despite serving different
     // bodies, so an ETag minted from one could bogus-304 the other.
-    const willServeRootView = willServeNav && urlPath === '/' && request.query?.view === 'nav';
+    const willServeRootView = willServeRootStorageView(request, urlPath);
     const listingEtagBase = (request.lwsEnabled && !willMashlib)
       ? containerListingEtag(stats.etag, labeledListingType, visKey)
       : effectiveEtag;
@@ -1974,17 +1989,19 @@ export async function handleHead(request, reply) {
         });
         visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
       }
-      if (browserWantsHtml(request)) {
-        // Task 8 routed fix (review of Task 5/6/7): mirrors GET's
-        // willServeNav/willServeRootView (~line 682/693) — a container HEAD
-        // from a browser must predict the SAME navigator response GET
-        // serves (Task 5 container view / Task 7 root view), not the
-        // legacy plain-listing shape. `contentType` here is still the
-        // negotiated real representation type computed above (GET's
-        // `labeledListingType`) — containerListingEtag keys off THAT,
-        // exactly like GET's listingEtagBase, before the '-nav'/'-navroot'
-        // suffix is folded in.
-        const willServeRootView = urlPath === '/' && request.query?.view === 'nav';
+      if (willServeNavigatorView(request)) {
+        // Task 8 routed fix (review of Task 5/6/7), now sharing the actual
+        // predicate functions with GET (review follow-up) instead of just a
+        // mirrored comment: willServeNavigatorView/willServeRootStorageView
+        // are the SAME functions GET's container branch calls (~line 682/
+        // 693) — a container HEAD from a browser must predict the SAME
+        // navigator response GET serves (Task 5 container view / Task 7
+        // root view), not the legacy plain-listing shape. `contentType`
+        // here is still the negotiated real representation type computed
+        // above (GET's `labeledListingType`) — containerListingEtag keys
+        // off THAT, exactly like GET's listingEtagBase, before the
+        // '-nav'/'-navroot' suffix is folded in.
+        const willServeRootView = willServeRootStorageView(request, urlPath);
         headEtag = variantEtag(containerListingEtag(stats.etag, contentType, visKey), willServeRootView ? 'navroot' : 'nav');
         contentType = 'text/html';
         skipProfileNegotiation = true;
