@@ -37,7 +37,7 @@ import { parseTypeLinks, typeStorePath, readDeclaredTypes, readProvenance } from
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
-import { renderContainerView, renderEntityView } from '../navigator/views.js';
+import { renderContainerView, renderEntityView, entityFaceViewable } from '../navigator/views.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -309,6 +309,7 @@ function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) 
 
 function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
   if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
+  const storedContentType = getContentType(storagePath);
   // Task 6 (spec 2026-07-15): a browser-shaped request is intercepted by the
   // entity face (or its 303 face-dispatch sibling, Task 4) BEFORE any RDF/
   // linkset negotiation runs below — mirrors the actual serving order, so
@@ -320,12 +321,19 @@ function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storag
   // a client can never be holding a '-nav' validator for it to wrongly
   // 304 against; see the entity-face arm's own re-check for the full
   // argument covering the F3/conversion deferral corners.
-  if (browserWantsHtml(request)) return variantEtag(stats.etag, 'nav');
+  // Review fix: the entity face only fires by default for data types
+  // (entityFaceViewable) — media/binary fall through to native serving with
+  // no '-nav' variant — OR unconditionally when the request is explicit
+  // (?view=nav). Mirrors the arm's own gate (~line 1094) and its HEAD-parity
+  // twin (isEntityFaceResponse) exactly, so the predicted and emitted ETags
+  // never drift apart.
+  if (browserWantsHtml(request) && (request.query?.view === 'nav' || entityFaceViewable(storedContentType))) {
+    return variantEtag(stats.etag, 'nav');
+  }
   const acceptHeader = request.headers.accept || '';
   if (selectContentType(acceptHeader, connegEnabled) === RDF_TYPES.LINKSET) {
     return variantEtag(stats.etag, 'ls');
   }
-  const storedContentType = getContentType(storagePath);
   // #5 (RFC 9110 §8.8.3 / LWS ETag MUST): keyed on the negotiation surface the
   // serving arm actually runs (this function already early-returns unless
   // lwsEnabled, and --lws mandates negotiation — spec §4a), and covering BOTH
@@ -1091,7 +1099,16 @@ export async function handleGet(request, reply) {
   // !request.lwsEnabled (above) means the `else if (shouldServeMashlib(...))`
   // below is reachable only when !request.lwsEnabled, mirroring the
   // container's willMashlib gate (~line 617) — same pattern, file side.
-  if (request.lwsEnabled && browserWantsHtml(request)) {
+  // Review fix (2026-07-15): by default this arm fires ONLY for data types
+  // (entityFaceViewable — RDF/markdown/text) the browser can't render
+  // better natively; image/video/audio/pdf/octet-stream/etc. fall through
+  // to the raw serving path below, restoring the mashlib precedent
+  // (src/mashlib/index.js:380-382). ?view=nav is the explicit escape hatch —
+  // it forces the entity face for ANY content type, matching what was
+  // asked for. Same predicate predictFileEtag already applied above, so the
+  // ETag emitted here always matches what was predicted.
+  if (request.lwsEnabled && browserWantsHtml(request)
+      && (request.query?.view === 'nav' || entityFaceViewable(storedContentType))) {
     // Defensive re-check (mirrors the file branch's repeated fileEtag
     // pattern at ~1002/1040/1303/1336): the early If-None-Match check above
     // (~line 420) already compares against fileEtag — already '-nav'-suffixed
@@ -1099,8 +1116,11 @@ export async function handleGet(request, reply) {
     // wouldNotNegotiate or conversionPending is true (a strict, wildcard-less
     // Accept: text/html, or an RDF-source file). Neither of those deferred
     // re-checks below (the F3 gate / RDF conversion arms) is ever reached
-    // once browserWantsHtml is true — this arm always returns — so this is
-    // the ONLY place those deferred cases get a chance to 304.
+    // once this arm's gate (above) is satisfied — this arm always returns
+    // once entered — so this is the ONLY place those deferred cases get a
+    // chance to 304. A request that skips this arm (non-viewable content
+    // type, no ?view=nav) falls through to those same F3/conversion arms
+    // below, which run their own re-check as before.
     if (ifNoneMatch) {
       const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
       if (!check.ok && check.notModified) {
@@ -1120,8 +1140,12 @@ export async function handleGet(request, reply) {
     const reps = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
     // Excerpt: first 2000 chars of the stored bytes, text/* only — binary or
     // otherwise-typed content shows the metadata facts without a body read.
+    // Review fix: size-gated BEFORE the read, mirroring the DATA_ISLAND_MAX_BYTES
+    // precedent (src/mashlib/index.js:24, applied at ~line 1183 above) — a
+    // multi-MB text file would otherwise be read in full just to slice 2000
+    // chars. Larger text files show the metadata facts with no preview.
     let excerpt = '';
-    if ((storedContentType || '').startsWith('text/')) {
+    if ((storedContentType || '').startsWith('text/') && stats.size <= DATA_ISLAND_MAX_BYTES) {
       const buf = await storage.read(storagePath);
       if (buf) excerpt = buf.toString('utf8').slice(0, 2000);
     }
@@ -2001,7 +2025,10 @@ export async function handleHead(request, reply) {
   // Length need to reflect it (below); the legacy mashlib branch stays
   // reachable only when !request.lwsEnabled (isMashlibResponse is already
   // scoped that way via getMashlibEtag).
-  const isEntityFaceResponse = !stats.isDirectory && request.lwsEnabled && browserWantsHtml(request);
+  // Review fix: same entityFaceViewable/?view=nav gate as GET's arm —
+  // storedContentType is already computed above (~line 1894).
+  const isEntityFaceResponse = !stats.isDirectory && request.lwsEnabled && browserWantsHtml(request)
+    && (request.query?.view === 'nav' || entityFaceViewable(storedContentType));
 
   let negotiationConverted = false;
   if (!stats.isDirectory) {

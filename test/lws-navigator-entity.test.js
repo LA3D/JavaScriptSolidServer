@@ -166,3 +166,76 @@ describe('lws: navigator generic entity face — non-lws server keeps mashlib un
     assert.match(body, /runDataBrowser|mashlib\.min\.js/);
   });
 });
+
+// Review follow-up (2026-07-15): the arm above intercepted EVERY stored
+// content type once browserWantsHtml was true, regressing the mashlib
+// precedent (src/mashlib/index.js:380-382) that image/video/audio/pdf
+// render natively rather than behind a metadata page. entityFaceViewable
+// (src/navigator/views.js) restores that: default entity face only for
+// data types (RDF/markdown/text); ?view=nav still forces it for any type.
+describe('lws: navigator entity face — content-type gate (review fix)', () => {
+  let base;
+  const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01, 0x02, 0x03]);
+  const BIG_TEXT = 'x'.repeat(300 * 1024); // > DATA_ISLAND_MAX_BYTES (256KB)
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true, mashlibCdn: true });
+    base = getBaseUrl();
+    await createTestPod('dana');
+    await request('/dana/public/wiki/photo.png', {
+      method: 'PUT', headers: { 'Content-Type': 'image/png' }, auth: 'dana', body: PNG_BYTES,
+    });
+    await request('/dana/public/wiki/big.txt', {
+      method: 'PUT', headers: { 'Content-Type': 'text/plain' }, auth: 'dana', body: BIG_TEXT,
+    });
+  });
+  after(stopTestServer);
+
+  it('1. browser GET of image/png -> 200 raw bytes (native render, not the entity face)', async () => {
+    const r = await request('/dana/public/wiki/photo.png', { headers: { Accept: BROWSER_ACCEPT }, auth: 'dana' });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type') || '', /^image\/png/);
+    const body = Buffer.from(await r.arrayBuffer());
+    assert.ok(body.equals(PNG_BYTES), 'must serve the raw PNG bytes unchanged, not an HTML wrapper');
+  });
+
+  it('2. ?view=nav on the same image -> 200 entity view (explicit escape hatch works for any type)', async () => {
+    const r = await request('/dana/public/wiki/photo.png?view=nav', {
+      headers: { Accept: BROWSER_ACCEPT }, auth: 'dana',
+    });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type') || '', /text\/html/);
+    const body = await r.text();
+    assert.match(body, /image\/png/, 'entity view must show the stored media type fact');
+  });
+
+  it('3. large text file (>256KB) -> entity face 200 with no unbounded-read preview', async () => {
+    const r = await request('/dana/public/wiki/big.txt', { headers: { Accept: BROWSER_ACCEPT }, auth: 'dana' });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type') || '', /text\/html/);
+    const body = await r.text();
+    assert.doesNotMatch(body, /<pre/, 'a >256KB file must not carry an excerpt preview');
+  });
+});
+
+describe('lws: navigator entity face — no mashlibCdn (review fix coverage)', () => {
+  let base;
+
+  before(async () => {
+    // No mashlibCdn: true here — pins that the entity-face arm doesn't
+    // depend on mashlibEnabled (it replaces mashlib entirely under --lws).
+    await startTestServer({ lws: true, conneg: true });
+    base = getBaseUrl();
+    await createTestPod('erin');
+    await request('/erin/public/wiki/note.md', {
+      method: 'PUT', headers: { 'Content-Type': 'text/markdown' }, auth: 'erin', body: '# note\n',
+    });
+  });
+  after(stopTestServer);
+
+  it('4. markdown browser GET -> entity face 200 even with mashlibCdn off', async () => {
+    const r = await request('/erin/public/wiki/note.md', { headers: { Accept: BROWSER_ACCEPT }, auth: 'erin' });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type') || '', /text\/html/);
+  });
+});

@@ -87,4 +87,32 @@ export function renderEntityView({ url, types = [], conformsTo = [], describedby
   return navPage(name, crumbHtml(url), `<h1>${esc(name)}</h1><dl class="meta">${rows}</dl>${prev}`);
 }
 
+// Entity-face content-type gate (review fix, spec 2026-07-15): the default
+// (no ?view=nav) entity face renders only for data types a browser can't
+// already render natively — mirrors mashlib's viewable-content-type set
+// (src/mashlib/index.js shouldServeMashlib) for the file case, plus
+// n-quads (mashlib has no pane for it either, but the entity face has no
+// panes to begin with — it's a metadata page, not a data browser) and the
+// general text/* family. image/video/audio/pdf/octet-stream/etc. are
+// EXCLUDED on purpose — those fall through to the pre-Task-6 raw serving
+// path so the browser renders them natively (src/mashlib/index.js:380-382
+// is the precedent this restores). Callers still force the entity face for
+// ANY type when the request is explicit (?view=nav) — this predicate only
+// gates the default.
+const ENTITY_FACE_DATA_TYPES = new Set([
+  'text/turtle',
+  'application/ld+json',
+  'application/json',
+  'text/n3',
+  'application/n-triples',
+  'application/n-quads',
+  'application/rdf+xml',
+  'text/markdown',
+]);
+
+export function entityFaceViewable(contentType) {
+  const baseType = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return ENTITY_FACE_DATA_TYPES.has(baseType) || baseType.startsWith('text/');
+}
+
 export { badge, localName, hueOf, esc };
