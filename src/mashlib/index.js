@@ -317,19 +317,21 @@ export function generateModuleDatabrowserHtml(moduleUrl, resourceUrl = '', opts 
 }
 
 /**
- * Check if request wants HTML and mashlib should handle it
+ * Does this request look like a browser wanting an HTML face? The
+ * navigation-shape check (sec-fetch-dest) + Accept check (text/html present,
+ * not preceded by an RDF type), independent of any resource's content type
+ * or whether mashlib itself is enabled. Extracted out of shouldServeMashlib
+ * (spec 2026-07-15, Task 4) so the LWS text/html face-dispatch rung
+ * (src/handlers/resource.js) can reuse the exact same "browser-shaped
+ * request" predicate mashlib already uses — no behavior change to
+ * shouldServeMashlib, which now just calls this then applies its own
+ * mashlibEnabled + viewable-content-type gates.
  * @param {object} request - Fastify request
- * @param {boolean} mashlibEnabled - Whether mashlib is enabled
- * @param {string} contentType - Content type of the resource
  * @returns {boolean}
  */
-export function shouldServeMashlib(request, mashlibEnabled, contentType) {
+export function browserWantsHtml(request) {
   const accept = request.headers.accept || '';
   const secFetchDest = request.headers['sec-fetch-dest'] || '';
-
-  if (!mashlibEnabled) {
-    return false;
-  }
 
   // Only serve mashlib for top-level document navigation
   // sec-fetch-dest: 'document' = browser navigation (serve mashlib)
@@ -354,6 +356,25 @@ export function shouldServeMashlib(request, mashlibEnabled, contentType) {
     if (rdfPos !== -1 && rdfPos < htmlPos) {
       return false; // RDF type is preferred over HTML
     }
+  }
+
+  return true;
+}
+
+/**
+ * Check if request wants HTML and mashlib should handle it
+ * @param {object} request - Fastify request
+ * @param {boolean} mashlibEnabled - Whether mashlib is enabled
+ * @param {string} contentType - Content type of the resource
+ * @returns {boolean}
+ */
+export function shouldServeMashlib(request, mashlibEnabled, contentType) {
+  if (!mashlibEnabled) {
+    return false;
+  }
+
+  if (!browserWantsHtml(request)) {
+    return false;
   }
 
   // Serve the mashlib shell only for content types that have a pane to

@@ -30,7 +30,7 @@ import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
-import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
+import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, browserWantsHtml, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
 import { constraintProblem } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
@@ -967,6 +967,15 @@ export async function handleGet(request, reply) {
     advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
   }
 
+  // Face dispatch (spec 2026-07-15): a declared text/html alternate is the resource's
+  // human face — browsers 303 there (the fork's alternates are separate resources reached
+  // by redirect, mirroring profile-conneg). ?view=nav opts out. --lws only.
+  if (request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
+    const face = advertisedReps?.alternates?.find(
+      (r) => (r.format || '').split(';')[0].trim() === 'text/html');
+    if (face) return reply.code(303).header('Location', face.href).send();
+  }
+
   // Check if we should serve Mashlib data browser
   // Only for RDF resources when Accept: text/html is requested
   if (shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
@@ -1797,6 +1806,15 @@ export async function handleHead(request, reply) {
   if (!skipProfileNegotiation && request.lwsEnabled && !advertisedReps
       && await storage.exists(storagePath + '.meta')) {
     advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
+  }
+
+  // Face dispatch (spec 2026-07-15): mirrors the GET dispatch above — files
+  // only (containers have no altr: "face" concept here); HEAD 303 carries no
+  // body. ?view=nav opts out. --lws only.
+  if (!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
+    const face = advertisedReps?.alternates?.find(
+      (r) => (r.format || '').split(';')[0].trim() === 'text/html');
+    if (face) return reply.code(303).header('Location', face.href).send();
   }
 
   let negotiationConverted = false;
