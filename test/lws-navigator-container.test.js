@@ -73,6 +73,34 @@ describe('lws: navigator container view (Task 5)', () => {
     assert.notEqual(navEtag, jsonEtag);
     assert.match(navEtag, /-nav"$/, 'navigator ETag must carry a -nav variant suffix');
   });
+
+  // Review fix: the -nav ETag was computed AFTER the deferred If-None-Match
+  // check (inside the navigator arm), so a browser presenting a
+  // previously-issued -nav ETag could never 304. Fixed by predicting the
+  // -nav suffix up front, mirroring getMashlibEtag's predictive '-html'
+  // pattern.
+  it('navigator ETag round-trip: repeat browser GET with If-None-Match: <-nav etag> → 304', async () => {
+    const first = await request(CONTAINER, { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(first, 200);
+    const navEtag = first.headers.get('etag');
+    assert.ok(navEtag, 'navigator response must carry an ETag');
+    assert.match(navEtag, /-nav"$/, 'navigator ETag must carry a -nav variant suffix');
+    const second = await request(CONTAINER, {
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': navEtag },
+    });
+    assertStatus(second, 304, 'a repeat navigator GET presenting its own -nav etag must 304');
+  });
+
+  it('a -nav etag must not validate a machine lws+json conditional GET (no cross-contamination)', async () => {
+    const nav = await request(CONTAINER, { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(nav, 200);
+    const navEtag = nav.headers.get('etag');
+    assert.ok(navEtag, 'navigator response must carry an ETag');
+    const machine = await request(CONTAINER, {
+      headers: { Accept: 'application/lws+json', 'If-None-Match': navEtag },
+    });
+    assertStatus(machine, 200, 'a machine lws+json conditional GET presenting a -nav etag must not 304');
+  });
 });
 
 describe('lws: navigator container view — A2 shadow interaction', () => {

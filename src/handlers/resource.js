@@ -635,9 +635,26 @@ export async function handleGet(request, reply) {
     // the mashlib '-html' suffix) — mashlib's embedded listing isn't part
     // of the altr: representation family this task scopes (brief: lws+json/
     // linkset/quads/turtle/ld+json).
-    const listingEtag = (request.lwsEnabled && !willMashlib)
+    // Review fix (Task 5): predict the navigator arm's '-nav' suffix HERE —
+    // mirroring getMashlibEtag's predictive '-html' pattern (~line 224) —
+    // BEFORE the deferred If-None-Match check just below, not after it
+    // (the bug: computing '-nav' inside the navigator arm meant it always
+    // ran after that check had already matched against the un-suffixed
+    // etag, so a repeat navigator GET could never 304). willServeNav is
+    // the exact predicate the navigator arm (below) guards on, reused
+    // there instead of recomputed so the emitted header and the 304
+    // comparison can never drift apart. Safe to fold '-nav' into
+    // listingEtag unconditionally: every other branch below that also
+    // reads listingEtag is reachable only when the navigator arm did NOT
+    // fire (it always returns), so the suffix never leaks into a
+    // non-navigator representation's ETag — and a machine lws+json
+    // conditional GET (willServeNav false) keeps comparing against the
+    // un-suffixed etag, so it can never 304 off a stray '-nav' value.
+    const willServeNav = request.lwsEnabled && browserWantsHtml(request);
+    const listingEtagBase = (request.lwsEnabled && !willMashlib)
       ? containerListingEtag(stats.etag, labeledListingType, visKey)
       : effectiveEtag;
+    const listingEtag = willServeNav ? variantEtag(listingEtagBase, 'nav') : listingEtagBase;
 
     // Deferred 304 check for container listings (#456) — compared against
     // the representation- and visibility-keyed ETag above (Task 10,
@@ -666,7 +683,7 @@ export async function handleGet(request, reply) {
     // generateLwsContainer builder the lws+json branch uses, enriched with
     // per-member declared rdf:type (readDeclaredTypes) and authorized
     // alternate-representation "faces" (readAuthorizedRepresentations).
-    if (request.lwsEnabled && browserWantsHtml(request)) {
+    if (willServeNav) {
       const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       const originStr = new URL(resourceUrl).origin;
       const isPublicPod = !!request.config?.public;
@@ -689,16 +706,15 @@ export async function handleGet(request, reply) {
         return { ...it, rdfTypes, faces };
       }));
       const navConformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
-      // Mirrors getMashlibEtag's '-html' suffixing (~line 223): the listing
-      // ETag above (containerListingEtag, now the REAL negotiated-listing
-      // value since willMashlib is false whenever lwsEnabled) further
-      // suffixed '-nav' — distinct from every other representation's ETag,
-      // including the visibility key already folded into listingEtag (S1).
-      const navEtag = variantEtag(listingEtag, 'nav');
+      // '-nav' is already folded into listingEtag above (predicted before
+      // the deferred If-None-Match check, mirroring getMashlibEtag's
+      // predictive '-html' pattern ~line 223) — reused directly here
+      // rather than recomputed, so the header and the 304 comparison can
+      // never drift apart.
       const html = renderContainerView({ url: resourceUrl, items, conformsTo: navConformsTo });
       const headers = getAllHeaders({
         isContainer: true,
-        etag: navEtag,
+        etag: listingEtag,
         contentType: 'text/html',
         origin,
         resourceUrl,
