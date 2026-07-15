@@ -56,7 +56,12 @@ export function renderContainerView({ url, items, conformsTo = [] }) {
   const rows = items.map((it) => {
     const relName = it.id.startsWith(base) ? it.id.slice(base.length) : it.id;
     const badges = (it.rdfTypes ?? []).map(badge).join(' ');
-    const faces = (it.faces ?? []).map((f) => `<a href="${esc(f.href)}">${esc(f.format)}</a>`).join(' · ');
+    // Final-review minor: filter falsy formats BEFORE mapping — a face whose
+    // .meta rep node carries no dct:format (repFrom in
+    // src/lws/representations.js defaults format to null) must be omitted,
+    // not rendered as a literal "null"/"undefined" label.
+    const faces = (it.faces ?? []).filter((f) => f.format)
+      .map((f) => `<a href="${esc(f.href)}">${esc(f.format)}</a>`).join(' · ');
     const meta = [it.mediaType, it.size, it.modified].filter(Boolean).map(esc).join(' · ');
     return `<tr><td><a href="${esc(it.id)}">${esc(relName)}</a></td><td>${badges}</td><td>${faces}</td><td class="muted">${meta}</td></tr>`;
   }).join('\n');

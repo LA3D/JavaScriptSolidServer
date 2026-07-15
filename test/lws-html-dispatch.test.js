@@ -126,3 +126,103 @@ describe('lws off: browser Accept still gets the mashlib wrapper (byte-identical
     assert.match(r.headers.get('content-type') || '', /text\/html/);
   });
 });
+
+// Final-review fix I1: predictFileEtag suffixes '-nav' for a browser-shaped
+// GET of an entity-viewable file BEFORE any declared text/html alternate
+// exists. The early If-None-Match check (~line 464) used to compare against
+// that predicted '-nav' etag and 304 unconditionally — so once the projector
+// materializes the face + declares it (card bytes unchanged -> same
+// stats.etag -> same predicted '-nav' etag), a browser revalidating with its
+// old etag got stuck 304ing the now-obsolete entity face forever instead of
+// being 303'd to the newly-live face. Fix: the early check defers for every
+// lws browser-shaped request, same as it already defers for hasAcceptProfile
+// — the face-dispatch arm (unconditional 303, no ETag) and the entity-face
+// arm's own re-check (~line 1201) are what actually decide 304 vs 303 now.
+describe('lws: face-dispatch review fix — stale -nav 304 must not mask a newly materialized face (I1)', () => {
+  let base;
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true, mashlibCdn: true });
+    base = getBaseUrl();
+    await createTestPod('finn');
+    await request('/finn/public/wiki/a.md', {
+      method: 'PUT', headers: { 'Content-Type': 'text/markdown' }, auth: 'finn', body: '# a\n',
+    });
+  });
+  after(stopTestServer);
+
+  it('a browser holding a -nav etag from before a face existed must 303, not 304, once the face is declared', async () => {
+    // 1. No alternate declared yet -> entity face; capture its -nav ETag.
+    const first = await request('/finn/public/wiki/a.md', { headers: BROWSER, auth: 'finn' });
+    assertStatus(first, 200);
+    const navEtag = first.headers.get('etag');
+    assert.ok(navEtag && navEtag.endsWith('-nav"'), `expected a -nav ETag, got: ${navEtag}`);
+
+    // 2. Materialize the face + declare it (same card bytes -> same stats.etag).
+    await request('/finn/public/wiki/a.md.html', {
+      method: 'PUT', headers: { 'Content-Type': 'text/html' }, auth: 'finn', body: '<p>a</p>',
+    });
+    await request('/finn/public/wiki/a.md.meta', {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'finn',
+      body: repMeta(`${base}/finn/public/wiki/a.md`, `${base}/finn/public/wiki/a.md.html`),
+    });
+
+    // 3. A revalidating browser presenting the OLD -nav etag must now 303 to
+    // the face, not 304 to the obsolete entity view.
+    const second = await request('/finn/public/wiki/a.md', {
+      headers: { ...BROWSER, 'If-None-Match': navEtag }, auth: 'finn', redirect: 'manual',
+    });
+    assertStatus(second, 303, 'a newly materialized face must be reachable even from a stale -nav conditional GET');
+    assert.ok(second.headers.get('location').endsWith('/a.md.html'));
+  });
+});
+
+// Final-review fix I3: the face dispatch (~line 1166 GET, ~line 2128 HEAD)
+// trusts advertisedReps.alternates from .meta; filterReadableAlternates
+// WAC-checks but never existence-checks a same-origin href, and a missing
+// path's checkAccess resolves via container-default -> the dead href
+// survives the authz filter -> a permanent 303 to a 404. Fix: the dispatch
+// existence-checks the face href on disk before committing to the 303, and
+// falls through (GET: to the entity-face arm; HEAD: same) when the target
+// is gone.
+describe('lws: face-dispatch review fix — a deleted face falls through, never a 303->404 loop (I3)', () => {
+  let base;
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true, mashlibCdn: true });
+    base = getBaseUrl();
+    await createTestPod('greta');
+    await request('/greta/public/wiki/a.md', {
+      method: 'PUT', headers: { 'Content-Type': 'text/markdown' }, auth: 'greta', body: '# a\n',
+    });
+    await request('/greta/public/wiki/a.md.html', {
+      method: 'PUT', headers: { 'Content-Type': 'text/html' }, auth: 'greta', body: '<p>a</p>',
+    });
+    await request('/greta/public/wiki/a.md.meta', {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'greta',
+      body: repMeta(`${base}/greta/public/wiki/a.md`, `${base}/greta/public/wiki/a.md.html`),
+    });
+    // Sanity: the face dispatch is live before the face is deleted.
+    const sanity = await request('/greta/public/wiki/a.md', { headers: BROWSER, auth: 'greta', redirect: 'manual' });
+    assertStatus(sanity, 303, 'setup: face dispatch must 303 before the face is deleted');
+
+    await request('/greta/public/wiki/a.md.html', { method: 'DELETE', auth: 'greta' });
+  });
+  after(stopTestServer);
+
+  it('GET: falls through to the entity face (not a 303 to a dead href)', async () => {
+    const r = await request('/greta/public/wiki/a.md', { headers: BROWSER, auth: 'greta', redirect: 'manual' });
+    assertStatus(r, 200, 'a deleted face must not survive as a dangling 303 target');
+    assert.match(r.headers.get('content-type') || '', /text\/html/);
+    const body = await r.text();
+    assert.match(body, /machine views/, 'must land on the entity-face metadata view, not a 404');
+  });
+
+  it('HEAD: parity with GET (falls through, no body)', async () => {
+    const r = await request('/greta/public/wiki/a.md', {
+      method: 'HEAD', headers: BROWSER, auth: 'greta', redirect: 'manual',
+    });
+    assertStatus(r, 200);
+    assert.match(r.headers.get('content-type') || '', /text\/html/);
+  });
+});

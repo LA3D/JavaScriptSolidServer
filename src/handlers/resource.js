@@ -32,7 +32,7 @@ import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, browserWantsHtml, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
-import { constraintProblem } from '../lws/admission.js';
+import { constraintProblem, urlToStoragePath } from '../lws/admission.js';
 import { parseTypeLinks, typeStorePath, readDeclaredTypes, readProvenance } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
@@ -323,6 +323,22 @@ function willServeRootStorageView(request, urlPath) {
   return willServeNavigatorView(request) && urlPath === '/' && request.query?.view === 'nav';
 }
 
+// Final-review I3: the face dispatch (GET ~line 1166, HEAD ~line 2128)
+// trusts advertisedReps.alternates from .meta; filterReadableAlternates
+// (src/lws/representations.js) WAC-checks a same-origin href but never
+// existence-checks it — checkAccess resolves a missing path via
+// container-default ACL, so a dead href survives the authz filter and the
+// dispatch 303s to it forever (a permanent 303->404 loop once the target is
+// deleted or never materialized). Existence-gate the dispatch itself so a
+// stale face falls through to the entity face / raw serving instead.
+// Alternates reaching here are already same-origin-only by construction
+// (filterReadableAlternates drops off-origin hrefs before this point), so a
+// plain urlToStoragePath (path-mode pathname, same caveat as that filter)
+// is safe to reuse here without re-deriving an origin check.
+async function faceHrefIsLive(href) {
+  try { return await storage.exists(urlToStoragePath(href)); } catch { return false; }
+}
+
 function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
   if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
   const storedContentType = getContentType(storagePath);
@@ -458,10 +474,18 @@ export async function handleGet(request, reply) {
   // each uses a different ETag source (#456). Deferred here too when a 406
   // gate hasn't resolved yet (wouldNotNegotiate), Accept-Profile was sent
   // (hasAcceptProfile — the profile-negotiation block below decides; the
-  // deferred re-check sits right after it resolves, spec §3), or a real
-  // conversion is pending (conversionPending — re-checked in the serving arm).
+  // deferred re-check sits right after it resolves, spec §3), a real
+  // conversion is pending (conversionPending — re-checked in the serving
+  // arm), or the request is lws browser-shaped (final-review I1): predictFileEtag's
+  // '-nav' suffix is a same-value over-approximation that's blind to a
+  // text/html alternate declared AFTER the client cached that etag — so a
+  // stale '-nav' If-None-Match must never short-circuit here. The face
+  // dispatch (~line 1166) never emits an ETag itself (a 303 always wins for
+  // a live face) and the entity-face arm's own re-check (~line 1201) is
+  // what actually decides 304 vs 303 once dispatch is known.
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
+  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending
+      && !(request.lwsEnabled && browserWantsHtml(request))) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
@@ -1163,10 +1187,13 @@ export async function handleGet(request, reply) {
   // Face dispatch (spec 2026-07-15): a declared text/html alternate is the resource's
   // human face — browsers 303 there (the fork's alternates are separate resources reached
   // by redirect, mirroring profile-conneg). ?view=nav opts out. --lws only.
+  // Final-review I3: existence-gated (faceHrefIsLive) — a declared face that
+  // no longer exists falls through to the entity-face arm below instead of
+  // 303ing to a dead target.
   if (request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
     const face = advertisedReps?.alternates?.find(
       (r) => (r.format || '').split(';')[0].trim() === 'text/html');
-    if (face) return reply.code(303).header('Location', face.href).send();
+    if (face && await faceHrefIsLive(face.href)) return reply.code(303).header('Location', face.href).send();
   }
 
   // Generic entity face (Task 6, spec 2026-07-15): a server-rendered nav
@@ -2048,9 +2075,16 @@ export async function handleHead(request, reply) {
   const conversionPending = !stats.isDirectory && !isMashlibResponse
     && pendingConversion(request, storagePath, urlPath);
 
-  // Check If-None-Match using the final ETag (#456)
+  // Check If-None-Match using the final ETag (#456). Final-review I1: mirrors
+  // GET's added lws-browser-shaped deferral (same over-approximation
+  // argument) — scoped to !stats.isDirectory because that's the only case
+  // with a later re-check to catch it (the entity-face arm's own re-check,
+  // ~line 2159); a browser-shaped HEAD of a CONTAINER has no face dispatch
+  // and no later re-check, so it must keep resolving its 304 here, exactly
+  // like today.
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
+  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending
+      && !(!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request))) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
@@ -2125,10 +2159,12 @@ export async function handleHead(request, reply) {
   // Face dispatch (spec 2026-07-15): mirrors the GET dispatch above — files
   // only (containers have no altr: "face" concept here); HEAD 303 carries no
   // body. ?view=nav opts out. --lws only.
+  // Final-review I3: existence-gated (faceHrefIsLive), same as GET — a
+  // deleted face falls through to the entity-face arm below, HEAD parity.
   if (!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
     const face = advertisedReps?.alternates?.find(
       (r) => (r.format || '').split(';')[0].trim() === 'text/html');
-    if (face) return reply.code(303).header('Location', face.href).send();
+    if (face && await faceHrefIsLive(face.href)) return reply.code(303).header('Location', face.href).send();
   }
 
   // Task 6 (spec 2026-07-15) HEAD parity: mirrors GET's entity-face arm —
