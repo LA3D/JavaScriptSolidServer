@@ -680,10 +680,23 @@ export async function handleGet(request, reply) {
     // conditional GET (willServeNav false) keeps comparing against the
     // un-suffixed etag, so it can never 304 off a stray '-nav' value.
     const willServeNav = request.lwsEnabled && browserWantsHtml(request);
+    // Review fix (root-view ETag key): the SAME urlPath==='/' && view==='nav'
+    // predicate the render branch below (~line 749) uses to pick the ROOT
+    // STORAGE view over the generic container view — hoisted here, before
+    // the '-nav' suffix is picked, so predict and serve can't drift (same
+    // reasoning as willServeNav itself, one comment block up). Without this,
+    // `/` (container view, reachable whenever the seeded index.html is
+    // absent — seeding is skip-if-exists) and `/?view=nav` (root view)
+    // predicted the identical '-nav' suffix off the same
+    // stats.etag+labeledListingType+visKey inputs despite serving different
+    // bodies, so an ETag minted from one could bogus-304 the other.
+    const willServeRootView = willServeNav && urlPath === '/' && request.query?.view === 'nav';
     const listingEtagBase = (request.lwsEnabled && !willMashlib)
       ? containerListingEtag(stats.etag, labeledListingType, visKey)
       : effectiveEtag;
-    const listingEtag = willServeNav ? variantEtag(listingEtagBase, 'nav') : listingEtagBase;
+    const listingEtag = willServeNav
+      ? variantEtag(listingEtagBase, willServeRootView ? 'navroot' : 'nav')
+      : listingEtagBase;
 
     // Deferred 304 check for container listings (#456) — compared against
     // the representation- and visibility-keyed ETag above (Task 10,
@@ -745,8 +758,11 @@ export async function handleGet(request, reply) {
       // this branch is reachable only via ?view=nav (the seeded index.html
       // shadow, deviation (4), intercepts every other browser GET / before
       // this code is ever reached) — the query check is written explicitly
-      // rather than relying on that invariant.
-      if (urlPath === '/' && request.query?.view === 'nav') {
+      // rather than relying on that invariant. willServeRootView is this
+      // exact predicate, hoisted above (review fix, root-view ETag key) so
+      // the '-navroot' suffix baked into listingEtag and this render choice
+      // can never drift apart — reused directly rather than recomputed.
+      if (willServeRootView) {
         // Same call the /.well-known/lws-storage route makes (src/server.js)
         // — resolveStorageDescriptionInputs is the shared helper so the two
         // can't drift on what they derive from pod-config's uriSpaces.

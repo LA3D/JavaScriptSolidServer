@@ -8,6 +8,7 @@
 // plain GET / unchanged (deviation (4)).
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'fs-extra';
 import {
   startTestServer, stopTestServer, request, createTestPod, getBaseUrl, getPodToken, assertStatus,
 } from './helpers.js';
@@ -113,5 +114,53 @@ describe('lws: navigator root view — ?view=nav is inert without --lws', () => 
     const body = await r.text();
     assert.match(body, /Your JSS Solid pod is running/, 'legacy landing unchanged — query param inert');
     assert.doesNotMatch(body, /<h2>Storage<\/h2>/, 'must not render the nav root view');
+  });
+});
+
+// Review fix (root-view ETag key): the root storage view (`/?view=nav`) and
+// the plain navigator container view (`GET /` when the seeded index.html is
+// absent — operator-reachable since seeding is skip-if-exists, e.g. a fresh
+// DATA_ROOT the operator never wrote an index.html into) shared the
+// identical predictive '-nav' listing ETag (stats.etag + labeledListingType
+// + visKey only — blind to which rendering branch would actually serve)
+// despite producing different bodies, so an If-None-Match minted from one
+// could bogus-304 the other.
+describe('lws: navigator root view vs container view — ETag disambiguation (review fix)', () => {
+  before(async () => {
+    await startTestServer({ lws: true, mashlibCdn: true });
+    // Remove the seeded root index.html so plain GET / falls through past
+    // the deviation-(4) landing-page shadow into the navigator's generic
+    // container view (Task 5) instead — the operator-reachable case this
+    // finding is about.
+    await fs.remove('./data/index.html');
+  });
+  after(stopTestServer);
+
+  it('/ (container view) and /?view=nav (root view) mint different ETags that can never cross-304', async () => {
+    const containerRes = await request('/', { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(containerRes, 200);
+    const containerBody = await containerRes.text();
+    assert.doesNotMatch(containerBody, /<h2>Storage<\/h2>/, 'plain GET / (no seeded index.html) must render the container view, not the root view');
+    const etagA = containerRes.headers.get('etag');
+    assert.ok(etagA, 'container view must carry an ETag');
+
+    const rootRes = await request('/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(rootRes, 200);
+    const rootBody = await rootRes.text();
+    assert.match(rootBody, /<h2>Storage<\/h2>/, 'GET /?view=nav must render the root storage view');
+    const etagB = rootRes.headers.get('etag');
+    assert.ok(etagB, 'root view must carry an ETag');
+
+    assert.notEqual(etagA, etagB, 'container-view and root-view ETags must not collide');
+
+    const crossCheck = await request('/?view=nav', {
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': etagA },
+    });
+    assertStatus(crossCheck, 200, 'the container-view ETag must NOT validate a root-view conditional GET (no bogus 304)');
+
+    const ownCheck = await request('/?view=nav', {
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': etagB },
+    });
+    assertStatus(ownCheck, 304, 'the root view must 304 against its own ETag');
   });
 });
