@@ -1884,7 +1884,15 @@ export async function handleHead(request, reply) {
     // A non-HTML Accept under --lws reports as if indexExists were false
     // (real listing's content-type/etag/rel="linkset"), matching what GET
     // actually serves once it falls through to the real listing branch.
-    const shadowActive = indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader));
+    // Task 8 (routed fix, review of Task 5/7): `?view=nav` is GET's SECOND
+    // escape (~line 476 `|| request.query?.view === 'nav'`) — an explicit
+    // request for the navigator root view must reach the listing branch
+    // below even when index.html exists and the Accept is HTML-shaped.
+    // Missing here meant a HEAD /?view=nav reported the seeded landing
+    // page's ETag while GET served the root storage view under a
+    // '-navroot' ETag.
+    const shadowActive = indexExists
+      && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav'));
 
     if (negotiate) {
       // HEAD must mirror what GET would emit; otherwise client caches and
@@ -1937,8 +1945,14 @@ export async function handleHead(request, reply) {
       const indexStats = await storage.stat(indexPath);
       headEtag = indexStats?.etag || stats.etag;
       skipProfileNegotiation = true;
-    } else if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
-      // Container listing via mashlib — suffix the ETag (#456)
+    } else if (!request.lwsEnabled && shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
+      // Container listing via mashlib — suffix the ETag (#456). Scoped to
+      // !request.lwsEnabled (Task 8 routed fix, mirrors GET's `willMashlib`
+      // ~line 646) — the navigator branch below claims every browser-shaped
+      // request once --lws is on, exactly like GET's willServeNav has done
+      // since Task 5. Before this scoping, HEAD predicted this legacy
+      // '-html' mashlib ETag for a --lws pod while GET served the
+      // navigator container/root view under a '-nav'/'-navroot' ETag.
       headEtag = stats.etag.replace(/"$/, '-html"');
       contentType = 'text/html';
       isMashlibResponse = true;
@@ -1947,7 +1961,10 @@ export async function handleHead(request, reply) {
       // Task 10 (probe-#6 F2): mirror GET's representation- and
       // visibility-keyed listing ETag — same repKey-per-contentType map
       // (`contentType` is already final above), same WAC-filtered
-      // visibility hash, so HEAD and GET agree byte-for-byte.
+      // visibility hash, so HEAD and GET agree byte-for-byte. Entries/visKey
+      // are shared by both the navigator branch below (Task 8) and the
+      // machine-listing branch (browserWantsHtml false) — same WAC-filtered
+      // read either way.
       let entries = await storage.listContainer(storagePath);
       let visKey = null;
       if (!request.config?.public) {
@@ -1957,7 +1974,23 @@ export async function handleHead(request, reply) {
         });
         visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
       }
-      headEtag = containerListingEtag(stats.etag, contentType, visKey);
+      if (browserWantsHtml(request)) {
+        // Task 8 routed fix (review of Task 5/6/7): mirrors GET's
+        // willServeNav/willServeRootView (~line 682/693) — a container HEAD
+        // from a browser must predict the SAME navigator response GET
+        // serves (Task 5 container view / Task 7 root view), not the
+        // legacy plain-listing shape. `contentType` here is still the
+        // negotiated real representation type computed above (GET's
+        // `labeledListingType`) — containerListingEtag keys off THAT,
+        // exactly like GET's listingEtagBase, before the '-nav'/'-navroot'
+        // suffix is folded in.
+        const willServeRootView = urlPath === '/' && request.query?.view === 'nav';
+        headEtag = variantEtag(containerListingEtag(stats.etag, contentType, visKey), willServeRootView ? 'navroot' : 'nav');
+        contentType = 'text/html';
+        skipProfileNegotiation = true;
+      } else {
+        headEtag = containerListingEtag(stats.etag, contentType, visKey);
+      }
     }
   } else {
     const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
