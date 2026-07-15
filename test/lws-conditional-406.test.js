@@ -206,48 +206,59 @@ describe('#4 (RFC 9110 §13.2.2): pending RDF conversion defers the early 304; 4
   });
 });
 
-describe('task-5: mashlib-served conditional GET keeps early 304', () => {
-  // Regression pin for conversionPending's !willServeMashlib guard. The
-  // fixture MUST be one where pendingConversion is actually true — a
-  // JSON-LD-stored resource short-circuits it to false (stored === JSON_LD),
-  // making the pin vacuous. N-Triples stored + a browser Accept gives:
-  // negotiateQuadsTarget → undefined (html is no quads target), stored !==
-  // JSON_LD → pendingConversion true; application/n-triples is
-  // mashlib-viewable (src/mashlib/index.js viewableTypes) → willServeMashlib
-  // true. Without the guard that combination defers the early 304 into the
-  // mashlib branch, which has no conditional handling — the 304 is lost
-  // (always 200). Seeded via storage.write, not PUT: application/n-triples
-  // is 415-rejected on input (mirrors test/lws-serve-nt-nq.test.js).
+// Task 6 (spec 2026-07-15): mashlib no longer serves ANY file under --lws —
+// getMashlibEtag's willServeMashlib is now scoped to !request.lwsEnabled
+// (mirrors the container's willMashlib gate), so this fixture (browser
+// Accept + --lws) is intercepted by the navigator's generic entity face
+// instead. Renamed/updated in place (was "task-5: mashlib-served
+// conditional GET keeps early 304") to pin the SAME regression against the
+// new mechanism: the entity-face arm carries its own defensive
+// If-None-Match re-check for exactly this reason (see the arm's comment in
+// src/handlers/resource.js) — without it, a conversionPending-deferred
+// early check would never get a second chance, since the entity-face arm
+// always returns before reaching any RDF-conversion branch that might
+// otherwise re-check it.
+describe('task-6: entity-face conditional GET keeps early 304 (was mashlib, Task 5)', () => {
+  // Regression pin for conversionPending's !willServeMashlib guard, now
+  // exercising the entity face. The fixture MUST be one where
+  // pendingConversion is actually true — a JSON-LD-stored resource
+  // short-circuits it to false (stored === JSON_LD), making the pin vacuous.
+  // N-Triples stored + a browser Accept gives: negotiateQuadsTarget →
+  // undefined (html is no quads target), stored !== JSON_LD →
+  // pendingConversion true — which defers the EARLY If-None-Match check
+  // (~line 420), so this pins that the entity-face arm's OWN re-check still
+  // catches it. Seeded via storage.write, not PUT: application/n-triples is
+  // 415-rejected on input (mirrors test/lws-serve-nt-nq.test.js).
   const NT = '/mashlib5/public/data.nt';
   const BROWSER_ACCEPT = 'text/html,*/*;q=0.8';
-  let mashlibEtag;
+  let navEtag;
 
   before(async () => {
     await startTestServer({ lws: true, conneg: true, mashlibCdn: true });
     await createTestPod('mashlib5');
     await storage.write(NT, Buffer.from('<http://ex/s> <http://ex/p> "v".\n'));
-    // Capture the mashlib ETag (the '-html' variant, per getMashlibEtag)
+    // Capture the entity-face ETag (the '-nav' variant, per predictFileEtag)
     const html = await request(NT, { headers: { Accept: BROWSER_ACCEPT } });
     assertStatus(html, 200);
-    mashlibEtag = html.headers.get('etag');
-    assert.ok(mashlibEtag && mashlibEtag.endsWith('-html"'),
-      `mashlib ETag should end with -html", got: ${mashlibEtag}`);
+    navEtag = html.headers.get('etag');
+    assert.ok(navEtag && navEtag.endsWith('-nav"'),
+      `entity-face ETag should end with -nav", got: ${navEtag}`);
   });
   after(stopTestServer);
 
-  it('mashlib-served conditional GET of an NT-stored resource with matching ETag → 304', async () => {
+  it('entity-face conditional GET of an NT-stored resource with matching ETag → 304', async () => {
     const r = await request(NT, {
-      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': mashlibEtag },
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': navEtag },
     });
-    assert.equal(r.status, 304, 'mashlib-served conditional GET should 304 with matching ETag');
-    assert.equal(r.headers.get('etag'), mashlibEtag);
+    assert.equal(r.status, 304, 'entity-face conditional GET should 304 with matching ETag');
+    assert.equal(r.headers.get('etag'), navEtag);
   });
 
-  it('HEAD parity: mashlib-served conditional HEAD with matching ETag → 304 (pre-existing isMashlibResponse guard)', async () => {
+  it('HEAD parity: entity-face conditional HEAD with matching ETag → 304 (isEntityFaceResponse guard)', async () => {
     const r = await request(NT, {
       method: 'HEAD',
-      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': mashlibEtag },
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': navEtag },
     });
-    assert.equal(r.status, 304, 'mashlib-served conditional HEAD should 304 with matching ETag');
+    assert.equal(r.status, 304, 'entity-face conditional HEAD should 304 with matching ETag');
   });
 });

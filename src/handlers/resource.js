@@ -33,11 +33,11 @@ import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, browserWantsHtml, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
 import { constraintProblem } from '../lws/admission.js';
-import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
+import { parseTypeLinks, typeStorePath, readDeclaredTypes, readProvenance } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
-import { renderContainerView } from '../navigator/views.js';
+import { renderContainerView, renderEntityView } from '../navigator/views.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -223,8 +223,16 @@ function parseRangeHeader(rangeHeader, fileSize) {
  */
 function getMashlibEtag(request, stats, storagePath) {
   const storedType = stats.isDirectory ? 'application/ld+json' : getContentType(storagePath);
-  const willServeMashlib =
-    shouldServeMashlib(request, request.mashlibEnabled, storedType);
+  // Task 6 (spec 2026-07-15): the navigator's generic entity face replaces
+  // mashlib for FILES once --lws is on (mirrors the container's willMashlib
+  // gate, src/handlers/resource.js ~line 617) — scope to !request.lwsEnabled
+  // so this predicate always reflects what will ACTUALLY be served. Every
+  // caller keyed off willServeMashlib (predictFileEtag's early return,
+  // handleGet's conversionPending, handleHead's isMashlibResponse) would
+  // otherwise still bake in the '-html' etag suffix / mashlib content-type
+  // for a request the entity-face arm below actually handles.
+  const willServeMashlib = !request.lwsEnabled
+    && shouldServeMashlib(request, request.mashlibEnabled, storedType);
   const effectiveEtag = willServeMashlib
     ? stats.etag.replace(/"$/, '-html"')
     : stats.etag;
@@ -301,6 +309,18 @@ function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) 
 
 function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
   if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
+  // Task 6 (spec 2026-07-15): a browser-shaped request is intercepted by the
+  // entity face (or its 303 face-dispatch sibling, Task 4) BEFORE any RDF/
+  // linkset negotiation runs below — mirrors the actual serving order, so
+  // predicting here keeps this the SAME value the entity-face arm itself
+  // emits (Task 5's fix, applied to files: fold the variant in before the
+  // early If-None-Match check, not after it, so a repeat entity-face GET can
+  // 304). Over-approximates "will render the entity view": a declared
+  // text/html alternate 303s instead — but that path never emits an ETag, so
+  // a client can never be holding a '-nav' validator for it to wrongly
+  // 304 against; see the entity-face arm's own re-check for the full
+  // argument covering the F3/conversion deferral corners.
+  if (browserWantsHtml(request)) return variantEtag(stats.etag, 'nav');
   const acceptHeader = request.headers.accept || '';
   if (selectContentType(acceptHeader, connegEnabled) === RDF_TYPES.LINKSET) {
     return variantEtag(stats.etag, 'ls');
@@ -1064,7 +1084,77 @@ export async function handleGet(request, reply) {
     if (face) return reply.code(303).header('Location', face.href).send();
   }
 
-  // Check if we should serve Mashlib data browser
+  // Generic entity face (Task 6, spec 2026-07-15): a server-rendered nav
+  // view for FILES that have no declared text/html alternate (the face
+  // dispatch above already 303'd there if one exists) — replaces mashlib
+  // for --lws pods. Scoping getMashlibEtag's willServeMashlib to
+  // !request.lwsEnabled (above) means the `else if (shouldServeMashlib(...))`
+  // below is reachable only when !request.lwsEnabled, mirroring the
+  // container's willMashlib gate (~line 617) — same pattern, file side.
+  if (request.lwsEnabled && browserWantsHtml(request)) {
+    // Defensive re-check (mirrors the file branch's repeated fileEtag
+    // pattern at ~1002/1040/1303/1336): the early If-None-Match check above
+    // (~line 420) already compares against fileEtag — already '-nav'-suffixed
+    // by predictFileEtag — for the common case, but defers whenever
+    // wouldNotNegotiate or conversionPending is true (a strict, wildcard-less
+    // Accept: text/html, or an RDF-source file). Neither of those deferred
+    // re-checks below (the F3 gate / RDF conversion arms) is ever reached
+    // once browserWantsHtml is true — this arm always returns — so this is
+    // the ONLY place those deferred cases get a chance to 304.
+    if (ifNoneMatch) {
+      const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+      if (!check.ok && check.notModified) {
+        reply.header('ETag', fileEtag);
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+        return reply.code(304).send();
+      }
+    }
+    const [types, describedby, conformsTo, provenance] = await Promise.all([
+      readDeclaredTypes(storage, storagePath),
+      describedbyTargets(storage, storagePath + '.meta', resourceUrl),
+      conformsToTargets(storage, storagePath + '.meta', resourceUrl),
+      readProvenance(storage, storagePath),
+    ]);
+    // advertisedReps is already populated above whenever a .meta exists (A1)
+    // or Accept-Profile was negotiated — reuse it rather than re-reading.
+    const reps = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
+    // Excerpt: first 2000 chars of the stored bytes, text/* only — binary or
+    // otherwise-typed content shows the metadata facts without a body read.
+    let excerpt = '';
+    if ((storedContentType || '').startsWith('text/')) {
+      const buf = await storage.read(storagePath);
+      if (buf) excerpt = buf.toString('utf8').slice(0, 2000);
+    }
+    const provenanceLines = provenance ? Object.entries(provenance).map(([k, v]) => `${k}: ${v}`) : [];
+    const html = renderEntityView({
+      url: resourceUrl,
+      types,
+      conformsTo,
+      describedby,
+      provenance: provenanceLines,
+      reps,
+      mediaType: storedContentType || '',
+      excerpt,
+    });
+    const headers = getAllHeaders({
+      isContainer: false,
+      etag: fileEtag,
+      contentType: 'text/html',
+      origin,
+      resourceUrl,
+      connegEnabled,
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled,
+      chosenProfile,
+      representations: advertisedReps
+    });
+    headers['Cache-Control'] = RDF_CACHE_CONTROL;
+    Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+    return reply.type('text/html').send(html);
+  }
+
+  // Check if we should serve Mashlib data browser (legacy — reachable only
+  // when !request.lwsEnabled; see the entity-face arm above)
   // Only for RDF resources when Accept: text/html is requested
   if (shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
     // #7 / #344: embed the resource as a JSON-LD data island so
@@ -1905,6 +1995,14 @@ export async function handleHead(request, reply) {
     if (face) return reply.code(303).header('Location', face.href).send();
   }
 
+  // Task 6 (spec 2026-07-15) HEAD parity: mirrors GET's entity-face arm —
+  // same predicate, same '-nav' headEtag (already folded in by
+  // predictFileEtag above). No body on HEAD, so only contentType/Content-
+  // Length need to reflect it (below); the legacy mashlib branch stays
+  // reachable only when !request.lwsEnabled (isMashlibResponse is already
+  // scoped that way via getMashlibEtag).
+  const isEntityFaceResponse = !stats.isDirectory && request.lwsEnabled && browserWantsHtml(request);
+
   let negotiationConverted = false;
   if (!stats.isDirectory) {
     // Mirror GET's content-type for files — including the negotiated
@@ -1912,6 +2010,21 @@ export async function handleHead(request, reply) {
     // and GET agree (#552, RFC 9110 §9.3.2).
     if (isMashlibResponse) {
       contentType = 'text/html';
+    } else if (isEntityFaceResponse) {
+      // No RDF negotiation, no mashlib — mirrors GET's entity-face arm.
+      // Re-check If-None-Match here (mirroring GET's defensive re-check):
+      // wouldNotNegotiate/conversionPending may have deferred the early
+      // check above, and negotiateHeadFileContentType's own deferred
+      // re-check (below) never runs for this branch.
+      contentType = 'text/html';
+      if (ifNoneMatch) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', headEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
+      }
     } else {
       const negotiation = await negotiateHeadFileContentType({
         request,
@@ -1983,10 +2096,10 @@ export async function handleHead(request, reply) {
   }
 
   // Content-Length: only set when the file size matches the response body.
-  // Mashlib HTML and containers are dynamically generated, and a
-  // conneg-converted body (Turtle / re-serialized JSON-LD, #552) has a
-  // different length than the on-disk file — omit rather than lie.
-  if (!stats.isDirectory && !isMashlibResponse && !negotiationConverted) {
+  // Mashlib HTML, the entity face, and containers are dynamically
+  // generated, and a conneg-converted body (Turtle / re-serialized JSON-LD,
+  // #552) has a different length than the on-disk file — omit rather than lie.
+  if (!stats.isDirectory && !isMashlibResponse && !isEntityFaceResponse && !negotiationConverted) {
     headers['Content-Length'] = stats.size;
   }
 

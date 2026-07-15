@@ -65,4 +65,26 @@ export function renderContainerView({ url, items, conformsTo = [] }) {
     `<p class="muted"><a href="${esc(url)}">machine view</a></p>`);
 }
 
+// Generic entity face (Task 6, spec 2026-07-15): the server-rendered HTML
+// view for a FILE with no declared text/html alternate — replaces mashlib
+// for files once --lws is on, mirroring renderContainerView's role for
+// containers. Every substrate-controlled string (types, conformsTo/
+// describedby URIs, provenance lines, mediaType, alternate hrefs/formats,
+// the stored-bytes excerpt) is escaped — this view is server-rendered from
+// client-declared/stored data (caller's job to bound the excerpt size).
+export function renderEntityView({ url, types = [], conformsTo = [], describedby = [], provenance = [], reps = { alternates: [] }, mediaType = '', excerpt = '' }) {
+  const name = new URL(url).pathname.split('/').pop() || url;
+  const rows = [
+    types.length ? `<dt>types</dt><dd>${types.map(badge).join(' ')}</dd>` : '',
+    conformsTo.length ? `<dt>conformsTo</dt><dd>${conformsTo.map((c) => `<a href="${esc(c)}">${esc(c)}</a>`).join('<br>')}</dd>` : '',
+    provenance.length ? `<dt>earned</dt><dd>${provenance.map((p) => esc(p)).join('<br>')}</dd>` : '',
+    describedby.length ? `<dt>shapes</dt><dd>${describedby.map((d) => `<a href="${esc(d)}">${esc(d)}</a>`).join('<br>')}</dd>` : '',
+    `<dt>media type</dt><dd>${esc(mediaType)}</dd>`,
+    `<dt>machine views</dt><dd><a href="${esc(url)}">raw</a>${(reps.alternates ?? []).map((r) =>
+      ` · <a href="${esc(r.href)}">${esc(r.format || r.href)}</a>`).join('')}</dd>`
+  ].filter(Boolean).join('\n');
+  const prev = excerpt ? `<h2>preview</h2><pre style="white-space:pre-wrap;border:1px solid var(--line);padding:.5rem">${esc(excerpt)}</pre>` : '';
+  return navPage(name, crumbHtml(url), `<h1>${esc(name)}</h1><dl class="meta">${rows}</dl>${prev}`);
+}
+
 export { badge, localName, hueOf, esc };
