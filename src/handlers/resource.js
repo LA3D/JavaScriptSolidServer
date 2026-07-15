@@ -30,13 +30,15 @@ import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { emitChange } from '../notifications/events.js';
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from '../utils/conditional.js';
-import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
+import { generateDatabrowserHtml, generateModuleDatabrowserHtml, shouldServeMashlib, browserWantsHtml, DATA_ISLAND_MAX_BYTES } from '../mashlib/index.js';
 import { turtleToJsonLd } from '../rdf/turtle.js';
-import { constraintProblem } from '../lws/admission.js';
-import { parseTypeLinks, typeStorePath, readDeclaredTypes } from '../lws/type-metadata.js';
+import { constraintProblem, urlToStoragePath } from '../lws/admission.js';
+import { parseTypeLinks, typeStorePath, readDeclaredTypes, readProvenance } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
+import { renderContainerView, renderEntityView, renderRootView, entityFaceViewable } from '../navigator/views.js';
+import { buildStorageDescription, resolveStorageDescriptionInputs } from '../lws/storage-description.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -222,8 +224,16 @@ function parseRangeHeader(rangeHeader, fileSize) {
  */
 function getMashlibEtag(request, stats, storagePath) {
   const storedType = stats.isDirectory ? 'application/ld+json' : getContentType(storagePath);
-  const willServeMashlib =
-    shouldServeMashlib(request, request.mashlibEnabled, storedType);
+  // Task 6 (spec 2026-07-15): the navigator's generic entity face replaces
+  // mashlib for FILES once --lws is on (mirrors the container's willMashlib
+  // gate, src/handlers/resource.js ~line 617) — scope to !request.lwsEnabled
+  // so this predicate always reflects what will ACTUALLY be served. Every
+  // caller keyed off willServeMashlib (predictFileEtag's early return,
+  // handleGet's conversionPending, handleHead's isMashlibResponse) would
+  // otherwise still bake in the '-html' etag suffix / mashlib content-type
+  // for a request the entity-face arm below actually handles.
+  const willServeMashlib = !request.lwsEnabled
+    && shouldServeMashlib(request, request.mashlibEnabled, storedType);
   const effectiveEtag = willServeMashlib
     ? stats.etag.replace(/"$/, '-html"')
     : stats.etag;
@@ -298,13 +308,64 @@ function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) 
   return QUADS_OUTPUTS[negotiatedLws];
 }
 
+// Shared GET/HEAD navigator decisions (review follow-up to Task 8): the two
+// predicates were being computed once for GET's container branch
+// (~predictFileEtag's siblings below) and re-derived inline in HEAD's
+// container branch — the exact duplicate-logic drift class Task 8 fixed for
+// the '-nav'/'-navroot' ETag suffix itself. Extracted here so predict and
+// serve on BOTH methods call the SAME functions, following the
+// predictFileEtag precedent (one function, two call sites) instead of
+// re-deriving.
+function willServeNavigatorView(request) {
+  return request.lwsEnabled && browserWantsHtml(request);
+}
+function willServeRootStorageView(request, urlPath) {
+  return willServeNavigatorView(request) && urlPath === '/' && request.query?.view === 'nav';
+}
+
+// Final-review I3: the face dispatch (GET ~line 1166, HEAD ~line 2128)
+// trusts advertisedReps.alternates from .meta; filterReadableAlternates
+// (src/lws/representations.js) WAC-checks a same-origin href but never
+// existence-checks it — checkAccess resolves a missing path via
+// container-default ACL, so a dead href survives the authz filter and the
+// dispatch 303s to it forever (a permanent 303->404 loop once the target is
+// deleted or never materialized). Existence-gate the dispatch itself so a
+// stale face falls through to the entity face / raw serving instead.
+// Alternates reaching here are already same-origin-only by construction
+// (filterReadableAlternates drops off-origin hrefs before this point), so a
+// plain urlToStoragePath (path-mode pathname, same caveat as that filter)
+// is safe to reuse here without re-deriving an origin check.
+async function faceHrefIsLive(href) {
+  try { return await storage.exists(urlToStoragePath(href)); } catch { return false; }
+}
+
 function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storagePath, urlPath, connegEnabled) {
   if (!request.lwsEnabled || willServeMashlib) return effectiveEtag;
+  const storedContentType = getContentType(storagePath);
+  // Task 6 (spec 2026-07-15): a browser-shaped request is intercepted by the
+  // entity face (or its 303 face-dispatch sibling, Task 4) BEFORE any RDF/
+  // linkset negotiation runs below — mirrors the actual serving order, so
+  // predicting here keeps this the SAME value the entity-face arm itself
+  // emits (Task 5's fix, applied to files: fold the variant in before the
+  // early If-None-Match check, not after it, so a repeat entity-face GET can
+  // 304). Over-approximates "will render the entity view": a declared
+  // text/html alternate 303s instead — but that path never emits an ETag, so
+  // a client can never be holding a '-nav' validator for it to wrongly
+  // 304 against; see the entity-face arm's own re-check for the full
+  // argument covering the F3/conversion deferral corners.
+  // Review fix: the entity face only fires by default for data types
+  // (entityFaceViewable) — media/binary fall through to native serving with
+  // no '-nav' variant — OR unconditionally when the request is explicit
+  // (?view=nav). Mirrors the arm's own gate (~line 1094) and its HEAD-parity
+  // twin (isEntityFaceResponse) exactly, so the predicted and emitted ETags
+  // never drift apart.
+  if (browserWantsHtml(request) && (request.query?.view === 'nav' || entityFaceViewable(storedContentType))) {
+    return variantEtag(stats.etag, 'nav');
+  }
   const acceptHeader = request.headers.accept || '';
   if (selectContentType(acceptHeader, connegEnabled) === RDF_TYPES.LINKSET) {
     return variantEtag(stats.etag, 'ls');
   }
-  const storedContentType = getContentType(storagePath);
   // #5 (RFC 9110 §8.8.3 / LWS ETag MUST): keyed on the negotiation surface the
   // serving arm actually runs (this function already early-returns unless
   // lwsEnabled, and --lws mandates negotiation — spec §4a), and covering BOTH
@@ -413,10 +474,18 @@ export async function handleGet(request, reply) {
   // each uses a different ETag source (#456). Deferred here too when a 406
   // gate hasn't resolved yet (wouldNotNegotiate), Accept-Profile was sent
   // (hasAcceptProfile — the profile-negotiation block below decides; the
-  // deferred re-check sits right after it resolves, spec §3), or a real
-  // conversion is pending (conversionPending — re-checked in the serving arm).
+  // deferred re-check sits right after it resolves, spec §3), a real
+  // conversion is pending (conversionPending — re-checked in the serving
+  // arm), or the request is lws browser-shaped (final-review I1): predictFileEtag's
+  // '-nav' suffix is a same-value over-approximation that's blind to a
+  // text/html alternate declared AFTER the client cached that etag — so a
+  // stale '-nav' If-None-Match must never short-circuit here. The face
+  // dispatch (~line 1166) never emits an ETag itself (a 303 always wins for
+  // a live face) and the entity-face arm's own re-check (~line 1201) is
+  // what actually decides 304 vs 303 once dispatch is known.
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
+  if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending
+      && !(request.lwsEnabled && browserWantsHtml(request))) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
@@ -440,7 +509,14 @@ export async function handleGet(request, reply) {
     // branch below — lws+json/linkset/turtle/quads all become reachable
     // there (including the WAC filter and A1 alternates), and rel="linkset"
     // is no longer suppressed since the affordance is now honest.
-    if (indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader))) {
+    // ?view=nav (Task 5, spec 2026-07-15) is a second escape: an explicit
+    // request for the navigator view must reach the listing branch below
+    // even when index.html exists and the Accept is HTML-shaped. Folded
+    // into the SAME `request.lwsEnabled &&` guard as the non-HTML escape
+    // above (not a bare `&& query.view !== 'nav'` tacked on unconditionally)
+    // — a non-lws pod must stay byte-identical to pre-Task-5 behavior, and
+    // an unguarded clause would let `?view=nav` skip the shadow there too.
+    if (indexExists && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav'))) {
       // Serve index.html (contains JSON-LD structured data)
       const content = await storage.read(indexPath);
       const indexStats = await storage.stat(indexPath);
@@ -597,7 +673,17 @@ export async function handleGet(request, reply) {
     const wantsTurtle = negotiated === RDF_TYPES.TURTLE
       || negotiated === RDF_TYPES.N3
       || negotiated === 'application/n-triples';
-    const willMashlib = shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json');
+    // Navigator (Task 5, spec 2026-07-15) replaces mashlib for containers
+    // once --lws is on — shouldServeMashlib already requires browserWantsHtml,
+    // so scoping willMashlib to !request.lwsEnabled here means: (a) every
+    // variable below that's keyed off willMashlib (listingContentType,
+    // labeledListingType, listingEtag) resolves through the REAL negotiated
+    // listing shape instead of the mashlib-HTML override whenever lwsEnabled,
+    // which is exactly the base the navigator's own ETag mirrors (see the
+    // navigator arm below); (b) the legacy `if (willMashlib)` block further
+    // down becomes reachable only for !request.lwsEnabled pods.
+    const willMashlib = !request.lwsEnabled
+      && shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json');
     const listingContentType = willMashlib ? 'text/html'
       : negotiated === RDF_TYPES.LWS_JSON ? RDF_TYPES.LWS_JSON
       : negotiated === RDF_TYPES.LINKSET ? RDF_TYPES.LINKSET
@@ -617,9 +703,39 @@ export async function handleGet(request, reply) {
     // the mashlib '-html' suffix) — mashlib's embedded listing isn't part
     // of the altr: representation family this task scopes (brief: lws+json/
     // linkset/quads/turtle/ld+json).
-    const listingEtag = (request.lwsEnabled && !willMashlib)
+    // Review fix (Task 5): predict the navigator arm's '-nav' suffix HERE —
+    // mirroring getMashlibEtag's predictive '-html' pattern (~line 224) —
+    // BEFORE the deferred If-None-Match check just below, not after it
+    // (the bug: computing '-nav' inside the navigator arm meant it always
+    // ran after that check had already matched against the un-suffixed
+    // etag, so a repeat navigator GET could never 304). willServeNav is
+    // the exact predicate the navigator arm (below) guards on, reused
+    // there instead of recomputed so the emitted header and the 304
+    // comparison can never drift apart. Safe to fold '-nav' into
+    // listingEtag unconditionally: every other branch below that also
+    // reads listingEtag is reachable only when the navigator arm did NOT
+    // fire (it always returns), so the suffix never leaks into a
+    // non-navigator representation's ETag — and a machine lws+json
+    // conditional GET (willServeNav false) keeps comparing against the
+    // un-suffixed etag, so it can never 304 off a stray '-nav' value.
+    const willServeNav = willServeNavigatorView(request);
+    // Review fix (root-view ETag key): the SAME urlPath==='/' && view==='nav'
+    // predicate the render branch below (~line 749) uses to pick the ROOT
+    // STORAGE view over the generic container view — hoisted here, before
+    // the '-nav' suffix is picked, so predict and serve can't drift (same
+    // reasoning as willServeNav itself, one comment block up). Without this,
+    // `/` (container view, reachable whenever the seeded index.html is
+    // absent — seeding is skip-if-exists) and `/?view=nav` (root view)
+    // predicted the identical '-nav' suffix off the same
+    // stats.etag+labeledListingType+visKey inputs despite serving different
+    // bodies, so an ETag minted from one could bogus-304 the other.
+    const willServeRootView = willServeRootStorageView(request, urlPath);
+    const listingEtagBase = (request.lwsEnabled && !willMashlib)
       ? containerListingEtag(stats.etag, labeledListingType, visKey)
       : effectiveEtag;
+    const listingEtag = willServeNav
+      ? variantEtag(listingEtagBase, willServeRootView ? 'navroot' : 'nav')
+      : listingEtagBase;
 
     // Deferred 304 check for container listings (#456) — compared against
     // the representation- and visibility-keyed ETag above (Task 10,
@@ -637,6 +753,107 @@ export async function handleGet(request, reply) {
         reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
         return reply.code(304).send();
       }
+    }
+
+    // Navigator (Task 5, spec 2026-07-15): a typed, WAC-filtered,
+    // server-rendered HTML container view — takes over for every browser-
+    // shaped request once --lws is on (willMashlib above is now scoped to
+    // !request.lwsEnabled for exactly this reason, so the legacy mashlib
+    // block below can never also fire for this same request). Items come
+    // from `entries` (already WAC-filtered above, S1) via the same
+    // generateLwsContainer builder the lws+json branch uses, enriched with
+    // per-member declared rdf:type (readDeclaredTypes) and authorized
+    // alternate-representation "faces" (readAuthorizedRepresentations).
+    if (willServeNav) {
+      const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+      const originStr = new URL(resourceUrl).origin;
+      const isPublicPod = !!request.config?.public;
+      const baseStoragePath = storagePath.endsWith('/') ? storagePath : storagePath + '/';
+      const baseUrlNav = resourceUrl.endsWith('/') ? resourceUrl : resourceUrl + '/';
+      const navListing = generateLwsContainer(resourceUrl, entries || []);
+      const items = await Promise.all(navListing.items.map(async (it) => {
+        const memberStoragePath = baseStoragePath + it.id.slice(baseUrlNav.length);
+        const [rdfTypes, memberReps] = await Promise.all([
+          readDeclaredTypes(storage, memberStoragePath),
+          readAuthorizedRepresentations(storage, memberStoragePath + '.meta', it.id, {
+            origin: originStr, agentWebId, public: isPublicPod,
+          }),
+        ]);
+        // text/html first (a browser reading this listing wants the human
+        // face at the top); everything else keeps its declared order.
+        const faces = (memberReps.alternates || [])
+          .map((r) => ({ href: r.href, format: r.format }))
+          .sort((a, b) => (a.format === 'text/html' ? -1 : b.format === 'text/html' ? 1 : 0));
+        return { ...it, rdfTypes, faces };
+      }));
+
+      // Root/storage view (Task 7, spec 2026-07-15): an explicit `?view=nav`
+      // at the pod root renders the LWS storage description (services,
+      // capabilities, uriSpace prefixes) beside the same WAC-filtered
+      // top-level `items` computed above, instead of the generic container
+      // view below. Gated on urlPath (the raw request path), not
+      // storagePath — subdomain mode would leave storagePath pod-relative
+      // ('/'), but urlPath is always the literal request path. In practice
+      // this branch is reachable only via ?view=nav (the seeded index.html
+      // shadow, deviation (4), intercepts every other browser GET / before
+      // this code is ever reached) — the query check is written explicitly
+      // rather than relying on that invariant. willServeRootView is this
+      // exact predicate, hoisted above (review fix, root-view ETag key) so
+      // the '-navroot' suffix baked into listingEtag and this render choice
+      // can never drift apart — reused directly rather than recomputed.
+      if (willServeRootView) {
+        // Same call the /.well-known/lws-storage route makes (src/server.js)
+        // — resolveStorageDescriptionInputs is the shared helper so the two
+        // can't drift on what they derive from pod-config's uriSpaces.
+        const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
+          await resolveStorageDescriptionInputs(request.podConfig, originStr, request.lwsEnabled);
+        const sd = buildStorageDescription(originStr, {
+          typeIndexEnabled: request.typeIndexEnabled,
+          notificationsEnabled: request.notificationsEnabled,
+          profileIndexPath,
+          voidPath,
+          profileConnegEnabled: request.lwsProfileConneg,
+          referentResolutionEnabled,
+          uriSpacePrefixes,
+          mcpEnabled: request.mcpEnabled,
+          anonRateLimitMax: request.anonRateLimitMax,
+        });
+        const rootHtml = renderRootView({ origin: originStr, sd, items });
+        const rootHeaders = getAllHeaders({
+          isContainer: true,
+          etag: listingEtag,
+          contentType: 'text/html',
+          origin,
+          resourceUrl,
+          connegEnabled,
+          mashlibEnabled: request.mashlibEnabled,
+          lwsEnabled: request.lwsEnabled
+        });
+        rootHeaders['Cache-Control'] = RDF_CACHE_CONTROL;
+        Object.entries(rootHeaders).forEach(([k, v]) => reply.header(k, v));
+        return reply.type('text/html').send(rootHtml);
+      }
+
+      const navConformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
+      // '-nav' is already folded into listingEtag above (predicted before
+      // the deferred If-None-Match check, mirroring getMashlibEtag's
+      // predictive '-html' pattern ~line 223) — reused directly here
+      // rather than recomputed, so the header and the 304 comparison can
+      // never drift apart.
+      const html = renderContainerView({ url: resourceUrl, items, conformsTo: navConformsTo });
+      const headers = getAllHeaders({
+        isContainer: true,
+        etag: listingEtag,
+        contentType: 'text/html',
+        origin,
+        resourceUrl,
+        connegEnabled,
+        mashlibEnabled: request.mashlibEnabled,
+        lwsEnabled: request.lwsEnabled
+      });
+      headers['Cache-Control'] = RDF_CACHE_CONTROL;
+      Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+      return reply.type('text/html').send(html);
     }
 
     const jsonLd = generateContainerJsonLd(resourceUrl, entries || []);
@@ -967,7 +1184,105 @@ export async function handleGet(request, reply) {
     advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
   }
 
-  // Check if we should serve Mashlib data browser
+  // Face dispatch (spec 2026-07-15): a declared text/html alternate is the resource's
+  // human face — browsers 303 there (the fork's alternates are separate resources reached
+  // by redirect, mirroring profile-conneg). ?view=nav opts out. --lws only.
+  // Final-review I3: existence-gated (faceHrefIsLive) — a declared face that
+  // no longer exists falls through to the entity-face arm below instead of
+  // 303ing to a dead target.
+  if (request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
+    const face = advertisedReps?.alternates?.find(
+      (r) => (r.format || '').split(';')[0].trim() === 'text/html');
+    if (face && await faceHrefIsLive(face.href)) return reply.code(303).header('Location', face.href).send();
+  }
+
+  // Generic entity face (Task 6, spec 2026-07-15): a server-rendered nav
+  // view for FILES that have no declared text/html alternate (the face
+  // dispatch above already 303'd there if one exists) — replaces mashlib
+  // for --lws pods. Scoping getMashlibEtag's willServeMashlib to
+  // !request.lwsEnabled (above) means the `else if (shouldServeMashlib(...))`
+  // below is reachable only when !request.lwsEnabled, mirroring the
+  // container's willMashlib gate (~line 617) — same pattern, file side.
+  // Review fix (2026-07-15): by default this arm fires ONLY for data types
+  // (entityFaceViewable — RDF/markdown/text) the browser can't render
+  // better natively; image/video/audio/pdf/octet-stream/etc. fall through
+  // to the raw serving path below, restoring the mashlib precedent
+  // (src/mashlib/index.js:380-382). ?view=nav is the explicit escape hatch —
+  // it forces the entity face for ANY content type, matching what was
+  // asked for. Same predicate predictFileEtag already applied above, so the
+  // ETag emitted here always matches what was predicted.
+  if (request.lwsEnabled && browserWantsHtml(request)
+      && (request.query?.view === 'nav' || entityFaceViewable(storedContentType))) {
+    // Defensive re-check (mirrors the file branch's repeated fileEtag
+    // pattern at ~1002/1040/1303/1336): the early If-None-Match check above
+    // (~line 420) already compares against fileEtag — already '-nav'-suffixed
+    // by predictFileEtag — for the common case, but defers whenever
+    // wouldNotNegotiate or conversionPending is true (a strict, wildcard-less
+    // Accept: text/html, or an RDF-source file). Neither of those deferred
+    // re-checks below (the F3 gate / RDF conversion arms) is ever reached
+    // once this arm's gate (above) is satisfied — this arm always returns
+    // once entered — so this is the ONLY place those deferred cases get a
+    // chance to 304. A request that skips this arm (non-viewable content
+    // type, no ?view=nav) falls through to those same F3/conversion arms
+    // below, which run their own re-check as before.
+    if (ifNoneMatch) {
+      const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
+      if (!check.ok && check.notModified) {
+        reply.header('ETag', fileEtag);
+        reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+        return reply.code(304).send();
+      }
+    }
+    const [types, describedby, conformsTo, provenance] = await Promise.all([
+      readDeclaredTypes(storage, storagePath),
+      describedbyTargets(storage, storagePath + '.meta', resourceUrl),
+      conformsToTargets(storage, storagePath + '.meta', resourceUrl),
+      readProvenance(storage, storagePath),
+    ]);
+    // advertisedReps is already populated above whenever a .meta exists (A1)
+    // or Accept-Profile was negotiated — reuse it rather than re-reading.
+    const reps = advertisedReps || await authorizedRepresentations(request, storagePath, resourceUrl);
+    // Excerpt: first 2000 chars of the stored bytes, text/* only — binary or
+    // otherwise-typed content shows the metadata facts without a body read.
+    // Review fix: size-gated BEFORE the read, mirroring the DATA_ISLAND_MAX_BYTES
+    // precedent (src/mashlib/index.js:24, applied at ~line 1183 above) — a
+    // multi-MB text file would otherwise be read in full just to slice 2000
+    // chars. Larger text files show the metadata facts with no preview.
+    let excerpt = '';
+    if ((storedContentType || '').startsWith('text/') && stats.size <= DATA_ISLAND_MAX_BYTES) {
+      const buf = await storage.read(storagePath);
+      if (buf) excerpt = buf.toString('utf8').slice(0, 2000);
+    }
+    const provenanceLines = provenance ? Object.entries(provenance).map(([k, v]) => `${k}: ${v}`) : [];
+    const html = renderEntityView({
+      url: resourceUrl,
+      types,
+      conformsTo,
+      describedby,
+      provenance: provenanceLines,
+      reps,
+      mediaType: storedContentType || '',
+      excerpt,
+    });
+    const headers = getAllHeaders({
+      isContainer: false,
+      etag: fileEtag,
+      contentType: 'text/html',
+      origin,
+      resourceUrl,
+      connegEnabled,
+      mashlibEnabled: request.mashlibEnabled,
+      lwsEnabled: request.lwsEnabled,
+      chosenProfile,
+      representations: advertisedReps
+    });
+    headers['Cache-Control'] = RDF_CACHE_CONTROL;
+    Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
+    return reply.type('text/html').send(html);
+  }
+
+  // Check if we should serve Mashlib data browser (legacy — reachable only
+  // when !request.lwsEnabled; see the entity-face arm above)
   // Only for RDF resources when Accept: text/html is requested
   if (shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
     // #7 / #344: embed the resource as a JSON-LD data island so
@@ -1611,7 +1926,15 @@ export async function handleHead(request, reply) {
     // A non-HTML Accept under --lws reports as if indexExists were false
     // (real listing's content-type/etag/rel="linkset"), matching what GET
     // actually serves once it falls through to the real listing branch.
-    const shadowActive = indexExists && !(request.lwsEnabled && !acceptsHtml(acceptHeader));
+    // Task 8 (routed fix, review of Task 5/7): `?view=nav` is GET's SECOND
+    // escape (~line 476 `|| request.query?.view === 'nav'`) — an explicit
+    // request for the navigator root view must reach the listing branch
+    // below even when index.html exists and the Accept is HTML-shaped.
+    // Missing here meant a HEAD /?view=nav reported the seeded landing
+    // page's ETag while GET served the root storage view under a
+    // '-navroot' ETag.
+    const shadowActive = indexExists
+      && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav'));
 
     if (negotiate) {
       // HEAD must mirror what GET would emit; otherwise client caches and
@@ -1664,8 +1987,14 @@ export async function handleHead(request, reply) {
       const indexStats = await storage.stat(indexPath);
       headEtag = indexStats?.etag || stats.etag;
       skipProfileNegotiation = true;
-    } else if (shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
-      // Container listing via mashlib — suffix the ETag (#456)
+    } else if (!request.lwsEnabled && shouldServeMashlib(request, request.mashlibEnabled, 'application/ld+json')) {
+      // Container listing via mashlib — suffix the ETag (#456). Scoped to
+      // !request.lwsEnabled (Task 8 routed fix, mirrors GET's `willMashlib`
+      // ~line 646) — the navigator branch below claims every browser-shaped
+      // request once --lws is on, exactly like GET's willServeNav has done
+      // since Task 5. Before this scoping, HEAD predicted this legacy
+      // '-html' mashlib ETag for a --lws pod while GET served the
+      // navigator container/root view under a '-nav'/'-navroot' ETag.
       headEtag = stats.etag.replace(/"$/, '-html"');
       contentType = 'text/html';
       isMashlibResponse = true;
@@ -1674,7 +2003,10 @@ export async function handleHead(request, reply) {
       // Task 10 (probe-#6 F2): mirror GET's representation- and
       // visibility-keyed listing ETag — same repKey-per-contentType map
       // (`contentType` is already final above), same WAC-filtered
-      // visibility hash, so HEAD and GET agree byte-for-byte.
+      // visibility hash, so HEAD and GET agree byte-for-byte. Entries/visKey
+      // are shared by both the navigator branch below (Task 8) and the
+      // machine-listing branch (browserWantsHtml false) — same WAC-filtered
+      // read either way.
       let entries = await storage.listContainer(storagePath);
       let visKey = null;
       if (!request.config?.public) {
@@ -1684,7 +2016,25 @@ export async function handleHead(request, reply) {
         });
         visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
       }
-      headEtag = containerListingEtag(stats.etag, contentType, visKey);
+      if (willServeNavigatorView(request)) {
+        // Task 8 routed fix (review of Task 5/6/7), now sharing the actual
+        // predicate functions with GET (review follow-up) instead of just a
+        // mirrored comment: willServeNavigatorView/willServeRootStorageView
+        // are the SAME functions GET's container branch calls (~line 682/
+        // 693) — a container HEAD from a browser must predict the SAME
+        // navigator response GET serves (Task 5 container view / Task 7
+        // root view), not the legacy plain-listing shape. `contentType`
+        // here is still the negotiated real representation type computed
+        // above (GET's `labeledListingType`) — containerListingEtag keys
+        // off THAT, exactly like GET's listingEtagBase, before the
+        // '-nav'/'-navroot' suffix is folded in.
+        const willServeRootView = willServeRootStorageView(request, urlPath);
+        headEtag = variantEtag(containerListingEtag(stats.etag, contentType, visKey), willServeRootView ? 'navroot' : 'nav');
+        contentType = 'text/html';
+        skipProfileNegotiation = true;
+      } else {
+        headEtag = containerListingEtag(stats.etag, contentType, visKey);
+      }
     }
   } else {
     const { willServeMashlib, effectiveEtag } = getMashlibEtag(request, stats, storagePath);
@@ -1725,9 +2075,16 @@ export async function handleHead(request, reply) {
   const conversionPending = !stats.isDirectory && !isMashlibResponse
     && pendingConversion(request, storagePath, urlPath);
 
-  // Check If-None-Match using the final ETag (#456)
+  // Check If-None-Match using the final ETag (#456). Final-review I1: mirrors
+  // GET's added lws-browser-shaped deferral (same over-approximation
+  // argument) — scoped to !stats.isDirectory because that's the only case
+  // with a later re-check to catch it (the entity-face arm's own re-check,
+  // ~line 2159); a browser-shaped HEAD of a CONTAINER has no face dispatch
+  // and no later re-check, so it must keep resolving its 304 here, exactly
+  // like today.
   const ifNoneMatch = request.headers['if-none-match'];
-  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending) {
+  if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending
+      && !(!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request))) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
@@ -1799,6 +2156,28 @@ export async function handleHead(request, reply) {
     advertisedReps = await authorizedRepresentations(request, storagePath, resourceUrl);
   }
 
+  // Face dispatch (spec 2026-07-15): mirrors the GET dispatch above — files
+  // only (containers have no altr: "face" concept here); HEAD 303 carries no
+  // body. ?view=nav opts out. --lws only.
+  // Final-review I3: existence-gated (faceHrefIsLive), same as GET — a
+  // deleted face falls through to the entity-face arm below, HEAD parity.
+  if (!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
+    const face = advertisedReps?.alternates?.find(
+      (r) => (r.format || '').split(';')[0].trim() === 'text/html');
+    if (face && await faceHrefIsLive(face.href)) return reply.code(303).header('Location', face.href).send();
+  }
+
+  // Task 6 (spec 2026-07-15) HEAD parity: mirrors GET's entity-face arm —
+  // same predicate, same '-nav' headEtag (already folded in by
+  // predictFileEtag above). No body on HEAD, so only contentType/Content-
+  // Length need to reflect it (below); the legacy mashlib branch stays
+  // reachable only when !request.lwsEnabled (isMashlibResponse is already
+  // scoped that way via getMashlibEtag).
+  // Review fix: same entityFaceViewable/?view=nav gate as GET's arm —
+  // storedContentType is already computed above (~line 1894).
+  const isEntityFaceResponse = !stats.isDirectory && request.lwsEnabled && browserWantsHtml(request)
+    && (request.query?.view === 'nav' || entityFaceViewable(storedContentType));
+
   let negotiationConverted = false;
   if (!stats.isDirectory) {
     // Mirror GET's content-type for files — including the negotiated
@@ -1806,6 +2185,21 @@ export async function handleHead(request, reply) {
     // and GET agree (#552, RFC 9110 §9.3.2).
     if (isMashlibResponse) {
       contentType = 'text/html';
+    } else if (isEntityFaceResponse) {
+      // No RDF negotiation, no mashlib — mirrors GET's entity-face arm.
+      // Re-check If-None-Match here (mirroring GET's defensive re-check):
+      // wouldNotNegotiate/conversionPending may have deferred the early
+      // check above, and negotiateHeadFileContentType's own deferred
+      // re-check (below) never runs for this branch.
+      contentType = 'text/html';
+      if (ifNoneMatch) {
+        const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
+        if (!check.ok && check.notModified) {
+          reply.header('ETag', headEtag);
+          reply.header('Vary', getVaryHeader(connegEnabled, request.mashlibEnabled, request.lwsEnabled));
+          return reply.code(304).send();
+        }
+      }
     } else {
       const negotiation = await negotiateHeadFileContentType({
         request,
@@ -1877,10 +2271,10 @@ export async function handleHead(request, reply) {
   }
 
   // Content-Length: only set when the file size matches the response body.
-  // Mashlib HTML and containers are dynamically generated, and a
-  // conneg-converted body (Turtle / re-serialized JSON-LD, #552) has a
-  // different length than the on-disk file — omit rather than lie.
-  if (!stats.isDirectory && !isMashlibResponse && !negotiationConverted) {
+  // Mashlib HTML, the entity face, and containers are dynamically
+  // generated, and a conneg-converted body (Turtle / re-serialized JSON-LD,
+  // #552) has a different length than the on-disk file — omit rather than lie.
+  if (!stats.isDirectory && !isMashlibResponse && !isEntityFaceResponse && !negotiationConverted) {
     headers['Content-Length'] = stats.size;
   }
 

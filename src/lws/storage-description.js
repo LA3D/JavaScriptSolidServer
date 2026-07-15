@@ -1,4 +1,5 @@
 import { prefersPlainJson } from '../rdf/conneg.js';
+import { uriSpacePrefixesFor } from './referent-resolver.js';
 
 const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 
@@ -47,6 +48,27 @@ export function generateStorageDescription(storageRootUrl, services = []) {
     type: 'Storage',
     service: services,
   };
+}
+
+/**
+ * Resolve the pod-config-derived inputs to buildStorageDescription's
+ * referent-resolution capability (Task 7, spec 2026-07-15): reads
+ * profileIndex/void/uriSpaces off the decorated podConfig and derives
+ * referentResolutionEnabled + its uriSpacePrefixes via the SAME
+ * uriSpacePrefixesFor the MCP surface uses. Factored out so the
+ * /.well-known/lws-storage HTTP route (src/server.js) and the navigator
+ * root/storage view (src/handlers/resource.js) can't drift on what they
+ * derive from the SAME uriSpaces config — one call site, not two copies of
+ * the same five lines.
+ * @param {{get: () => Promise<object>}} podConfig
+ * @param {string} origin
+ * @param {boolean} lwsEnabled
+ */
+export async function resolveStorageDescriptionInputs(podConfig, origin, lwsEnabled) {
+  const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
+  const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
+  const uriSpacePrefixes = referentResolutionEnabled ? uriSpacePrefixesFor(uriSpaces, origin) : [];
+  return { profileIndexPath: profileIndex, voidPath, referentResolutionEnabled, uriSpacePrefixes };
 }
 
 /**

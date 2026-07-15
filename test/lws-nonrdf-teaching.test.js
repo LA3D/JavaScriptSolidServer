@@ -55,8 +55,16 @@ describe('lws: teaching 406 on non-RDF sources', () => {
     assert.equal(await headRes.text(), '');
   });
 
+  // Task 6 (spec 2026-07-15): the fixture Accept header used to be a
+  // browser-shaped one ('text/html,...,*/*;q=0.8') even though this test's
+  // whole point (per its title) is the WILDCARD, not the browser shape —
+  // now that a browser-shaped Accept deliberately means "give me the
+  // navigator entity face" under --lws (this suite's server), that old
+  // fixture would hit the entity face instead of exercising F3's
+  // wildcard-satisfies path. Switched to a bare '*/*' to match the title
+  // and keep testing what this test was always meant to test.
   it('markdown + Accept: */* → 200 markdown, unchanged', async () => {
-    const r = await request(`${base}/f3/card.md`, { headers: { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8' }, auth: 'f3' });
+    const r = await request(`${base}/f3/card.md`, { headers: { Accept: '*/*' }, auth: 'f3' });
     assert.equal(r.status, 200);
     assert.equal(r.headers.get('content-type').split(';')[0], 'text/markdown');
   });
