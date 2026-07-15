@@ -110,8 +110,17 @@ const ENTITY_FACE_DATA_TYPES = new Set([
   'text/markdown',
 ]);
 
+// text/html (and xhtml) are excluded from the text/* fallback: an HTML
+// page IS its own human face — wrapping it in the metadata view would (a)
+// hide a stored .html page behind its own facts and (b) break the Task-4
+// declared-face chain (browser GET card.md → 303 → card.md.html must land
+// on the face itself, not its entity wrapper). ?view=nav still shows
+// their metadata on request.
+const ENTITY_FACE_EXCLUDED = new Set(['text/html', 'application/xhtml+xml']);
+
 export function entityFaceViewable(contentType) {
   const baseType = String(contentType || '').split(';')[0].trim().toLowerCase();
+  if (ENTITY_FACE_EXCLUDED.has(baseType)) return false;
   return ENTITY_FACE_DATA_TYPES.has(baseType) || baseType.startsWith('text/');
 }
 

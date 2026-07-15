@@ -216,6 +216,33 @@ describe('lws: navigator entity face — content-type gate (review fix)', () => 
     const body = await r.text();
     assert.doesNotMatch(body, /<pre/, 'a >256KB file must not carry an excerpt preview');
   });
+
+  // Re-review: text/html must be EXCLUDED from entityFaceViewable's text/*
+  // fallback, or the Task-4 chain breaks — browser GET card.md 303s to the
+  // declared card.md.html face, whose GET would then hit the entity-face arm
+  // AGAIN (stored type text/html), making the human face unreachable.
+  it('5. declared-face 303 chain end-to-end: browser GET card.md -> 303 -> the html face ITSELF, not its entity wrapper', async () => {
+    const cardUrl = `${base}/dana/public/wiki/card.md`;
+    const faceUrl = `${base}/dana/public/wiki/card.md.html`;
+    await request('/dana/public/wiki/card.md', {
+      method: 'PUT', headers: { 'Content-Type': 'text/markdown' }, auth: 'dana', body: '# card\n',
+    });
+    await request('/dana/public/wiki/card.md.html', {
+      method: 'PUT', headers: { 'Content-Type': 'text/html' }, auth: 'dana', body: '<h1>FACE</h1>',
+    });
+    await request('/dana/public/wiki/card.md.meta', {
+      method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: 'dana',
+      body: repMeta(cardUrl, faceUrl),
+    });
+    const r = await request('/dana/public/wiki/card.md', {
+      headers: { Accept: BROWSER_ACCEPT }, auth: 'dana', // fetch follows the 303
+    });
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get('content-type') || '', /text\/html/);
+    const body = await r.text();
+    assert.match(body, /<h1>FACE<\/h1>/, 'the declared face\'s own body must be served after the 303');
+    assert.doesNotMatch(body, /machine views/, 'the entity-face chrome must not wrap the declared face');
+  });
 });
 
 describe('lws: navigator entity face — no mashlibCdn (review fix coverage)', () => {
