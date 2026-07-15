@@ -87,6 +87,30 @@ export function renderEntityView({ url, types = [], conformsTo = [], describedby
   return navPage(name, crumbHtml(url), `<h1>${esc(name)}</h1><dl class="meta">${rows}</dl>${prev}`);
 }
 
+// Root/storage view (Task 7, spec 2026-07-15): the navigator's landing page
+// for the pod root, reached only via the explicit `?view=nav` escape (the
+// seeded index.html shadow keeps serving plain `GET /`, deviation (4) —
+// src/handlers/resource.js wires the root-vs-container choice). Renders the
+// LWS storage description (services/capabilities/uriSpace prefixes — the
+// same buildStorageDescription the /.well-known/lws-storage route serves)
+// beside the WAC-filtered top-level listing, instead of the generic
+// renderContainerView Task 5 renders for every other container. Every
+// substrate-controlled string (service types, service endpoints, capability
+// types, uriSpace values, top-level member ids) is escaped — sd is built
+// from pod-config + server enablement flags, items come from the same
+// WAC-filtered listing the container view uses.
+export function renderRootView({ origin, sd, items }) {
+  const cap = (sd.capability ?? []).map((c) => `<li>${esc(c.type ?? c.id ?? '')}${
+    c.uriSpace ? ` — uriSpace: ${[].concat(c.uriSpace).map(esc).join(', ')}` : ''}</li>`).join('');
+  const svc = (sd.service ?? []).map((s) => `<li><a href="${esc(s.serviceEndpoint ?? s.id ?? '#')}">${esc(s.type ?? s.id ?? s.serviceEndpoint)}</a></li>`).join('');
+  const list = items.map((it) => `<li><a href="${esc(it.id)}">${esc(it.id)}</a></li>`).join('');
+  return navPage('pod', `<a href="/?view=nav">pod</a>`,
+    `<h1>${esc(origin)}</h1><h2>Storage</h2><ul>${svc}</ul>` +
+    (cap ? `<h2>Capabilities</h2><ul>${cap}</ul>` : '') +
+    `<h2>Containers</h2><ul>${list}</ul>` +
+    `<p class="muted"><a href="/.well-known/lws-storage">machine view</a></p>`);
+}
+
 // Entity-face content-type gate (review fix, spec 2026-07-15): the default
 // (no ?view=nav) entity face renders only for data types a browser can't
 // already render natively — mirrors mashlib's viewable-content-type set

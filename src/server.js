@@ -36,9 +36,8 @@ import { terminalPlugin } from './terminal/index.js';
 import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
-import { buildStorageDescription, storageDescriptionContentType } from './lws/storage-description.js';
+import { buildStorageDescription, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
 import { makePodConfig } from './lws/pod-config.js';
-import { uriSpacePrefixesFor } from './lws/referent-resolver.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -421,6 +420,12 @@ export function createServer(options = {}) {
   fastify.decorateRequest('singleUser', null);
   fastify.decorateRequest('singleUserName', null);
   fastify.decorateRequest('podConfig', null);
+  // Task 7 (spec 2026-07-15): the navigator root/storage view builds the
+  // SAME buildStorageDescription() call the /.well-known/lws-storage route
+  // makes (src/handlers/resource.js) — it needs these two flags on
+  // `request` for parity, mirroring lwsProfileConneg just below.
+  fastify.decorateRequest('mcpEnabled', null);
+  fastify.decorateRequest('anonRateLimitMax', null);
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
@@ -441,6 +446,8 @@ export function createServer(options = {}) {
     request.liveReloadEnabled = liveReloadEnabled;
     request.singleUser = singleUser;
     request.singleUserName = singleUserName;
+    request.mcpEnabled = mcpEnabled;
+    request.anonRateLimitMax = anonRateLimitMax;
 
     // Extract pod name from subdomain if enabled
     if (subdomainsEnabled && baseDomain) {
@@ -1075,16 +1082,17 @@ export function createServer(options = {}) {
       // storage-description resource ctx (src/mcp/index.js) — otherwise HTTP
       // under-advertises NotificationService when liveReload is on but
       // notifications is off.
-      const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
-      const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
       // Task 10: recognition prefixes for the capability (void:uriSpace form,
-      // {origin}/{pathPrefix}). uriSpacePrefixesFor mirrors resolveReferent's
-      // FULL guard — string pathPrefix ending in '/' AND string container — so
-      // a malformed uriSpaces entry that resolveReferent would skip (e.g. a
-      // pathPrefix with no container) is never advertised as recognizable
-      // either. Shared with the MCP surface (src/mcp/index.js).
-      const uriSpacePrefixes = referentResolutionEnabled ? uriSpacePrefixesFor(uriSpaces, origin) : [];
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath: profileIndex, voidPath, profileConnegEnabled, referentResolutionEnabled, uriSpacePrefixes, mcpEnabled, anonRateLimitMax });
+      // {origin}/{pathPrefix}). resolveStorageDescriptionInputs mirrors
+      // resolveReferent's FULL guard — string pathPrefix ending in '/' AND
+      // string container — so a malformed uriSpaces entry that
+      // resolveReferent would skip (e.g. a pathPrefix with no container) is
+      // never advertised as recognizable either. Task 7: the SAME helper
+      // now also backs the navigator root/storage view (src/handlers/
+      // resource.js), so this route and that view can't drift.
+      const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
+        await resolveStorageDescriptionInputs(podConfig, origin, lwsEnabled);
+      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled, uriSpacePrefixes, mcpEnabled, anonRateLimitMax });
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.

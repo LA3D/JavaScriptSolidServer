@@ -37,7 +37,8 @@ import { parseTypeLinks, typeStorePath, readDeclaredTypes, readProvenance } from
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
-import { renderContainerView, renderEntityView, entityFaceViewable } from '../navigator/views.js';
+import { renderContainerView, renderEntityView, renderRootView, entityFaceViewable } from '../navigator/views.js';
+import { buildStorageDescription, resolveStorageDescriptionInputs } from '../lws/storage-description.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -733,6 +734,51 @@ export async function handleGet(request, reply) {
           .sort((a, b) => (a.format === 'text/html' ? -1 : b.format === 'text/html' ? 1 : 0));
         return { ...it, rdfTypes, faces };
       }));
+
+      // Root/storage view (Task 7, spec 2026-07-15): an explicit `?view=nav`
+      // at the pod root renders the LWS storage description (services,
+      // capabilities, uriSpace prefixes) beside the same WAC-filtered
+      // top-level `items` computed above, instead of the generic container
+      // view below. Gated on urlPath (the raw request path), not
+      // storagePath — subdomain mode would leave storagePath pod-relative
+      // ('/'), but urlPath is always the literal request path. In practice
+      // this branch is reachable only via ?view=nav (the seeded index.html
+      // shadow, deviation (4), intercepts every other browser GET / before
+      // this code is ever reached) — the query check is written explicitly
+      // rather than relying on that invariant.
+      if (urlPath === '/' && request.query?.view === 'nav') {
+        // Same call the /.well-known/lws-storage route makes (src/server.js)
+        // — resolveStorageDescriptionInputs is the shared helper so the two
+        // can't drift on what they derive from pod-config's uriSpaces.
+        const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
+          await resolveStorageDescriptionInputs(request.podConfig, originStr, request.lwsEnabled);
+        const sd = buildStorageDescription(originStr, {
+          typeIndexEnabled: request.typeIndexEnabled,
+          notificationsEnabled: request.notificationsEnabled,
+          profileIndexPath,
+          voidPath,
+          profileConnegEnabled: request.lwsProfileConneg,
+          referentResolutionEnabled,
+          uriSpacePrefixes,
+          mcpEnabled: request.mcpEnabled,
+          anonRateLimitMax: request.anonRateLimitMax,
+        });
+        const rootHtml = renderRootView({ origin: originStr, sd, items });
+        const rootHeaders = getAllHeaders({
+          isContainer: true,
+          etag: listingEtag,
+          contentType: 'text/html',
+          origin,
+          resourceUrl,
+          connegEnabled,
+          mashlibEnabled: request.mashlibEnabled,
+          lwsEnabled: request.lwsEnabled
+        });
+        rootHeaders['Cache-Control'] = RDF_CACHE_CONTROL;
+        Object.entries(rootHeaders).forEach(([k, v]) => reply.header(k, v));
+        return reply.type('text/html').send(rootHtml);
+      }
+
       const navConformsTo = await conformsToTargets(storage, storagePath + '.meta', resourceUrl);
       // '-nav' is already folded into listingEtag above (predicted before
       // the deferred If-None-Match check, mirroring getMashlibEtag's
