@@ -74,3 +74,64 @@ describe('lws: navigator container HEAD/GET parity (Task 8 routed fix)', () => {
     assert.match(headRes.headers.get('etag') || '', /-navroot"$/, 'HEAD must predict the root-view -navroot ETag');
   });
 });
+
+// Brief's own scope (spec/task-8-brief.md): Vary: Accept once --lws media-
+// type dispatch exists, plus pins that nothing serves mashlib under --lws
+// and that --lws-off legacy behavior stays byte-identical. getVaryHeader
+// (src/rdf/conneg.js) already threads request.lwsEnabled into every
+// getAllHeaders-driven response — these pins were GREEN on first write
+// (no getVaryHeader change needed); they lock the behavior in.
+describe('lws: navigator parity pins — Vary: Accept + mashlib is truly gone', () => {
+  let base;
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true, mashlibCdn: true });
+    base = getBaseUrl();
+    await createTestPod('alice');
+    await request('/alice/public/wiki/x.md', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown', Link: `<${NOTE_TYPE}>; rel="type"` },
+      auth: 'alice',
+      body: '# hello\n',
+    });
+  });
+  after(stopTestServer);
+
+  it('lws on: md resource browser GET carries Vary containing Accept', async () => {
+    const r = await request('/alice/public/wiki/x.md', { headers: { Accept: BROWSER_ACCEPT }, auth: 'alice' });
+    assertStatus(r, 200);
+    const vary = r.headers.get('vary') || '';
+    assert.match(vary, /\bAccept\b/, 'Vary must include Accept once media-type dispatch exists under --lws');
+  });
+
+  it('lws on: nothing serves the mashlib wrapper — md file, container, root all navigator/entity-face, no marker', async () => {
+    const file = await request('/alice/public/wiki/x.md', { headers: { Accept: BROWSER_ACCEPT }, auth: 'alice' });
+    const container = await request('/alice/public/wiki/', { headers: { Accept: BROWSER_ACCEPT }, auth: 'alice' });
+    const root = await request('/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
+    for (const r of [file, container, root]) {
+      assertStatus(r, 200);
+      const body = await r.text();
+      assert.doesNotMatch(body, /databrowser|mashlib/i, 'no mashlib/databrowser marker anywhere under --lws');
+    }
+  });
+});
+
+describe('lws: navigator parity pins — lws OFF legacy byte-identity', () => {
+  before(async () => {
+    await startTestServer({ mashlibCdn: true });
+    await createTestPod('carol4');
+    await request('/carol4/public/x.md', {
+      method: 'PUT', headers: { 'Content-Type': 'text/markdown' }, auth: 'carol4', body: '# x\n',
+    });
+  });
+  after(stopTestServer);
+
+  it('lws off: md file browser Accept -> mashlib wrapper served; Vary does NOT contain Accept-Profile', async () => {
+    const r = await request('/carol4/public/x.md', { headers: { Accept: BROWSER_ACCEPT }, auth: 'carol4' });
+    assertStatus(r, 200);
+    const body = await r.text();
+    assert.match(body, /runDataBrowser|mashlib\.min\.js/, 'mashlib wrapper must still be served with --lws off');
+    const vary = r.headers.get('vary') || '';
+    assert.doesNotMatch(vary, /Accept-Profile/, 'legacy pin: --lws off must never advertise Accept-Profile in Vary');
+  });
+});
