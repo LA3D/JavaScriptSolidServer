@@ -1461,6 +1461,9 @@ export function createServer(options = {}) {
     await storage.createContainer('/settings/');
     await storage.createContainer('/profile/');
 
+    const { captureDeclaredTypes, LWS_STORAGE } = await import('./lws/type-metadata.js');
+    await captureDeclaredTypes(storage, '/', [LWS_STORAGE]);       // root-pod is its own storage
+
     // Generate the owner key in memory up-front (when --provision-keys
     // is set) so its VM can be injected into the WebID profile that
     // gets written last. On-disk persistence of the secret happens

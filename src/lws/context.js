@@ -7,7 +7,7 @@ export const LWS_CONTEXT_OBJECT = {
   lws: 'https://www.w3.org/ns/lws#', as: 'https://www.w3.org/ns/activitystreams#',
   schema: 'https://schema.org/', xs: 'http://www.w3.org/2001/XMLSchema#',
   id: '@id', type: '@type',
-  Container: 'lws:Container', DataResource: 'lws:DataResource',
+  Container: 'lws:Container', DataResource: 'lws:DataResource', Storage: 'lws:Storage',
   items: 'lws:items', totalItems: 'as:totalItems', mediaType: 'as:mediaType',
   size: { '@id': 'schema:size', '@type': 'xs:long' },
   modified: { '@id': 'as:updated', '@type': 'xs:dateTime' },

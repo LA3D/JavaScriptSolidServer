@@ -9,7 +9,7 @@ import { createToken } from '../auth/token.js';
 import { canAcceptInput, toJsonLd, RDF_TYPES } from '../rdf/conneg.js';
 import { emitChange } from '../notifications/events.js';
 import { constraintProblem } from '../lws/admission.js';
-import { parseTypeLinks } from '../lws/type-metadata.js';
+import { parseTypeLinks, captureDeclaredTypes, LWS_STORAGE } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { extensionForRdfType } from '../lws/write-consistency.js';
 
@@ -244,6 +244,7 @@ export async function createPodStructure(name, webId, podUri, issuer, defaultQuo
   // Create pod directory structure
   // Pod settings directory
   await storage.createContainer(podPath);
+  await captureDeclaredTypes(storage, podPath, [LWS_STORAGE]);   // storage-root marker (multi-tenant)
   await storage.createContainer(`${podPath}inbox/`);
   await storage.createContainer(`${podPath}public/`);
   await storage.createContainer(`${podPath}private/`);

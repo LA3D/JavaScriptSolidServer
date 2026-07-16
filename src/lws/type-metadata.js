@@ -4,6 +4,11 @@
 // client-managed .meta/Description Resource.
 import { isAbsoluteUri } from './type-index.js';
 
+// Multi-tenant storage round: the marker stamped on every pod root's
+// .lwstypes at provisioning, so a storage-resolver can find the tenant
+// boundary by type rather than by pod-name convention.
+export const LWS_STORAGE = 'https://www.w3.org/ns/lws#Storage';
+
 export function typeStorePath(storagePath) {
   return storagePath + '.lwstypes';
 }
