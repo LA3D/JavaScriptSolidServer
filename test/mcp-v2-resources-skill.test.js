@@ -9,10 +9,20 @@ async function read(pod, uri, token) {
   return body;
 }
 
-test('/.well-known/lws-storage returns a type:Storage doc', async (t) => {
+// Multi-tenant round (Task A5, D5 -> A7 parity): the well-known is now a
+// ServerIndex roster; following its storage[].storageDescription entry lands
+// on the per-storage type:Storage doc a pre-multi-tenant client expected
+// directly at the well-known.
+test('/.well-known/lws-storage returns a ServerIndex; following storageDescription returns the type:Storage doc', async (t) => {
   const pod = await startLwsPod(t);
-  const body = await read(pod, `${pod.base}/.well-known/lws-storage`, ownerBearer(pod));
-  const sd = JSON.parse(body.result.contents[0].text);
+  const idxBody = await read(pod, `${pod.base}/.well-known/lws-storage`, ownerBearer(pod));
+  const idx = JSON.parse(idxBody.result.contents[0].text);
+  assert.equal(idx.type, 'ServerIndex');
+  const entry = idx.storage.find(s => s.id.endsWith(`/${pod.podName}/`));
+  assert.ok(entry, 'ServerIndex must list the pod storage');
+
+  const sdBody = await read(pod, entry.storageDescription, ownerBearer(pod));
+  const sd = JSON.parse(sdBody.result.contents[0].text);
   assert.equal(sd.type, 'Storage');
   assert.ok((sd.service || []).some(s => s.type === 'TypeSearchService'));
 });

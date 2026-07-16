@@ -44,7 +44,9 @@ test('localLinks: file gets up + storageDescription; describedby only when a sha
   const ctx = { ...ownerCtx(pod), lwsEnabled: true };
   const links = await localLinks(`/${pod.podName}/notes/a`, ctx);
   assert.equal(links.up, `${pod.origin}/${pod.podName}/notes/`);
-  assert.equal(links.storageDescription, `${pod.origin}/.well-known/lws-storage`);
+  // Multi-tenant round (Task A7): storageDescription points at the OWNING
+  // storage's per-pod description, not the origin well-known (D5/A5).
+  assert.equal(links.storageDescription, `${pod.origin}/${pod.podName}/lws-storage`);
   assert.equal(links.describedby, undefined);
 });
 
@@ -74,7 +76,8 @@ test('read_resource local: body block preserves @context; links block carries up
   assert.ok(body['@context']);                                  // structured, not enveloped
   const meta = JSON.parse(res.content[1].text);
   assert.equal(meta.links.up, `${p.origin}/${p.podName}/`);
-  assert.equal(meta.links.storageDescription, `${p.origin}/.well-known/lws-storage`);
+  // Multi-tenant round (Task A7): per-storage, not the origin well-known.
+  assert.equal(meta.links.storageDescription, `${p.origin}/${p.podName}/lws-storage`);
 });
 
 test('read_resource local: WAC denial is a teaching error, not a throw (no-oracle preserved)', async (t) => {

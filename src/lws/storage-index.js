@@ -9,7 +9,6 @@
 // for regular container listings). Reuses filterReadableEntries rather than
 // hand-rolling ACL checks — one WAC-filter implementation for every listing
 // surface in the server.
-import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { storageRootFor } from './storage-resolver.js';
 import { filterReadableEntries } from './authorized-listing.js';
 
@@ -18,11 +17,19 @@ import { filterReadableEntries } from './authorized-listing.js';
  * top-level `/` directory entry carrying the lws:Storage marker AND on
  * which the requester has READ access (checked on the root container
  * itself, mirroring a normal container-listing entry check).
+ *
+ * Takes `{ origin, webId }` rather than a fastify `request` (Task A7): the
+ * MCP surface has no fastify request to resolve identity from — its webId
+ * is already resolved onto `ctx.webId` by the /mcp route — so this stays a
+ * plain-data signature both the HTTP well-known route (server.js, which
+ * resolves webId itself via getWebIdFromRequestAsync) and MCP's
+ * resources.js (which already has ctx.webId) can call identically. One
+ * roster implementation, two surfaces agreeing.
  * @param {{listContainer:Function}} storage
- * @param {import('fastify').FastifyRequest} request
+ * @param {{origin:string, webId:string|null}} requester
  * @returns {Promise<string[]>}
  */
-export async function listVisibleStorageRoots(storage, request) {
+export async function listVisibleStorageRoots(storage, { origin, webId }) {
   const entries = await storage.listContainer('/');
   const dirs = (entries || []).filter((e) => e.isDirectory);
   const marked = [];
@@ -30,10 +37,8 @@ export async function listVisibleStorageRoots(storage, request) {
     if (await storageRootFor(storage, `/${e.name}/`)) marked.push(e);
   }
   if (!marked.length) return [];
-  const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
-  const origin = `${request.protocol}://${request.hostname}`;
   const readable = await filterReadableEntries({
-    entries: marked, containerUrl: `${origin}/`, containerStoragePath: '/', agentWebId,
+    entries: marked, containerUrl: `${origin}/`, containerStoragePath: '/', agentWebId: webId ?? null,
   });
   return readable.map((e) => `/${e.name}/`);
 }

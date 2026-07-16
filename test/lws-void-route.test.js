@@ -113,26 +113,25 @@ describe('lws: /.well-known/void rung', () => {
   });
 
   // Same drift-guard as test/mcp-lws-read.test.js's profileIndex case:
-  // proves the HTTP route and the MCP ctx (src/mcp/index.js, reading the
-  // SAME shared podConfig instance server.js built) both advertise the same
+  // proves the HTTP route and the MCP ctx (src/mcp/resources.js, via
+  // ctx.podConfigFor — Task A7, mirrors request.podConfigFor off the SAME
+  // podConfigResolver instance server.js built, A3) both advertise the same
   // VoidService entry rather than one of them silently omitting it.
   //
-  // KNOWN GAP (multi-tenant round, Task A5, D5): the HTTP
-  // /.well-known/lws-storage route now returns a ServerIndex roster, not a
-  // Storage document — an intentional shape change. MCP's FIXED_SUFFIX
-  // resolver (src/mcp/resources.js readStorageDescription) still mirrors
-  // the pre-multi-tenant Storage shape at that same URI; it hasn't been
-  // repointed to the new per-storage /:pod/lws-storage route (out of A5's
-  // scope — server.js + storage-description.js only, no mcp/ changes).
-  // Skipped rather than asserting the (undesired) divergence as "expected" —
-  // tracked as a round follow-up (MCP resources parity for the per-storage
-  // description).
+  // Task A7 (multi-tenant MCP parity — un-skipped/repointed): the HTTP
+  // /.well-known/lws-storage route returns a ServerIndex roster, not a
+  // Storage document (Task A5, D5) — an intentional shape change. The
+  // meaningful "mirrors" comparison now happens at the per-storage
+  // /:pod/lws-storage document, which MCP's resources.js readPerStorage-
+  // Description now resolves too (previously skip()'d with a documented
+  // KNOWN GAP; the gap is closed).
   describe('MCP parity (void configured, mcp on)', () => {
     let base;
 
     before(async () => {
       await startTestServer({ lws: true, mcp: true, lwsConfig: CONFIG_PATH });
       base = getBaseUrl();
+      await createTestPod('alice');
       await storage.write(CONFIG_PATH, JSON.stringify({ void: '/alice/profiles/void.jsonld' }));
     });
 
@@ -140,8 +139,8 @@ describe('lws: /.well-known/void rung', () => {
       await stopTestServer();
     });
 
-    it.skip('the storage-description resource mirrors /.well-known/lws-storage with void configured', async () => {
-      const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+    it('the per-storage description resource mirrors /alice/lws-storage with void configured', async () => {
+      const httpRes = await fetch(`${base}/alice/lws-storage`);
       const httpBody = await httpRes.json();
 
       const mcpRes = await fetch(`${base}/mcp`, {
@@ -149,7 +148,7 @@ describe('lws: /.well-known/void rung', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jsonrpc: '2.0', id: 1, method: 'resources/read',
-          params: { uri: `${base}/.well-known/lws-storage` },
+          params: { uri: `${base}/alice/lws-storage` },
         }),
       });
       const mcpJson = await mcpRes.json();

@@ -27,7 +27,6 @@ import { listToolsForRpc, callTool, TOOLS } from './tools.js';
 import { readResource } from './resources.js';
 import { listFixed, RESOURCE_TEMPLATE } from './surface.js';
 import { ResourceError } from './errors.js';
-import { uriSpacePrefixesFor } from '../lws/referent-resolver.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { hasLwsCidAuth } from '../auth/lws-cid.js';
 import { hasSolidOidcAuth } from '../auth/solid-oidc.js';
@@ -203,13 +202,19 @@ export async function mcpPlugin(fastify, options = {}) {
   // Credential-tier seam (task-6). Threaded from server.js the same way as
   // routeOptions — createServer({ mcpCredentialPolicy }) -> here.
   const credentialPolicy = options.credentialPolicy || 'trusted-local';
-  // Spec §4b: the SAME podConfig instance server.js built for the HTTP
-  // storage-description/void routes — sharing it (rather than making a
-  // second makePodConfig) is what keeps the HTTP and MCP views of
-  // profileIndex/void from ever diverging. options.podConfig is always
-  // present (server.js always constructs one); the fallback here only
-  // covers direct mcpPlugin-registration call sites (e.g. tests) that don't.
-  const podConfig = options.podConfig || { get: async () => ({}) };
+  // Multi-tenant round (Task A7): the storage-description resource is now
+  // per-storage (mirrors the HTTP /:pod/lws-storage route, A5), so ctx needs
+  // a per-root config RESOLVER, not one server-wide podConfig snapshot — the
+  // owning storage isn't known until a specific resource URI is read, which
+  // happens per JSON-RPC message, not once per /mcp POST. Sharing server.js's
+  // SAME podConfigResolver instance (rather than building a second one) is
+  // what keeps the HTTP and MCP views of profileIndex/void from ever
+  // diverging — same discipline the old single podConfig used, generalized
+  // to per-storage. options.podConfigResolver is always present (server.js
+  // always constructs one under --lws); the fallback here only covers direct
+  // mcpPlugin-registration call sites (e.g. tests) that don't.
+  const podConfigResolver = options.podConfigResolver || null;
+  const podConfigFor = (root) => (podConfigResolver ? podConfigResolver.for(root) : { get: async () => ({}) });
   // Threaded from server.js's anonRateLimitMax (same const the HTTP
   // storage-description route reads) so the McpService hint's budget
   // sentence can never drift between the two surfaces (task 6, parity).
@@ -245,15 +250,8 @@ export async function mcpPlugin(fastify, options = {}) {
     const depthHdr = request.headers['mcp-federation-depth'];
     const federationDepth = depthHdr ? parseInt(depthHdr, 10) || 0 : 0;
 
-    const { profileIndex, void: voidPath, uriSpaces } = await podConfig.get();
     const lwsEnabled = request.lwsEnabled || false;
-    const referentResolutionEnabled = lwsEnabled && Array.isArray(uriSpaces) && uriSpaces.length > 0;
     const origin = originOf(request);
-    // Task 10: same recognition-prefix computation as the HTTP surface
-    // (server.js) — the SAME uriSpacePrefixesFor helper on identical input, so
-    // the two surfaces can never drift on the advertised uriSpace array (and
-    // both mirror resolveReferent's guard, incl. the required container).
-    const uriSpacePrefixes = referentResolutionEnabled ? uriSpacePrefixesFor(uriSpaces, origin) : [];
     const ctx = {
       webId: webId || null,
       origin,
@@ -261,12 +259,13 @@ export async function mcpPlugin(fastify, options = {}) {
       federationPrivate,
       lwsEnabled,
       typeIndexEnabled: request.typeIndexEnabled || false,
-      profileIndexPath: profileIndex || null,
-      voidPath: voidPath || null,
       notificationsEnabled: request.notificationsEnabled || false,
       profileConnegEnabled: request.lwsProfileConneg || false,
-      referentResolutionEnabled,
-      uriSpacePrefixes,
+      // Per-storage config resolver (Task A7) — mirrors request.podConfigFor
+      // (A3/server.js): resources.js's readStorageDescription resolves the
+      // OWNING storage's {profileIndex, void, uriSpaces} from this per the
+      // addressed resource's root, rather than one config baked in here.
+      podConfigFor,
       anonRateLimitMax
     };
 

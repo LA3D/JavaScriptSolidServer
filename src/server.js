@@ -640,7 +640,11 @@ export function createServer(options = {}) {
   // routes registered directly/synchronously on this outer instance).
   if (mcpEnabled) {
     const mcpRateLimit = { config: { rateLimit: trustAwareRateLimit(writeRateLimitMax, anonRateLimitMax) } };
-    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfig, anonRateLimitMax, federationPrivate });
+    // podConfigResolver (A3/A7), not the legacy single podConfig — the MCP
+    // storage-description resource is per-storage now (Task A7), so it needs
+    // the SAME per-root resolver the HTTP /:pod/lws-storage route uses
+    // (request.podConfigFor), not one server-wide config instance.
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfigResolver, anonRateLimitMax, federationPrivate });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
@@ -1130,7 +1134,11 @@ export function createServer(options = {}) {
       // P3 (LWS media-type MUST): label-only conneg — same body, whichever
       // of lws+json/ld+json/json spelling was asked for (storage-description.js).
       reply.type(storageDescriptionContentType(request.headers.accept));
-      const roots = await listVisibleStorageRoots(storage, request);
+      // listVisibleStorageRoots takes plain { origin, webId } (Task A7) so
+      // the MCP surface (src/mcp/resources.js) can call the SAME roster
+      // helper without a fastify request to resolve identity from.
+      const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+      const roots = await listVisibleStorageRoots(storage, { origin, webId });
       return buildServerIndex(origin, roots.map((root) => ({ root })));
     });
     // Block writes — this is a read-only well-known resource.

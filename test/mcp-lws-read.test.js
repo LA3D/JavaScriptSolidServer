@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { collectAuthorizedResources } from '../src/lws/authorized-resources.js';
 import { callTool } from '../src/mcp/tools.js';
-import { startLwsPod, ownerCtx, seedTyped, startTestServer, stopTestServer, getBaseUrl, request } from './helpers.js';
+import { startLwsPod, ownerCtx, seedTyped, startTestServer, stopTestServer, getBaseUrl, request, createTestPod } from './helpers.js';
 import { generatePrivateAcl, serializeAcl } from '../src/wac/parser.js';
 import * as storage from '../src/storage/filesystem.js';
 
@@ -108,29 +108,29 @@ test('I2: a PUBLIC member .lwstypes stays anon-readable (no over-blocking)', asy
   assert.match(res.content[0].text, /https:\/\/ex\/Note/);
 });
 
-// KNOWN GAP (multi-tenant round, Task A5, D5): every "mirrors
-// /.well-known/lws-storage" test below (5 total, through the end of this
-// file) asserts byte-identity between the HTTP well-known route and MCP's
-// resources/read of the SAME URI. That premise no longer holds — the HTTP
-// route now returns a ServerIndex roster (no `service`/`capability` at
-// all), while MCP's FIXED_SUFFIX resolver (src/mcp/resources.js
-// readStorageDescription) still mirrors the pre-multi-tenant Storage shape
-// via buildStorageDescription; it hasn't been repointed to the new
-// per-storage /:pod/lws-storage route (out of A5's scope — server.js +
-// storage-description.js only, no mcp/ changes). Skipped rather than
-// asserting the (undesired) divergence as "expected" — tracked as a round
-// follow-up (MCP resources parity for the per-storage description).
+// Task A7 (multi-tenant MCP parity — un-skipped/repointed): every "mirrors"
+// test below (5 total, through the end of this file) asserts byte-identity
+// between an HTTP storage-description route and MCP's resources/read of the
+// SAME URI. Task A5 (D5) made the WELL-KNOWN a ServerIndex roster — no
+// `service`/`capability` at all — so the meaningful "mirrors" comparison now
+// happens one hop down, at the per-storage /:pod/lws-storage document (both
+// surfaces resolve it via the SAME buildStorageDescriptionFor +
+// resolveStorageDescriptionInputs, src/lws/storage-description.js). MCP's
+// resources.js now repoints the well-known to readServerIndex and adds
+// readPerStorageDescription for /:pod/lws-storage (Task A7) — these tests
+// were previously skip()'d with a documented KNOWN GAP; the gap is closed.
 //
 // Round-trips through the real /mcp HTTP route (not a hand-built ctx) so
 // this actually exercises the typeIndexEnabled/notificationsEnabled wiring
-// from request -> ctx -> buildStorageDescription, proving the MCP Resource
-// and the HTTP /.well-known/lws-storage route can't drift apart.
-test.skip('the storage-description resource mirrors /.well-known/lws-storage', async (t) => {
+// from request -> ctx -> buildStorageDescriptionFor, proving the MCP
+// Resource and the HTTP /:pod/lws-storage route can't drift apart.
+test('the per-storage description resource mirrors /:pod/lws-storage', async (t) => {
   await startTestServer({ lws: true, mcp: true });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
+  await createTestPod('alice');
 
-  const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+  const httpRes = await fetch(`${base}/alice/lws-storage`);
   const httpBody = await httpRes.json();
 
   const mcpRes = await fetch(`${base}/mcp`, {
@@ -138,7 +138,7 @@ test.skip('the storage-description resource mirrors /.well-known/lws-storage', a
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'resources/read',
-      params: { uri: `${base}/.well-known/lws-storage` },
+      params: { uri: `${base}/alice/lws-storage` },
     }),
   });
   const mcpJson = await mcpRes.json();
@@ -159,18 +159,19 @@ test.skip('the storage-description resource mirrors /.well-known/lws-storage', a
 });
 
 // Same drift-guard as above, for profileConnegEnabled (Task 6 review fix):
-// buildStorageDescription now takes profileConnegEnabled and the HTTP route
-// passes it (src/server.js ~1054), but until this fix the MCP ctx
-// (src/mcp/index.js) never read request.lwsProfileConneg, so it fell back to
-// buildStorageDescription's own destructured default (false) and silently
-// dropped the ContentNegotiation capability. --lws defaults profileConneg on
-// (src/server.js:111), so this proves the MCP view carries capability[] too.
-test.skip('the storage-description resource mirrors /.well-known/lws-storage capability[] (profile conneg)', async (t) => {
+// buildStorageDescriptionFor takes profileConnegEnabled and the HTTP route
+// passes it (src/server.js's /:pod/lws-storage handler), and the MCP ctx
+// (src/mcp/resources.js's readPerStorageDescription) reads the SAME
+// ctx.profileConnegEnabled (request.lwsProfileConneg). --lws defaults
+// profileConneg on (src/server.js:111), so this proves the MCP view carries
+// capability[] too.
+test('the per-storage description resource mirrors /:pod/lws-storage capability[] (profile conneg)', async (t) => {
   await startTestServer({ lws: true, mcp: true });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
+  await createTestPod('alice');
 
-  const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+  const httpRes = await fetch(`${base}/alice/lws-storage`);
   const httpBody = await httpRes.json();
 
   const mcpRes = await fetch(`${base}/mcp`, {
@@ -178,7 +179,7 @@ test.skip('the storage-description resource mirrors /.well-known/lws-storage cap
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'resources/read',
-      params: { uri: `${base}/.well-known/lws-storage` },
+      params: { uri: `${base}/alice/lws-storage` },
     }),
   });
   const mcpJson = await mcpRes.json();
@@ -191,19 +192,23 @@ test.skip('the storage-description resource mirrors /.well-known/lws-storage cap
   assert.deepEqual(resourceBody.capability, httpBody.capability);
 });
 
-// Same drift-guard as above, for the --lws-config profileIndex pointer:
-// proves the HTTP route (src/server.js, the storage-description route) and
-// the MCP ctx (src/mcp/index.js, reading the SAME shared podConfig instance
-// server.js built) both advertise the same ProfileIndexService entry rather
-// than one of them silently omitting it.
-test.skip('the storage-description resource mirrors /.well-known/lws-storage with profileIndex configured', async (t) => {
-  const CONFIG_PATH = '/alice/profiles/pod-config.jsonld';
-  await startTestServer({ lws: true, mcp: true, lwsConfig: CONFIG_PATH });
+// Same drift-guard as above, for the per-storage pod-config's profileIndex
+// pointer: proves the HTTP route (src/server.js's /:pod/lws-storage handler,
+// via request.podConfigFor) and the MCP ctx (src/mcp/resources.js, via
+// ctx.podConfigFor — Task A7, mirrors request.podConfigFor off the SAME
+// podConfigResolver instance server.js built, A3) both advertise the same
+// ProfileIndexService entry rather than one of them silently omitting it.
+// Per-storage config always resolves at the FIXED relative convention
+// (profiles/pod-config.jsonld under the storage root, C2 review fix) —
+// independent of --lws-config — so no lwsConfig option is passed here.
+test('the per-storage description resource mirrors /:pod/lws-storage with profileIndex configured', async (t) => {
+  await startTestServer({ lws: true, mcp: true });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
-  await storage.write(CONFIG_PATH, JSON.stringify({ profileIndex: '/alice/profiles/index.jsonld' }));
+  await createTestPod('alice');
+  await storage.write('/alice/profiles/pod-config.jsonld', JSON.stringify({ profileIndex: '/alice/profiles/index.jsonld' }));
 
-  const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+  const httpRes = await fetch(`${base}/alice/lws-storage`);
   const httpBody = await httpRes.json();
 
   const mcpRes = await fetch(`${base}/mcp`, {
@@ -211,7 +216,7 @@ test.skip('the storage-description resource mirrors /.well-known/lws-storage wit
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'resources/read',
-      params: { uri: `${base}/.well-known/lws-storage` },
+      params: { uri: `${base}/alice/lws-storage` },
     }),
   });
   const mcpJson = await mcpRes.json();
@@ -230,12 +235,13 @@ test.skip('the storage-description resource mirrors /.well-known/lws-storage wit
 // under-advertised NotificationService while the MCP ctx (which reads
 // request.notificationsEnabled) correctly advertised it — this proves both
 // surfaces now agree, matching actual service registration.
-test.skip('the storage-description resource and HTTP route agree when liveReload is on but notifications is off', async (t) => {
+test('the per-storage description resource and HTTP route agree when liveReload is on but notifications is off', async (t) => {
   await startTestServer({ lws: true, mcp: true, liveReload: true, notifications: false });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
+  await createTestPod('alice');
 
-  const httpRes = await fetch(`${base}/.well-known/lws-storage`);
+  const httpRes = await fetch(`${base}/alice/lws-storage`);
   const httpBody = await httpRes.json();
 
   const mcpRes = await fetch(`${base}/mcp`, {
@@ -243,7 +249,7 @@ test.skip('the storage-description resource and HTTP route agree when liveReload
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'resources/read',
-      params: { uri: `${base}/.well-known/lws-storage` },
+      params: { uri: `${base}/alice/lws-storage` },
     }),
   });
   const mcpJson = await mcpRes.json();
@@ -254,4 +260,36 @@ test.skip('the storage-description resource and HTTP route agree when liveReload
   assert.equal(httpHasNotify, true, 'HTTP route must advertise NotificationService when liveReload is on');
   assert.equal(mcpHasNotify, true, 'MCP ctx must advertise NotificationService when liveReload is on');
   assert.deepEqual(resourceBody.service, httpBody.service);
+});
+
+// Task A7, SECURITY-PARITY-CRITICAL: mirrors A5's C3 HTTP fix (GET
+// /:pod/lws-storage on a PRIVATE pod re-checks READ on the pod root, test/
+// lws-storage-description-route.test.js "on a PRIVATE pod" describe) on the
+// MCP surface. Before this task, MCP's readStorageDescription ignored the
+// addressed pod entirely (it always answered from ctx's single podConfig/
+// origin-scoped fields) — an MCP agent without READ on a private pod's root
+// could still read that pod's storage description. Proves the fix both
+// ways: anon (no READ) denied, owner (READ) served — same discipline
+// readPerStorageDescription (src/mcp/resources.js) applies via requireRead.
+test('MCP read of a PRIVATE pod storage description enforces READ on the pod root (parity with HTTP C3)', async (t) => {
+  const carol = await startLwsPod(t, 'carol');
+  // Tighten the pod root to owner-only — same fixture shape as the HTTP C3
+  // "on a PRIVATE pod" describe (test/lws-storage-description-route.test.js).
+  const acl = await request('/carol/.acl', {
+    method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, auth: carol.podName,
+    body: serializeAcl(generatePrivateAcl(`${carol.origin}/carol/`, carol.webId, true)),
+  });
+  assert.ok([200, 201, 204].includes(acl.status), `setup: tightening /carol/.acl must succeed, got ${acl.status}`);
+
+  const anonC = { webId: null, origin: carol.origin, lwsEnabled: true };
+  const denied = await callTool('read_resource', { uri: `${carol.origin}/carol/lws-storage` }, anonC);
+  assert.equal(denied.isError, true, 'anon MCP agent must be denied a private pod storage description');
+  assert.match(denied.content[0].text, /not found or not authorized/i);
+
+  const ownerC = { ...ownerCtx(carol), lwsEnabled: true };
+  const owned = await callTool('read_resource', { uri: `${carol.origin}/carol/lws-storage` }, ownerC);
+  assert.equal(owned.isError ?? false, false, `owner must read own private pod storage description: ${JSON.stringify(owned)}`);
+  const body = JSON.parse(owned.content[0].text);
+  assert.ok(body.id.endsWith('/carol/'), `id: ${body.id}`);
+  assert.equal(body.type, 'Storage');
 });

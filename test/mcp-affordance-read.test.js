@@ -62,10 +62,18 @@ test('the fixed context/vocab resources resolve at their real .well-known URLs',
   assert.ok(Array.isArray(vbBody['@graph']));
 });
 
-test('the storage description resolves at /.well-known/lws-storage with an inline @context', async (t) => {
+// Multi-tenant round (Task A5, D5 -> A7 parity): the well-known now resolves
+// as a ServerIndex roster (mirrors the HTTP route); the per-storage document
+// a pre-multi-tenant client expected here now lives at /:pod/lws-storage.
+test('the well-known resolves as a ServerIndex; /:pod/lws-storage resolves the type:Storage doc, both with an inline @context', async (t) => {
   const p = await startLwsPod(t);
-  const out = await readResource(`${p.origin}/.well-known/lws-storage`, ownerCtx(p));
-  const sd = JSON.parse(out.contents[0].text);
+  const idxOut = await readResource(`${p.origin}/.well-known/lws-storage`, ownerCtx(p));
+  const idx = JSON.parse(idxOut.contents[0].text);
+  assert.equal(idx.type, 'ServerIndex');
+  assert.equal(typeof idx['@context'], 'object');
+
+  const sdOut = await readResource(`${p.origin}/${p.podName}/lws-storage`, ownerCtx(p));
+  const sd = JSON.parse(sdOut.contents[0].text);
   assert.equal(sd.type, 'Storage');
   assert.equal(typeof sd['@context'], 'object');
 });

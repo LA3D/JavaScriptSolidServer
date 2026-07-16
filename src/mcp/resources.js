@@ -17,7 +17,9 @@ import { readPodSkill, discoverSkills } from './skills.js';
 import * as storage from '../storage/filesystem.js';
 import { generateLwsContainer } from '../ldp/container.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
-import { buildStorageDescription } from '../lws/storage-description.js';
+import { buildStorageDescriptionFor, buildServerIndex, resolveStorageDescriptionInputs } from '../lws/storage-description.js';
+import { storageRootFor } from '../lws/storage-resolver.js';
+import { listVisibleStorageRoots } from '../lws/storage-index.js';
 import { LWS_CONTEXT_OBJECT, LWS_VOCAB, withInlineContext } from '../lws/context.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 
@@ -69,18 +71,54 @@ async function readSkills(ctx, uri) {
   return jsonContents(uri, { ...idx, 'skill:items': visible });
 }
 
-async function readStorageDescription(ctx, uri) {
-  const sd = buildStorageDescription(ctx.origin, {
+// Multi-tenant round (Task A5, D5 -> Task A7 parity): the well-known is now
+// a WAC-filtered ServerIndex roster — the SAME shape the HTTP
+// /.well-known/lws-storage route serves (buildServerIndex +
+// listVisibleStorageRoots, src/server.js) — not a single Storage document.
+// Reuses the roster helper verbatim so the two surfaces can't drift on which
+// storages a given requester is told about.
+async function readServerIndex(ctx, uri) {
+  const roots = await listVisibleStorageRoots(storage, { origin: ctx.origin, webId: ctx.webId });
+  const idx = buildServerIndex(ctx.origin, roots.map((root) => ({ root })));
+  return jsonContents(uri, withInlineContext(idx), 'application/lws+json');
+}
+
+// Per-storage description — the actual `Storage` document a pre-multi-tenant
+// client expected at the well-known path now lives at /:pod/lws-storage
+// (mirrors src/server.js's HTTP route, A5/C3). Two gates, in the order this
+// module's OWN no-oracle convention uses everywhere else (requireRead THEN
+// requireExists, both throwing the identical "not found or not authorized"
+// wording, probe #7 A8) — READ on the pod ROOT first (the C3 security fix:
+// a private pod's description must not be returned to an agent lacking
+// READ), then the storageRootFor marker check (an unprovisioned top-level
+// dir isn't a storage at all). This is STRICTER than the HTTP route (which
+// checks storageRootFor first, so it distinguishes 404 "no such pod" from
+// 401 "read denied") — deliberately: MCP's own established discipline never
+// lets a response's wording hint which branch fired, so unifying both
+// denials here doesn't regress that bar; it holds it to the higher standard
+// already set by requireRead/requireExists elsewhere in this file.
+async function readPerStorageDescription(ctx, uri, root) {
+  await requireRead(ctx, root, uri);
+  requireExists(await storageRootFor(storage, root), uri);
+  const podConfig = ctx.podConfigFor ? ctx.podConfigFor(root) : { get: async () => ({}) };
+  const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
+    await resolveStorageDescriptionInputs(podConfig, ctx.origin, ctx.lwsEnabled);
+  const sd = buildStorageDescriptionFor(`${ctx.origin}${root}`, {
     typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
-    profileIndexPath: ctx.profileIndexPath, voidPath: ctx.voidPath,
+    profileIndexPath, voidPath,
     profileConnegEnabled: ctx.profileConnegEnabled,
-    referentResolutionEnabled: ctx.referentResolutionEnabled,
-    uriSpacePrefixes: ctx.uriSpacePrefixes,
+    referentResolutionEnabled, uriSpacePrefixes,
     mcpEnabled: true,
     anonRateLimitMax: ctx.anonRateLimitMax,
   });
   return jsonContents(uri, withInlineContext(sd), 'application/lws+json');
 }
+
+// Matches a per-storage description path, e.g. '/alice/lws-storage' — the
+// SAME shape the HTTP fastify.get('/:pod/lws-storage', ...) route matches
+// (src/server.js). Not a FIXED_SUFFIX entry (those are exact-path matches;
+// `:pod` varies per tenant), so readResource() below checks it explicitly.
+const PER_STORAGE_LWS_STORAGE = /^\/([^/]+)\/lws-storage$/;
 
 async function readLwsContext(_ctx, uri) {
   return jsonContents(uri, { '@context': LWS_CONTEXT_OBJECT }, 'application/ld+json');
@@ -93,7 +131,7 @@ async function readLwsVocab(_ctx, uri) {
 // Fixed resources are origin-relative, so they resolve by path suffix here;
 // the advertisement (surface.js listFixed) fills the origin in at list time.
 const FIXED_SUFFIX = {
-  '/.well-known/lws-storage': readStorageDescription,
+  '/.well-known/lws-storage': readServerIndex,
   '/.well-known/mcp/pod-info': readPodInfo,
   '/.well-known/mcp/skills': readSkills,
   '/.well-known/lws/context': readLwsContext,
@@ -233,5 +271,7 @@ export async function readResource(uri, ctx) {
   if (path === null) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `bad resource URI: ${uri}`);
   const fixed = FIXED_SUFFIX[path];
   if (fixed) return fixed(ctx, uri);
+  const perStorage = PER_STORAGE_LWS_STORAGE.exec(path);
+  if (perStorage) return readPerStorageDescription(ctx, uri, `/${perStorage[1]}/`);
   return readByResource(path, ctx, uri);
 }
