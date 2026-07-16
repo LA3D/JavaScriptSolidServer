@@ -11,6 +11,7 @@ import * as storage from '../storage/filesystem.js';
 import { getEffectiveUrlPath, sidecarSubject, SIDECAR_SUFFIX } from '../utils/url.js';
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml } from '../mashlib/index.js';
 import { resolveReferent } from '../lws/referent-resolver.js';
+import { storageRootFor } from '../lws/storage-resolver.js';
 
 /**
  * Build a resource URL for WAC checking, normalizing path-based pod access
@@ -176,8 +177,18 @@ export async function authorize(request, reply, options = {}) {
   // Scoped to `!resourceExists`: a real resource later PUT directly at the
   // name's path makes `resourceExists` true and this exemption stops
   // applying — the blanket WAC check below protects it as normal.
-  if (!resourceExists && (method === 'GET' || method === 'HEAD') && request.lwsEnabled && request.podConfig) {
-    const cfg = await request.podConfig.get();
+  //
+  // Task A8 (multi-tenant round): reads the OWNING storage's own uriSpaces
+  // (storageRootFor (A2) + request.podConfigFor (A3)), not the single global
+  // request.podConfig — otherwise this exemption would either miss a second
+  // tenant's uriSpaces entirely or, worse, exempt a name under the WRONG
+  // tenant's declared prefixes. Mirrors resolveReferentTarget's own
+  // substitution in src/handlers/resource.js exactly, so the pre-check here
+  // and the resolver that actually issues the 303 always agree on which
+  // config is authoritative for a given urlPath.
+  if (!resourceExists && (method === 'GET' || method === 'HEAD') && request.lwsEnabled) {
+    const root = await storageRootFor(storage, urlPath);
+    const cfg = await request.podConfigFor(root).get();
     if (resolveReferent(urlPath, cfg.uriSpaces || [])) {
       return { authorized: true, webId, wacAllow: 'user="", public=""', authError: null };
     }

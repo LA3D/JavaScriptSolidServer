@@ -5,13 +5,17 @@ const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
 
 /**
  * Derive the storage description URL from any resource URL in that storage.
- * Single-storage assumption (L2): always {origin}/.well-known/lws-storage.
+ * With no `storageRootPath`, the server-index/legacy single-storage form:
+ * {origin}/.well-known/lws-storage. When a per-storage root path is given
+ * (e.g. '/alice/'), the per-storage form: {origin}{storageRootPath}lws-storage.
  * @param {string} resourceUrl
+ * @param {string|null} [storageRootPath]
  * @returns {string}
  */
-export function storageDescriptionUrl(resourceUrl) {
+export function storageDescriptionUrl(resourceUrl, storageRootPath = null) {
   if (!resourceUrl || !resourceUrl.includes('://')) throw new Error(`storageDescriptionUrl requires an absolute URL, got: ${resourceUrl}`);
-  return `${new URL(resourceUrl).origin}/.well-known/lws-storage`;
+  const origin = new URL(resourceUrl).origin;
+  return storageRootPath ? `${origin}${storageRootPath}lws-storage` : `${origin}/.well-known/lws-storage`;
 }
 
 // P3 (LWS media-type MUST, FOLLOWUP.md conformance-audit 2026-07-12): the
@@ -72,18 +76,29 @@ export async function resolveStorageDescriptionInputs(podConfig, origin, lwsEnab
 }
 
 /**
- * Build the full LWS Storage Description document for an origin, given
- * which optional services are enabled. Single source of the service list —
- * the HTTP GET /.well-known/lws-storage route and the MCP storage-description
- * resource (read at /.well-known/lws-storage) both call this so the advertised
- * service set can never drift between the two surfaces.
- * @param {string} origin  `${proto}://${host}` (no trailing slash)
+ * Shared service-list + capability + linkset assembly for both the
+ * single-origin (`buildStorageDescription`) and per-storage
+ * (`buildStorageDescriptionFor`) description builders. This multi-tenant
+ * round adds NO per-storage service ROUTES — only server-wide routes exist
+ * (/types/index, /types/search, /.well-known/void, /notification/api,
+ * /mcp) — so every service endpoint below is ORIGIN-scoped (derived from
+ * `idUrl`'s origin), matching whatever `buildStorageDescription` (the
+ * pre-multi-tenant origin form) already emitted. The two builders differ
+ * only in `idUrl` (the description's own `id`) and `sdEndpoint` (this
+ * description's OWN StorageDescription self-pointer — per-storage for
+ * `buildStorageDescriptionFor`, origin-well-known for `buildStorageDescription`).
+ * profileIndexPath is itself an absolute-from-origin path (e.g.
+ * `/alice/profiles/index.jsonld`, per pod-config.js), so composing it
+ * against origin (not a storage-scoped base) already lands per-storage
+ * without a second `/alice/` prefix.
+ * @param {string} idUrl  the description's own `id` (trailing slash)
+ * @param {string} sdEndpoint  this description's own serviceEndpoint
  * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
  * @returns {object}
  */
-export function buildStorageDescription(origin, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, uriSpacePrefixes = [], mcpEnabled = false, anonRateLimitMax = null } = {}) {
-  const lwsStoragePath = '/.well-known/lws-storage';
-  const services = [{ type: 'StorageDescription', serviceEndpoint: `${origin}${lwsStoragePath}` }];
+function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, uriSpacePrefixes = [], mcpEnabled = false, anonRateLimitMax = null } = {}) {
+  const origin = new URL(idUrl).origin;
+  const services = [{ type: 'StorageDescription', serviceEndpoint: sdEndpoint }];
   if (typeIndexEnabled) {
     services.push({ type: 'TypeIndexService', serviceEndpoint: `${origin}/types/index` });
     services.push({
@@ -110,6 +125,7 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
       hint: 'VoID description of the datasets this storage serves — the vocabularies in use (each with a pod-served copy), root resources, and the subject URI space. GET follows a 303 to the description document.' });
   }
   if (mcpEnabled) {
+    // MCP is one gateway per pod, not per storage — always the origin.
     // Budget sentence appended when the caller threads the configured
     // anonymous rate-limit cap through (server.js's anonRateLimitMax) — a
     // cold agent hitting 429s otherwise has no way to learn the budget is
@@ -125,8 +141,8 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
       hint: 'Model Context Protocol gateway — JSON-RPC 2.0 over Streamable HTTP: POST initialize to this endpoint, then notifications/initialized; the read loop is the read_resource/list_resources tools.' + budgetHint,
     });
   }
-  const base = {
-    ...generateStorageDescription(`${origin}/`, services),
+  const doc = {
+    ...generateStorageDescription(idUrl, services),
     // Steering, not spec vocabulary (unmapped in the LWS @context — the
     // audience is a cold LLM agent reading JSON): RFC-9264-as-storage-metadata
     // is LWS-new and outside model priors; the priming ablation (2026-07-04)
@@ -149,7 +165,7 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
   };
   // Capability array is hoisted out of the conneg-only gate so a second,
   // independent capability (referent resolution) can coexist — only
-  // attached to `base` if non-empty, so the default (neither flag set)
+  // attached to `doc` if non-empty, so the default (neither flag set)
   // stays byte-identical to before this array existed (no `capability` key).
   const capability = [];
   if (profileConnegEnabled) {
@@ -175,6 +191,77 @@ export function buildStorageDescription(origin, { typeIndexEnabled = false, noti
     if (uriSpacePrefixes.length) cap.uriSpace = uriSpacePrefixes;
     capability.push(cap);
   }
-  if (capability.length > 0) base.capability = capability;
-  return base;
+  if (capability.length > 0) doc.capability = capability;
+  return doc;
+}
+
+/**
+ * Build the full LWS Storage Description document for an origin, given
+ * which optional services are enabled. Single source of the service list —
+ * the HTTP GET /.well-known/lws-storage route and the MCP storage-description
+ * resource (read at /.well-known/lws-storage) both call this so the advertised
+ * service set can never drift between the two surfaces.
+ *
+ * This is the ORIGIN-scoped form (id = `${origin}/`, single well-known
+ * endpoint) — pre-multi-tenant callers (server.js, mcp/resources.js,
+ * handlers/resource.js) all still call this. See `buildStorageDescriptionFor`
+ * for the per-storage-root form used by multi-tenant pods.
+ * @param {string} origin  `${proto}://${host}` (no trailing slash)
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @returns {object}
+ */
+export function buildStorageDescription(origin, flags = {}) {
+  return assembleDescription(`${origin}/`, `${origin}/.well-known/lws-storage`, flags);
+}
+
+/**
+ * Build the full LWS Storage Description document for a SINGLE STORAGE ROOT
+ * inside a multi-tenant pod (`id` = the storage root itself, StorageDescription
+ * self-pointer at `${base}/lws-storage` instead of the origin well-known
+ * path). Every OTHER service (TypeIndexService, TypeSearchService,
+ * VoidService, NotificationService, McpService) stays origin-scoped — this
+ * round adds no per-storage service routes, so advertising e.g.
+ * `/alice/types/index` would be a dead endpoint. ProfileIndexService and the
+ * uriSpace capability are the two genuinely per-storage pieces (the former
+ * because profileIndexPath is itself an absolute-from-origin path baked at
+ * publish time, the latter because the caller passes storage-scoped prefixes).
+ * @param {string} storageRootUrl  absolute, trailing slash, e.g. 'http://h/alice/'
+ * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @returns {object}
+ */
+export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
+  const base = storageRootUrl.replace(/\/$/, '');
+  // INTERIM SUPPRESSION (pre-merge fix, whole-branch review): VoidService
+  // here would point at the server-wide /.well-known/void route, but that
+  // route resolves the LEGACY server-wide podConfig (--lws-config), not this
+  // storage's own per-storage config voidPath is read from — a second
+  // tenant's void pointer would misdirect to (or 404 against) a DIFFERENT
+  // tenant's void. Suppress until a real per-storage void route exists
+  // (follow-up, recorded in FOLLOWUP.md). The origin form
+  // (buildStorageDescription) is untouched: its VoidService is server-wide
+  // correct by construction — it's the same podConfig the well-known route
+  // itself reads.
+  return assembleDescription(storageRootUrl, `${base}/lws-storage`, { ...flags, voidPath: null });
+}
+
+/**
+ * Build a Server Index document — the multi-tenant root resource listing
+ * every storage the pod hosts, each pointing at its own per-storage
+ * description (`buildStorageDescriptionFor`'s `id`). Deliberately typed
+ * `ServerIndex`, not `Storage` — a server index is a list of storages, not
+ * a storage itself.
+ * @param {string} origin  `${proto}://${host}` (no trailing slash)
+ * @param {Array<{root:string}>} storages  e.g. [{ root: '/alice/' }]
+ * @returns {object}
+ */
+export function buildServerIndex(origin, storages = []) {
+  return {
+    '@context': LWS_CONTEXT,
+    id: `${origin}/`,
+    type: 'ServerIndex',
+    storage: storages.map(s => ({
+      id: `${origin}${s.root}`,
+      storageDescription: `${origin}${s.root}lws-storage`,
+    })),
+  };
 }

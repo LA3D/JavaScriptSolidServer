@@ -16,6 +16,7 @@ import { sanitizeTypes, sanitizeField, sanitizeDeep, sanitizeReps } from './sani
 import { describedbyTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { storageDescriptionUrl } from '../lws/storage-description.js';
+import { storageRootFor } from '../lws/storage-resolver.js';
 import { getContentType } from '../utils/url.js';
 import { toolError, toolJson } from './protocol.js';
 import { readResource } from './resources.js';
@@ -55,8 +56,16 @@ export function parseRemoteLinks(header) {
 // The local read's header-borne affordances, derived from the SAME sources as
 // the HTTP Link headers / linkset (constraint store, storage description) —
 // one source, no drift. describedby omitted when no shape is declared.
+//
+// Multi-tenant round (Task A7): storageDescription must point at the OWNING
+// storage (mirrors src/handlers/resource.js's getAllHeaders(storageRootPath)
+// threading from A5/c5e4fda) — storageRootFor resolves the resource's root
+// (null for server scope / .well-known/*, preserving the origin well-known
+// target there), same marker check the HTTP layer uses.
 export async function localLinks(path, ctx) {
-  const links = { storageDescription: storageDescriptionUrl(buildUrl(ctx, path)) };
+  const url = buildUrl(ctx, path);
+  const root = await storageRootFor(storage, new URL(url).pathname);
+  const links = { storageDescription: storageDescriptionUrl(url, root) };
   // .well-known/* fixed resources have no meaningful pod-tree parent — an
   // `up` link there would point at the synthetic /.well-known/ "container",
   // which is not a real navigable resource (task-12).

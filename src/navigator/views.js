@@ -22,12 +22,30 @@ const hueOf = (n) => { let h = 0; for (const c of String(n)) h = (h * 31 + c.cha
 const localName = (t) => String(t).replace(/^.*[#/:]/, '');
 const badge = (t) => `<span class="badge" style="--h:${hueOf(localName(t))}">${esc(localName(t))}</span>`;
 
-// Root segment links `/?view=nav` — every navigator page's chrome offers a
-// way back to the pod-root navigator view (Tasks 6-7 reuse this).
-export function crumbHtml(url) {
+// Leading crumb (Task A10, multi-tenant round): with a storageRootPath
+// (request.storageRootPath, A2/A6), the first segment links to the OWNING
+// STORAGE's own root (`/<pod>/?view=nav`) and subsequent segments are the
+// path AFTER that root — every navigator page under a storage roots its
+// chrome at that storage, not a single hardcoded pod. Without one (server
+// scope — no storage owns this path, e.g. a bare top-level resource) the
+// first segment falls back to `server` -> `/?view=nav`, the WAC-filtered
+// roster of every storage the pod hosts (renderServerIndexView below).
+export function crumbHtml(url, storageRootPath = null) {
   const u = new URL(url);
   const segs = u.pathname.split('/').filter(Boolean);
-  const parts = [`<a href="/?view=nav">pod</a>`];
+  if (storageRootPath) {
+    const rootSegs = storageRootPath.split('/').filter(Boolean);
+    const podName = rootSegs[0] ?? storageRootPath;
+    const restSegs = segs.slice(rootSegs.length);
+    const parts = [`<a href="${esc(storageRootPath)}?view=nav">${esc(podName)}</a>`];
+    let p = storageRootPath.replace(/\/$/, '');
+    for (let i = 0; i < restSegs.length; i++) {
+      p += `/${restSegs[i]}`;
+      parts.push(i === restSegs.length - 1 ? esc(restSegs[i]) : `<a href="${esc(p)}/">${esc(restSegs[i])}</a>`);
+    }
+    return parts.join(' › ');
+  }
+  const parts = [`<a href="/?view=nav">server</a>`];
   let p = '';
   for (let i = 0; i < segs.length; i++) {
     p += `/${segs[i]}`;
@@ -47,7 +65,7 @@ export function navPage(title, crumb, body) {
 // Every substrate-controlled string (member id/name, rdfTypes, face hrefs/
 // formats, mediaType, conformsTo URIs) is escaped — this listing is
 // server-rendered from client-supplied names and declared metadata.
-export function renderContainerView({ url, items, conformsTo = [] }) {
+export function renderContainerView({ url, items, conformsTo = [], storageRootPath = null }) {
   const base = url.endsWith('/') ? url : url + '/';
   const name = new URL(url).pathname.split('/').filter(Boolean).pop() ?? '/';
   const prof = conformsTo.length
@@ -65,7 +83,7 @@ export function renderContainerView({ url, items, conformsTo = [] }) {
     const meta = [it.mediaType, it.size, it.modified].filter(Boolean).map(esc).join(' · ');
     return `<tr><td><a href="${esc(it.id)}">${esc(relName)}</a></td><td>${badges}</td><td>${faces}</td><td class="muted">${meta}</td></tr>`;
   }).join('\n');
-  return navPage(name, crumbHtml(url),
+  return navPage(name, crumbHtml(url, storageRootPath),
     `<h1>${esc(name)}/</h1>${prof}<table><tr><th>name</th><th>types</th><th>open with</th><th></th></tr>${rows}</table>` +
     `<p class="muted"><a href="${esc(url)}">machine view</a></p>`);
 }
@@ -77,7 +95,7 @@ export function renderContainerView({ url, items, conformsTo = [] }) {
 // describedby URIs, provenance lines, mediaType, alternate hrefs/formats,
 // the stored-bytes excerpt) is escaped — this view is server-rendered from
 // client-declared/stored data (caller's job to bound the excerpt size).
-export function renderEntityView({ url, types = [], conformsTo = [], describedby = [], provenance = [], reps = { alternates: [] }, mediaType = '', excerpt = '' }) {
+export function renderEntityView({ url, types = [], conformsTo = [], describedby = [], provenance = [], reps = { alternates: [] }, mediaType = '', excerpt = '', storageRootPath = null }) {
   const name = new URL(url).pathname.split('/').pop() || url;
   const rows = [
     types.length ? `<dt>types</dt><dd>${types.map(badge).join(' ')}</dd>` : '',
@@ -89,30 +107,57 @@ export function renderEntityView({ url, types = [], conformsTo = [], describedby
       ` · <a href="${esc(r.href)}">${esc(r.format || r.href)}</a>`).join('')}</dd>`
   ].filter(Boolean).join('\n');
   const prev = excerpt ? `<h2>preview</h2><pre style="white-space:pre-wrap;border:1px solid var(--line);padding:.5rem">${esc(excerpt)}</pre>` : '';
-  return navPage(name, crumbHtml(url), `<h1>${esc(name)}</h1><dl class="meta">${rows}</dl>${prev}`);
+  return navPage(name, crumbHtml(url, storageRootPath), `<h1>${esc(name)}</h1><dl class="meta">${rows}</dl>${prev}`);
 }
 
-// Root/storage view (Task 7, spec 2026-07-15): the navigator's landing page
-// for the pod root, reached only via the explicit `?view=nav` escape (the
-// seeded index.html shadow keeps serving plain `GET /`, deviation (4) —
-// src/handlers/resource.js wires the root-vs-container choice). Renders the
-// LWS storage description (services/capabilities/uriSpace prefixes — the
-// same buildStorageDescription the /.well-known/lws-storage route serves)
-// beside the WAC-filtered top-level listing, instead of the generic
-// renderContainerView Task 5 renders for every other container. Every
-// substrate-controlled string (service types, service endpoints, capability
-// types, uriSpace values, top-level member ids) is escaped — sd is built
-// from pod-config + server enablement flags, items come from the same
-// WAC-filtered listing the container view uses.
+// Root/storage view (Task 7, spec 2026-07-15; per-storage as of Task A10,
+// multi-tenant round): the navigator's landing page for a SINGLE storage
+// root, reached only via the explicit `/<pod>/?view=nav` escape (the seeded
+// index.html shadow keeps serving plain `GET /` at the server root,
+// deviation (4); src/handlers/resource.js wires the view choice). Renders
+// that storage's own LWS storage description (services/capabilities/
+// uriSpace prefixes — the same buildStorageDescriptionFor the per-storage
+// `/<pod>/lws-storage` route serves) beside its WAC-filtered top-level
+// listing, instead of the generic renderContainerView Task 5 renders for
+// every other container. sd.id is this storage's own root URL (trailing
+// slash) — crumbHtml derives both the pod name and the chrome's own link
+// from it, so this view's breadcrumb is identical in shape to every other
+// page under this storage (crumbHtml's own-root case: just the one linked
+// segment, matching how the pre-multi-tenant 'pod' crumb rooted at `/`).
+// Every substrate-controlled string (service types, service endpoints,
+// capability types, uriSpace values, top-level member ids) is escaped — sd
+// is built from pod-config + server enablement flags, items come from the
+// same WAC-filtered listing the container view uses.
 export function renderRootView({ origin, sd, items }) {
+  const rootPath = new URL(sd.id).pathname;
+  const podName = rootPath.split('/').filter(Boolean)[0] || rootPath;
   const cap = (sd.capability ?? []).map((c) => `<li>${esc(c.type ?? c.id ?? '')}${
     c.uriSpace ? ` — uriSpace: ${[].concat(c.uriSpace).map(esc).join(', ')}` : ''}</li>`).join('');
   const svc = (sd.service ?? []).map((s) => `<li><a href="${esc(s.serviceEndpoint ?? s.id ?? '#')}">${esc(s.type ?? s.id ?? s.serviceEndpoint)}</a></li>`).join('');
   const list = items.map((it) => `<li><a href="${esc(it.id)}">${esc(it.id)}</a></li>`).join('');
-  return navPage('pod', `<a href="/?view=nav">pod</a>`,
-    `<h1>${esc(origin)}</h1><h2>Storage</h2><ul>${svc}</ul>` +
+  return navPage(podName, crumbHtml(sd.id, rootPath),
+    `<h1>${esc(origin)}${esc(rootPath)}</h1><h2>Storage</h2><ul>${svc}</ul>` +
     (cap ? `<h2>Capabilities</h2><ul>${cap}</ul>` : '') +
     `<h2>Containers</h2><ul>${list}</ul>` +
+    `<p class="muted"><a href="${esc(rootPath)}lws-storage">machine view</a></p>`);
+}
+
+// Server index view (Task A10, multi-tenant round): the navigator's landing
+// page for the SERVER root (`/?view=nav`) — a WAC-filtered roster of every
+// storage this pod hosts (listVisibleStorageRoots, A5), one row per storage
+// linking to that storage's own root view (`/<pod>/?view=nav`, renderRootView
+// above). Replaces the single-storage renderRootView that used to live at
+// `/?view=nav` pre-multi-tenant — that per-storage content now lives one
+// level down, at each storage's own root. Pure rendering, same discipline as
+// every other view here: `storages` is already WAC-filtered by the caller
+// (src/handlers/resource.js), this function only escapes and lays out.
+export function renderServerIndexView({ origin, storages }) {
+  const rows = (storages ?? []).map((s) => {
+    const name = s.root.split('/').filter(Boolean)[0] || s.root;
+    return `<li><a href="${esc(origin)}${esc(s.root)}?view=nav">${esc(name)}</a></li>`;
+  }).join('');
+  return navPage('server', crumbHtml(`${origin}/`),
+    `<h1>${esc(origin)}</h1><h2>Storages</h2><ul>${rows}</ul>` +
     `<p class="muted"><a href="/.well-known/lws-storage">machine view</a></p>`);
 }
 

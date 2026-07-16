@@ -61,7 +61,11 @@ describe('lws: navigator container HEAD/GET parity (Task 8 routed fix)', () => {
     assert.equal(headRes.headers.get('etag'), getRes.headers.get('etag'));
   });
 
-  it('root, ?view=nav: HEAD and GET agree (both the navigator root/storage view, -navroot ETag)', async () => {
+  // Task A10 (multi-tenant round): `/?view=nav` at the SERVER root is now
+  // the server-index roster (renderServerIndexView), '-navindex' suffix —
+  // the per-storage root view (renderRootView, '-navroot' suffix) moved to
+  // `/<pod>/?view=nav`, covered by the next test.
+  it('server root, ?view=nav: HEAD and GET agree (both the server-index view, -navindex ETag)', async () => {
     const getRes = await request('/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
     assertStatus(getRes, 200);
     const headRes = await request('/?view=nav', { method: 'HEAD', headers: { Accept: BROWSER_ACCEPT } });
@@ -71,7 +75,20 @@ describe('lws: navigator container HEAD/GET parity (Task 8 routed fix)', () => {
       getRes.headers.get('content-type')?.split(';')[0],
     );
     assert.equal(headRes.headers.get('etag'), getRes.headers.get('etag'));
-    assert.match(headRes.headers.get('etag') || '', /-navroot"$/, 'HEAD must predict the root-view -navroot ETag');
+    assert.match(headRes.headers.get('etag') || '', /-navindex"$/, 'HEAD must predict the server-index -navindex ETag');
+  });
+
+  it('storage root (/alice/), ?view=nav: HEAD and GET agree (both the navigator storage view, -navroot ETag)', async () => {
+    const getRes = await request('/alice/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(getRes, 200);
+    const headRes = await request('/alice/?view=nav', { method: 'HEAD', headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(headRes, 200);
+    assert.equal(
+      headRes.headers.get('content-type')?.split(';')[0],
+      getRes.headers.get('content-type')?.split(';')[0],
+    );
+    assert.equal(headRes.headers.get('etag'), getRes.headers.get('etag'));
+    assert.match(headRes.headers.get('etag') || '', /-navroot"$/, 'HEAD must predict the storage-view -navroot ETag');
   });
 });
 

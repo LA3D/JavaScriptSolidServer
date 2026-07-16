@@ -279,9 +279,14 @@ export function generatePublicReadAcl(resourceUrl) {
  *   resolves it against the .acl URL at check time. The profile document
  *   itself still publishes the absolute WebID. See #430.
  * @param {boolean} isContainer - Whether this is a container
+ * @param {object} [aclOptions]
+ * @param {boolean} [aclOptions.publicRead=true] - When false, omit the
+ *   `#public` foaf:Agent Read authorization entirely — the resource is
+ *   owner-only. Default (true) is byte-identical to the pre-existing
+ *   3-arg call (multi-tenant provisioning visibility flag, #A9).
  * @returns {object} JSON-LD ACL document
  */
-export function generateOwnerAcl(resourceUrl, ownerWebId, isContainer = false) {
+export function generateOwnerAcl(resourceUrl, ownerWebId, isContainer = false, { publicRead = true } = {}) {
   const graph = [
     {
       '@id': '#owner',
@@ -293,8 +298,11 @@ export function generateOwnerAcl(resourceUrl, ownerWebId, isContainer = false) {
         { '@id': 'acl:Write' },
         { '@id': 'acl:Control' }
       ]
-    },
-    {
+    }
+  ];
+
+  if (publicRead) {
+    graph.push({
       '@id': '#public',
       '@type': 'acl:Authorization',
       'acl:agentClass': { '@id': 'foaf:Agent' },
@@ -302,8 +310,8 @@ export function generateOwnerAcl(resourceUrl, ownerWebId, isContainer = false) {
       'acl:mode': [
         { '@id': 'acl:Read' }
       ]
-    }
-  ];
+    });
+  }
 
   // Add default rules for containers
   // Only owner gets default - children don't inherit public read

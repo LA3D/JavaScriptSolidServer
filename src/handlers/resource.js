@@ -26,6 +26,7 @@ import {
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { resolveReferent } from '../lws/referent-resolver.js';
+import { storageRootFor } from '../lws/storage-resolver.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { emitChange } from '../notifications/events.js';
@@ -37,8 +38,9 @@ import { parseTypeLinks, typeStorePath, readDeclaredTypes, readProvenance } from
 import { applyLwsWrite } from '../lws/write.js';
 import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { serveStoredRdf, checkServable, isRdfSourceType, QUADS_OUTPUTS, nonRdfNotAcceptable, datasetToFormat } from '../rdf/serve.js';
-import { renderContainerView, renderEntityView, renderRootView, entityFaceViewable } from '../navigator/views.js';
-import { buildStorageDescription, resolveStorageDescriptionInputs } from '../lws/storage-description.js';
+import { renderContainerView, renderEntityView, renderRootView, renderServerIndexView, entityFaceViewable } from '../navigator/views.js';
+import { buildStorageDescriptionFor, resolveStorageDescriptionInputs } from '../lws/storage-description.js';
+import { listVisibleStorageRoots } from '../lws/storage-index.js';
 
 /**
  * Live reload script - injected into HTML when --live-reload is enabled
@@ -113,18 +115,22 @@ async function authorizedRepresentations(request, storagePath, resourceUrl) {
 /**
  * Referent identity & discovery (Task 3, 2026-07-13): the !stats seam for a
  * minted subject-IRI name (e.g. /id/{slug}) with no stored resource of its
- * own. Reads the pathPrefix->container plane-mapping from pod-config
- * (request.podConfig, decorated in server.js's onRequest hook) and resolves
- * the name to its backing resource's urlPath via the pure resolveReferent.
- * no-oracle: returns a target ONLY when it both exists and the requester may
- * READ it (same checkAccess the type-index walk uses,
+ * own. Reads the pathPrefix->container plane-mapping from the OWNING
+ * storage's per-storage pod-config (Task A8, multi-tenant round:
+ * storageRootFor (A2) resolves the request's own storage root, then
+ * request.podConfigFor(root) (A3) hands back that root's own config handle —
+ * NOT the single global request.podConfig, which would only see one tenant's
+ * uriSpaces) and resolves the name to its backing resource's urlPath via the
+ * pure resolveReferent. no-oracle: returns a target ONLY when it both exists
+ * and the requester may READ it (same checkAccess the type-index walk uses,
  * src/lws/authorized-resources.js) — a missing or unreadable target returns
  * null so the caller falls through to the ordinary 404 (never a 303 that
  * leaks existence to an unauthorized requester). --lws-gated.
  */
 async function resolveReferentTarget(request, urlPath) {
-  if (!request.lwsEnabled || !request.podConfig) return null;
-  const cfg = await request.podConfig.get();
+  if (!request.lwsEnabled) return null;
+  const root = await storageRootFor(storage, urlPath);
+  const cfg = await request.podConfigFor(root).get();
   const target = resolveReferent(urlPath, cfg.uriSpaces || []);
   if (!target) return null;
   // pod-relative storage path == urlPath in non-subdomain mode
@@ -319,8 +325,20 @@ function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) 
 function willServeNavigatorView(request) {
   return request.lwsEnabled && browserWantsHtml(request);
 }
-function willServeRootStorageView(request, urlPath) {
+// Task A10 (multi-tenant round): the SERVER root's `?view=nav` now renders
+// the WAC-filtered roster of every storage the pod hosts
+// (renderServerIndexView) — the per-storage view that used to live here
+// (willServeRootStorageView, below) moved to `/<pod>/?view=nav`.
+function willServeServerIndexView(request, urlPath) {
   return willServeNavigatorView(request) && urlPath === '/' && request.query?.view === 'nav';
+}
+// A single storage's own root view — reached at THAT storage's root
+// (urlPath === request.storageRootPath, the owning root A2/A6 already
+// resolved for this request), not the server root. request.storageRootPath
+// is null for the server root and for any path outside a provisioned
+// storage, so this can never also fire for willServeServerIndexView's path.
+function willServeRootStorageView(request, urlPath) {
+  return willServeNavigatorView(request) && !!request.storageRootPath && urlPath === request.storageRootPath && request.query?.view === 'nav';
 }
 
 // Final-review I3: the face dispatch (GET ~line 1166, HEAD ~line 2128)
@@ -583,7 +601,8 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled
+                lwsEnabled: request.lwsEnabled,
+                storageRootPath: request.storageRootPath
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -610,7 +629,8 @@ export async function handleGet(request, reply) {
                 origin,
                 resourceUrl,
                 connegEnabled,
-                lwsEnabled: request.lwsEnabled
+                lwsEnabled: request.lwsEnabled,
+                storageRootPath: request.storageRootPath
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -631,7 +651,8 @@ export async function handleGet(request, reply) {
         origin,
         resourceUrl,
         connegEnabled,
-        lwsEnabled: request.lwsEnabled
+        lwsEnabled: request.lwsEnabled,
+        storageRootPath: request.storageRootPath
       });
 
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -719,22 +740,28 @@ export async function handleGet(request, reply) {
     // conditional GET (willServeNav false) keeps comparing against the
     // un-suffixed etag, so it can never 304 off a stray '-nav' value.
     const willServeNav = willServeNavigatorView(request);
-    // Review fix (root-view ETag key): the SAME urlPath==='/' && view==='nav'
-    // predicate the render branch below (~line 749) uses to pick the ROOT
-    // STORAGE view over the generic container view — hoisted here, before
-    // the '-nav' suffix is picked, so predict and serve can't drift (same
-    // reasoning as willServeNav itself, one comment block up). Without this,
-    // `/` (container view, reachable whenever the seeded index.html is
-    // absent — seeding is skip-if-exists) and `/?view=nav` (root view)
-    // predicted the identical '-nav' suffix off the same
-    // stats.etag+labeledListingType+visKey inputs despite serving different
-    // bodies, so an ETag minted from one could bogus-304 the other.
+    // Review fix (root-view ETag key): the SAME predicates the render branch
+    // below (~line 749) uses to pick the SERVER INDEX or STORAGE ROOT view
+    // over the generic container view — hoisted here, before the '-nav'
+    // suffix is picked, so predict and serve can't drift (same reasoning as
+    // willServeNav itself, one comment block up). Without this, `/`
+    // (container view, reachable whenever the seeded index.html is absent —
+    // seeding is skip-if-exists), `/?view=nav` (server index), and
+    // `/<pod>/?view=nav` (storage root) predicted colliding '-nav' suffixes
+    // off the same stats.etag+labeledListingType+visKey inputs despite
+    // serving different bodies, so an ETag minted from one could bogus-304
+    // another. Task A10 widened this from a two-way (nav/navroot) to a
+    // three-way (nav/navindex/navroot) disambiguation — the two predicates
+    // are mutually exclusive by construction (server-index only fires at
+    // urlPath==='/', storage-root only at urlPath===request.storageRootPath,
+    // which is never '/').
+    const willServeIndexView = willServeServerIndexView(request, urlPath);
     const willServeRootView = willServeRootStorageView(request, urlPath);
     const listingEtagBase = (request.lwsEnabled && !willMashlib)
       ? containerListingEtag(stats.etag, labeledListingType, visKey)
       : effectiveEtag;
     const listingEtag = willServeNav
-      ? variantEtag(listingEtagBase, willServeRootView ? 'navroot' : 'nav')
+      ? variantEtag(listingEtagBase, willServeIndexView ? 'navindex' : (willServeRootView ? 'navroot' : 'nav'))
       : listingEtagBase;
 
     // Deferred 304 check for container listings (#456) — compared against
@@ -767,6 +794,34 @@ export async function handleGet(request, reply) {
     if (willServeNav) {
       const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       const originStr = new URL(resourceUrl).origin;
+
+      // Server index view (Task A10, multi-tenant round): an explicit
+      // `?view=nav` at the SERVER root renders the WAC-filtered roster of
+      // every storage this pod hosts (listVisibleStorageRoots, A5) — no
+      // per-member item data needed, so this returns before the (per-
+      // member) items computation below. willServeIndexView is the exact
+      // predicate hoisted above (review fix, root-view ETag key) so the
+      // '-navindex' suffix baked into listingEtag and this render choice
+      // can never drift apart.
+      if (willServeIndexView) {
+        const roots = await listVisibleStorageRoots(storage, { origin: originStr, webId: agentWebId });
+        const indexHtml = renderServerIndexView({ origin: originStr, storages: roots.map((root) => ({ root })) });
+        const indexHeaders = getAllHeaders({
+          isContainer: true,
+          etag: listingEtag,
+          contentType: 'text/html',
+          origin,
+          resourceUrl,
+          connegEnabled,
+          mashlibEnabled: request.mashlibEnabled,
+          lwsEnabled: request.lwsEnabled,
+          storageRootPath: request.storageRootPath
+        });
+        indexHeaders['Cache-Control'] = RDF_CACHE_CONTROL;
+        Object.entries(indexHeaders).forEach(([k, v]) => reply.header(k, v));
+        return reply.type('text/html').send(indexHtml);
+      }
+
       const isPublicPod = !!request.config?.public;
       const baseStoragePath = storagePath.endsWith('/') ? storagePath : storagePath + '/';
       const baseUrlNav = resourceUrl.endsWith('/') ? resourceUrl : resourceUrl + '/';
@@ -787,27 +842,25 @@ export async function handleGet(request, reply) {
         return { ...it, rdfTypes, faces };
       }));
 
-      // Root/storage view (Task 7, spec 2026-07-15): an explicit `?view=nav`
-      // at the pod root renders the LWS storage description (services,
-      // capabilities, uriSpace prefixes) beside the same WAC-filtered
-      // top-level `items` computed above, instead of the generic container
-      // view below. Gated on urlPath (the raw request path), not
-      // storagePath — subdomain mode would leave storagePath pod-relative
-      // ('/'), but urlPath is always the literal request path. In practice
-      // this branch is reachable only via ?view=nav (the seeded index.html
-      // shadow, deviation (4), intercepts every other browser GET / before
-      // this code is ever reached) — the query check is written explicitly
-      // rather than relying on that invariant. willServeRootView is this
-      // exact predicate, hoisted above (review fix, root-view ETag key) so
-      // the '-navroot' suffix baked into listingEtag and this render choice
-      // can never drift apart — reused directly rather than recomputed.
+      // Storage root view (Task 7, spec 2026-07-15; per-storage as of Task
+      // A10): an explicit `?view=nav` at a STORAGE's own root renders that
+      // storage's LWS storage description (services, capabilities, uriSpace
+      // prefixes) beside the same WAC-filtered top-level `items` computed
+      // above, instead of the generic container view below. Gated on
+      // urlPath === request.storageRootPath (the owning root A2/A6 already
+      // resolved for this request) — willServeRootView is this exact
+      // predicate, hoisted above (review fix, root-view ETag key) so the
+      // '-navroot' suffix baked into listingEtag and this render choice can
+      // never drift apart — reused directly rather than recomputed.
       if (willServeRootView) {
-        // Same call the /.well-known/lws-storage route makes (src/server.js)
-        // — resolveStorageDescriptionInputs is the shared helper so the two
-        // can't drift on what they derive from pod-config's uriSpaces.
+        const root = request.storageRootPath;
+        // Same call the per-storage /:pod/lws-storage route makes
+        // (src/server.js) — resolveStorageDescriptionInputs is the shared
+        // helper so the two can't drift on what they derive from that
+        // storage's own pod-config's uriSpaces.
         const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
-          await resolveStorageDescriptionInputs(request.podConfig, originStr, request.lwsEnabled);
-        const sd = buildStorageDescription(originStr, {
+          await resolveStorageDescriptionInputs(request.podConfigFor(root), originStr, request.lwsEnabled);
+        const sd = buildStorageDescriptionFor(`${originStr}${root}`, {
           typeIndexEnabled: request.typeIndexEnabled,
           notificationsEnabled: request.notificationsEnabled,
           profileIndexPath,
@@ -827,7 +880,8 @@ export async function handleGet(request, reply) {
           resourceUrl,
           connegEnabled,
           mashlibEnabled: request.mashlibEnabled,
-          lwsEnabled: request.lwsEnabled
+          lwsEnabled: request.lwsEnabled,
+          storageRootPath: request.storageRootPath
         });
         rootHeaders['Cache-Control'] = RDF_CACHE_CONTROL;
         Object.entries(rootHeaders).forEach(([k, v]) => reply.header(k, v));
@@ -840,7 +894,7 @@ export async function handleGet(request, reply) {
       // predictive '-html' pattern ~line 223) — reused directly here
       // rather than recomputed, so the header and the 304 comparison can
       // never drift apart.
-      const html = renderContainerView({ url: resourceUrl, items, conformsTo: navConformsTo });
+      const html = renderContainerView({ url: resourceUrl, items, conformsTo: navConformsTo, storageRootPath: request.storageRootPath });
       const headers = getAllHeaders({
         isContainer: true,
         etag: listingEtag,
@@ -849,7 +903,8 @@ export async function handleGet(request, reply) {
         resourceUrl,
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
-        lwsEnabled: request.lwsEnabled
+        lwsEnabled: request.lwsEnabled,
+        storageRootPath: request.storageRootPath
       });
       headers['Cache-Control'] = RDF_CACHE_CONTROL;
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -883,7 +938,8 @@ export async function handleGet(request, reply) {
         resourceUrl,
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
-        lwsEnabled: request.lwsEnabled
+        lwsEnabled: request.lwsEnabled,
+        storageRootPath: request.storageRootPath
       });
       headers['X-Frame-Options'] = 'DENY';
       headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -973,6 +1029,7 @@ export async function handleGet(request, reply) {
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
         lwsEnabled: request.lwsEnabled,
+        storageRootPath: request.storageRootPath,
         chosenProfile,
         representations: advertisedReps
       });
@@ -1010,6 +1067,7 @@ export async function handleGet(request, reply) {
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
         lwsEnabled: request.lwsEnabled,
+        storageRootPath: request.storageRootPath,
         chosenProfile,
         representations: advertisedReps
       });
@@ -1037,6 +1095,7 @@ export async function handleGet(request, reply) {
             connegEnabled,
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
+            storageRootPath: request.storageRootPath,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1068,6 +1127,7 @@ export async function handleGet(request, reply) {
           connegEnabled,
           mashlibEnabled: request.mashlibEnabled,
           lwsEnabled: request.lwsEnabled,
+          storageRootPath: request.storageRootPath,
           chosenProfile,
           representations: advertisedReps
         });
@@ -1095,6 +1155,7 @@ export async function handleGet(request, reply) {
       connegEnabled,
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
+      storageRootPath: request.storageRootPath,
       chosenProfile,
       representations: advertisedReps
     });
@@ -1263,6 +1324,7 @@ export async function handleGet(request, reply) {
       reps,
       mediaType: storedContentType || '',
       excerpt,
+      storageRootPath: request.storageRootPath,
     });
     const headers = getAllHeaders({
       isContainer: false,
@@ -1273,6 +1335,7 @@ export async function handleGet(request, reply) {
       connegEnabled,
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
+      storageRootPath: request.storageRootPath,
       chosenProfile,
       representations: advertisedReps
     });
@@ -1354,6 +1417,7 @@ export async function handleGet(request, reply) {
       connegEnabled,
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
+      storageRootPath: request.storageRootPath,
       chosenProfile,
       representations: advertisedReps
     });
@@ -1383,6 +1447,7 @@ export async function handleGet(request, reply) {
         resourceUrl,
         connegEnabled,
         lwsEnabled: request.lwsEnabled,
+        storageRootPath: request.storageRootPath,
         chosenProfile,
         representations: advertisedReps
       });
@@ -1429,6 +1494,7 @@ export async function handleGet(request, reply) {
       connegEnabled,
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
+      storageRootPath: request.storageRootPath,
       chosenProfile,
       representations: advertisedReps
     });
@@ -1487,6 +1553,7 @@ export async function handleGet(request, reply) {
             connegEnabled,
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
+            storageRootPath: request.storageRootPath,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1534,6 +1601,7 @@ export async function handleGet(request, reply) {
             connegEnabled,
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
+            storageRootPath: request.storageRootPath,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1567,6 +1635,7 @@ export async function handleGet(request, reply) {
             connegEnabled,
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
+            storageRootPath: request.storageRootPath,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1597,6 +1666,7 @@ export async function handleGet(request, reply) {
           connegEnabled,
           mashlibEnabled: request.mashlibEnabled,
           lwsEnabled: request.lwsEnabled,
+          storageRootPath: request.storageRootPath,
           chosenProfile,
           representations: advertisedReps
         });
@@ -1652,6 +1722,7 @@ export async function handleGet(request, reply) {
     connegEnabled,
     mashlibEnabled: request.mashlibEnabled,
     lwsEnabled: request.lwsEnabled,
+    storageRootPath: request.storageRootPath,
     chosenProfile,
     representations: advertisedReps
   });
@@ -2019,17 +2090,20 @@ export async function handleHead(request, reply) {
       if (willServeNavigatorView(request)) {
         // Task 8 routed fix (review of Task 5/6/7), now sharing the actual
         // predicate functions with GET (review follow-up) instead of just a
-        // mirrored comment: willServeNavigatorView/willServeRootStorageView
-        // are the SAME functions GET's container branch calls (~line 682/
-        // 693) — a container HEAD from a browser must predict the SAME
-        // navigator response GET serves (Task 5 container view / Task 7
-        // root view), not the legacy plain-listing shape. `contentType`
-        // here is still the negotiated real representation type computed
-        // above (GET's `labeledListingType`) — containerListingEtag keys
-        // off THAT, exactly like GET's listingEtagBase, before the
-        // '-nav'/'-navroot' suffix is folded in.
+        // mirrored comment: willServeNavigatorView/willServeServerIndexView/
+        // willServeRootStorageView are the SAME functions GET's container
+        // branch calls — a container HEAD from a browser must predict the
+        // SAME navigator response GET serves (Task 5 container view / Task 7
+        // storage-root view / Task A10 server-index view), not the legacy
+        // plain-listing shape. `contentType` here is still the negotiated
+        // real representation type computed above (GET's
+        // `labeledListingType`) — containerListingEtag keys off THAT,
+        // exactly like GET's listingEtagBase, before the
+        // '-nav'/'-navindex'/'-navroot' suffix is folded in.
+        const willServeIndexView = willServeServerIndexView(request, urlPath);
         const willServeRootView = willServeRootStorageView(request, urlPath);
-        headEtag = variantEtag(containerListingEtag(stats.etag, contentType, visKey), willServeRootView ? 'navroot' : 'nav');
+        headEtag = variantEtag(containerListingEtag(stats.etag, contentType, visKey),
+          willServeIndexView ? 'navindex' : (willServeRootView ? 'navroot' : 'nav'));
         contentType = 'text/html';
         skipProfileNegotiation = true;
       } else {
@@ -2258,6 +2332,7 @@ export async function handleHead(request, reply) {
     connegEnabled,
     mashlibEnabled: request.mashlibEnabled,
     lwsEnabled: request.lwsEnabled,
+    storageRootPath: request.storageRootPath,
     chosenProfile,
     representations: advertisedReps
   });
@@ -2590,7 +2665,8 @@ export async function handleOptions(request, reply) {
     origin,
     resourceUrl,
     connegEnabled,
-    lwsEnabled: request.lwsEnabled
+    lwsEnabled: request.lwsEnabled,
+    storageRootPath: request.storageRootPath
   });
 
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -2706,7 +2782,7 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
   }
 
   const origin = request.headers.origin;
-  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled });
+  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled, storageRootPath: request.storageRootPath });
   // Append the describedby Link when admission resolved a governing shape —
   // mirrors handlePut's success-path shape advertisement.
   if (w.shapeUrl) {
@@ -3090,7 +3166,7 @@ export async function handlePatch(request, reply) {
   // this is byte-identical to the prior call when request.lwsEnabled is
   // false/undefined (the --lws-off case) — only the --lws-ON output gains
   // the headers it was already missing.
-  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled });
+  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled, storageRootPath: request.storageRootPath });
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
 
   // Emit change notification for WebSocket subscribers

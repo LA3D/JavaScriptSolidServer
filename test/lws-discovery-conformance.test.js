@@ -61,8 +61,28 @@ describe('LWS discovery conformance (--lws ON)', () => {
     assert.equal(ct, 'application/lws+json');
   });
 
-  it('Storage Description body: @context / type / StorageDescription service', async () => {
+  // Multi-tenant round (Task A5, D5): /.well-known/lws-storage is now a
+  // ServerIndex roster, not a single Storage description — the shape this
+  // test asserted pre-multi-tenant. The per-storage Storage document (with
+  // its own StorageDescription service entry) now lives at
+  // /alice/lws-storage instead; see the two tests below.
+  it('ServerIndex body: @context / type / storage[] with a storageDescription pointer', async () => {
     const res = await request(SD_PATH, { headers: { Accept: 'application/lws+json' } });
+    assertStatus(res, 200);
+    const body = await res.json();
+    assert.equal(body['@context'], LWS_CONTEXT, '@context must be lws/v1');
+    assert.equal(body.type, 'ServerIndex', 'type must be ServerIndex (multi-tenant round, D5)');
+    assert.ok(Array.isArray(body.storage), 'storage must be an array');
+    const alice = body.storage.find(s => s.id.endsWith('/alice/'));
+    assert.ok(alice, 'storage must contain the alice pod');
+    assert.ok(
+      alice.storageDescription.endsWith('/alice/lws-storage'),
+      `alice storageDescription should end with /alice/lws-storage, got: ${alice.storageDescription}`
+    );
+  });
+
+  it('per-storage Storage Description body: @context / type / StorageDescription service', async () => {
+    const res = await request('/alice/lws-storage', { headers: { Accept: 'application/lws+json' } });
     assertStatus(res, 200);
     const body = await res.json();
     assert.equal(body['@context'], LWS_CONTEXT, '@context must be lws/v1');
@@ -72,8 +92,8 @@ describe('LWS discovery conformance (--lws ON)', () => {
     assert.ok(sd, 'service must contain a StorageDescription entry');
     assert.ok(sd.serviceEndpoint, 'StorageDescription must have serviceEndpoint');
     assert.ok(
-      sd.serviceEndpoint.endsWith('/.well-known/lws-storage'),
-      `serviceEndpoint should end with /.well-known/lws-storage, got: ${sd.serviceEndpoint}`
+      sd.serviceEndpoint.endsWith('/alice/lws-storage'),
+      `serviceEndpoint should end with /alice/lws-storage, got: ${sd.serviceEndpoint}`
     );
   });
 
@@ -215,6 +235,10 @@ describe('LWS discovery negative controls (--lws OFF)', () => {
 describe('LWS NotificationService in storage description (--lws + --notifications)', () => {
   before(async () => {
     await startTestServer({ lws: true, notifications: true });
+    // NotificationService (like every other server-wide service) is
+    // advertised on the per-storage description (/:pod/lws-storage), not
+    // the ServerIndex well-known — multi-tenant round, D5.
+    await createTestPod('alice');
   });
 
   after(async () => {
@@ -222,7 +246,7 @@ describe('LWS NotificationService in storage description (--lws + --notification
   });
 
   it('service array contains a NotificationService entry', async () => {
-    const res = await request(SD_PATH, { headers: { Accept: 'application/lws+json' } });
+    const res = await request('/alice/lws-storage', { headers: { Accept: 'application/lws+json' } });
     assertStatus(res, 200);
     const body = await res.json();
     assert.ok(Array.isArray(body.service), 'service must be an array');

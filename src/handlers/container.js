@@ -9,7 +9,7 @@ import { createToken } from '../auth/token.js';
 import { canAcceptInput, toJsonLd, RDF_TYPES } from '../rdf/conneg.js';
 import { emitChange } from '../notifications/events.js';
 import { constraintProblem } from '../lws/admission.js';
-import { parseTypeLinks } from '../lws/type-metadata.js';
+import { parseTypeLinks, captureDeclaredTypes, LWS_STORAGE } from '../lws/type-metadata.js';
 import { applyLwsWrite } from '../lws/write.js';
 import { extensionForRdfType } from '../lws/write-consistency.js';
 
@@ -233,6 +233,11 @@ export async function handlePost(request, reply) {
  *   disk in plaintext under owner-only WAC + file mode 0600 — operators
  *   should add filesystem-level protection (FDE / OS keyring) for any pod
  *   that matters.
+ * @param {'public'|'private'} [options.visibility='public'] - Per-storage
+ *   provisioning visibility (multi-tenant #A9). 'private' omits the
+ *   `#public` Read authorization from the pod ROOT .acl only — the
+ *   inbox/public/private/settings/profile children keep their existing
+ *   ACLs unchanged. Default 'public' is byte-identical to prior behavior.
  * @returns {Promise<{ podPath, podUri, ownerKey?: { document, publicHex, secretHex, publicMultibase } }>}
  *   When `provisionKeys` is true, the return value includes the freshly
  *   minted key material so the caller can surface the public side in CLI
@@ -240,10 +245,12 @@ export async function handlePost(request, reply) {
  */
 export async function createPodStructure(name, webId, podUri, issuer, defaultQuota = 0, options = {}) {
   const podPath = `/${name}/`;
+  const { visibility = 'public' } = options;
 
   // Create pod directory structure
   // Pod settings directory
   await storage.createContainer(podPath);
+  await captureDeclaredTypes(storage, podPath, [LWS_STORAGE]);   // storage-root marker (multi-tenant)
   await storage.createContainer(`${podPath}inbox/`);
   await storage.createContainer(`${podPath}public/`);
   await storage.createContainer(`${podPath}private/`);
@@ -288,7 +295,7 @@ export async function createPodStructure(name, webId, podUri, issuer, defaultQuo
   // keeps the on-disk pod portable across hostnames.
   const owner = aclBase => relativizeOwnerWebId(webId, podUri, aclBase);
 
-  const rootAcl = generateOwnerAcl('./', owner(''), true);
+  const rootAcl = generateOwnerAcl('./', owner(''), true, { publicRead: visibility !== 'private' });
   await storage.write(`${podPath}.acl`, serializeAcl(rootAcl));
 
   const privateAcl = generatePrivateAcl('./', owner('private/'));
@@ -385,7 +392,7 @@ export async function handleCreatePod(request, reply) {
     return reply.code(405).send({ error: 'Method Not Allowed', message: 'Server is in read-only mode' });
   }
 
-  const { name, email, password, provisionKeys } = request.body || {};
+  const { name, email, password, provisionKeys, visibility } = request.body || {};
   const idpEnabled = request.idpEnabled;
 
   if (!name || typeof name !== 'string') {
@@ -458,9 +465,12 @@ export async function handleCreatePod(request, reply) {
   try {
     // Use shared pod creation function. Coerce provisionKeys to a
     // strict boolean so a JSON `null` / missing value defaults to off.
+    // visibility: 'private' opts the pod ROOT ACL out of public read
+    // (multi-tenant #A9); anything else (including absent) is 'public',
+    // matching prior behavior.
     podCreation = await createPodStructure(
       name, webId, podUri, issuer, 0,
-      { provisionKeys: provisionKeys === true }
+      { provisionKeys: provisionKeys === true, visibility: visibility === 'private' ? 'private' : 'public' }
     );
   } catch (err) {
     console.error('Pod creation error:', err);
