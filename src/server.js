@@ -439,6 +439,16 @@ export function createServer(options = {}) {
   fastify.decorateRequest('singleUserName', null);
   fastify.decorateRequest('podConfig', null);
   fastify.decorateRequest('podConfigFor', null);
+  // A6 (multi-tenant round): the owning storage's root path for THIS
+  // request's own target resource ('/alice/' or null for server scope),
+  // resolved once here (async storageRootFor, cached) since getAllHeaders
+  // is sync and called ~40x per response. Threaded into every LWS-relevant
+  // getAllHeaders({...}) call site in src/handlers/resource.js (the only
+  // file whose getAllHeaders calls pass lwsEnabled today — container.js's
+  // two calls don't, so they never emit storageDescription regardless) so
+  // the Link points at the OWNING storage's description, not the origin
+  // well-known.
+  fastify.decorateRequest('storageRootPath', null);
   // Task 7 (spec 2026-07-15): the navigator root/storage view
   // (src/handlers/resource.js) builds its own storage description — it
   // needs these two flags on `request` for parity, mirroring
@@ -469,6 +479,14 @@ export function createServer(options = {}) {
     request.singleUserName = singleUserName;
     request.mcpEnabled = mcpEnabled;
     request.anonRateLimitMax = anonRateLimitMax;
+    // A6: urlPath the SAME way getRequestPaths (resource.js/container.js)
+    // derives it, so the resolved root always matches the resourceUrl those
+    // handlers build from the same request.url — storageRootFor itself
+    // returns null for '/', '.well-known/*', or an unmarked first segment
+    // (server scope), cached positive-only (A2).
+    request.storageRootPath = lwsEnabled
+      ? await storageRootFor(storage, request.url.split('?')[0])
+      : null;
 
     // Extract pod name from subdomain if enabled
     if (subdomainsEnabled && baseDomain) {

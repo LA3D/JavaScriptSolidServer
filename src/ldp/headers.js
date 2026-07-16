@@ -141,16 +141,21 @@ export function representationLinks(representations) {
  *   spec §4) by the bare-200 path when a .meta exists — resources with no
  *   .meta pay only a storage.exists() on the hot path. Linkset responses
  *   carry the list in their BODY too.
+ * @param {string|null} [options.storageRootPath] - the owning storage's
+ *   root path (e.g. '/alice/'), as resolved by `storageRootFor` (A2) in the
+ *   request pipeline — getAllHeaders is sync and can't resolve it itself.
+ *   `null` (default) keeps the pre-multi-tenant server-scope well-known
+ *   target, unchanged for every caller that doesn't pass it.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null, storageRootPath = null }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
   };
   if (lwsEnabled && resourceUrl) {
     const parts = [
-      `<${storageDescriptionUrl(resourceUrl)}>; rel="${LWS_STORAGE_DESC_REL}"`,
+      `<${storageDescriptionUrl(resourceUrl, storageRootPath)}>; rel="${LWS_STORAGE_DESC_REL}"`,
       `<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`
     ];
     const extra = parts.join(', ');
