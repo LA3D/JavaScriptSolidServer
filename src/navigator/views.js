@@ -83,9 +83,13 @@ export function renderContainerView({ url, items, conformsTo = [], storageRootPa
     const meta = [it.mediaType, it.size, it.modified].filter(Boolean).map(esc).join(' · ');
     return `<tr><td><a href="${esc(it.id)}">${esc(relName)}</a></td><td>${badges}</td><td>${faces}</td><td class="muted">${meta}</td></tr>`;
   }).join('\n');
+  // ?raw force-raw escape (fix branch la3d/lws-force-raw): same reasoning as
+  // renderEntityView's "raw" link above — a browser following this link has
+  // Accept: text/html, so the bare container URL just re-serves this same
+  // navigator view (the bug). `?raw` forces the machine listing instead.
   return navPage(name, crumbHtml(url, storageRootPath),
     `<h1>${esc(name)}/</h1>${prof}<table><tr><th>name</th><th>types</th><th>open with</th><th></th></tr>${rows}</table>` +
-    `<p class="muted"><a href="${esc(url)}">machine view</a></p>`);
+    `<p class="muted"><a href="${esc(url)}?raw">machine view</a></p>`);
 }
 
 // Generic entity face (Task 6, spec 2026-07-15): the server-rendered HTML
@@ -103,8 +107,18 @@ export function renderEntityView({ url, types = [], conformsTo = [], describedby
     provenance.length ? `<dt>earned</dt><dd>${provenance.map((p) => esc(p)).join('<br>')}</dd>` : '',
     describedby.length ? `<dt>shapes</dt><dd>${describedby.map((d) => `<a href="${esc(d)}">${esc(d)}</a>`).join('<br>')}</dd>` : '',
     `<dt>media type</dt><dd>${esc(mediaType)}</dd>`,
-    `<dt>machine views</dt><dd><a href="${esc(url)}">raw</a>${(reps.alternates ?? []).map((r) =>
-      ` · <a href="${esc(r.href)}">${esc(r.format || r.href)}</a>`).join('')}</dd>`
+    // ?raw force-raw escape (fix branch la3d/lws-force-raw): a browser
+    // following ANY of these links has Accept: text/html, so a bare
+    // resource URL just loops back into this same entity face (the bug).
+    // `raw` forces the serving path to treat the request as non-browser-
+    // shaped (src/handlers/resource.js wantsRaw) — every link here needs it
+    // EXCEPT a rep that's itself an html face (native browser render, no
+    // loop risk).
+    `<dt>machine views</dt><dd><a href="${esc(url)}?raw">raw</a>${(reps.alternates ?? []).map((r) => {
+      const isHtml = (r.format || '').split(';')[0].trim().toLowerCase() === 'text/html';
+      const href = isHtml ? r.href : `${r.href}${r.href.includes('?') ? '&' : '?'}raw`;
+      return ` · <a href="${esc(href)}">${esc(r.format || r.href)}</a>`;
+    }).join('')}</dd>`
   ].filter(Boolean).join('\n');
   const prev = excerpt ? `<h2>preview</h2><pre style="white-space:pre-wrap;border:1px solid var(--line);padding:.5rem">${esc(excerpt)}</pre>` : '';
   return navPage(name, crumbHtml(url, storageRootPath), `<h1>${esc(name)}</h1><dl class="meta">${rows}</dl>${prev}`);
