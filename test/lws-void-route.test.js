@@ -86,6 +86,14 @@ describe('lws: /.well-known/void rung', () => {
   // both work (pre-fix, this describe needed its own relative lwsConfig
   // value or the per-storage lookup would double the pod segment:
   // /alice/alice/profiles/pod-config.jsonld).
+  //
+  // Pre-merge fix (whole-branch review, Important finding): VoidService is
+  // now SUPPRESSED on the per-storage description, even when the per-storage
+  // config names a void pointer — the server-wide /.well-known/void route
+  // (above) reads the LEGACY server-wide podConfig, not this per-storage
+  // config, so advertising it here could misdirect a second tenant to (or
+  // 404 against) a DIFFERENT tenant's void. Interim, pending a real
+  // per-storage void route (src/lws/storage-description.js).
   describe('configured (per-storage /:pod/lws-storage)', () => {
     let base;
 
@@ -100,23 +108,20 @@ describe('lws: /.well-known/void rung', () => {
       await stopTestServer();
     });
 
-    it('storage description advertises VoidService with a vocabulary hint', async () => {
+    it('storage description does NOT advertise VoidService (interim suppression, cross-tenant misdirect)', async () => {
       const res = await request('/alice/lws-storage', {
         headers: { Accept: 'application/lws+json' },
       });
       const sd = await res.json();
-      const v = sd.service.find((s) => s.type === 'VoidService');
-      assert.ok(v, 'VoidService entry must be present');
-      assert.equal(v.serviceEndpoint, `${base}/.well-known/void`);
-      assert.match(v.hint, /vocabular/i);
+      assert.equal(sd.service.some((s) => s.type === 'VoidService'), false, 'VoidService must be suppressed on the per-storage description');
     });
   });
 
   // Same drift-guard as test/mcp-lws-read.test.js's profileIndex case:
   // proves the HTTP route and the MCP ctx (src/mcp/resources.js, via
   // ctx.podConfigFor — Task A7, mirrors request.podConfigFor off the SAME
-  // podConfigResolver instance server.js built, A3) both advertise the same
-  // VoidService entry rather than one of them silently omitting it.
+  // podConfigResolver instance server.js built, A3) agree on the same
+  // service set rather than one of them silently drifting from the other.
   //
   // Task A7 (multi-tenant MCP parity — un-skipped/repointed): the HTTP
   // /.well-known/lws-storage route returns a ServerIndex roster, not a
@@ -125,6 +130,13 @@ describe('lws: /.well-known/void rung', () => {
   // /:pod/lws-storage document, which MCP's resources.js readPerStorage-
   // Description now resolves too (previously skip()'d with a documented
   // KNOWN GAP; the gap is closed).
+  //
+  // Pre-merge fix (whole-branch review, Important finding): VoidService is
+  // now suppressed on BOTH the HTTP and MCP per-storage descriptions (both
+  // call the SAME buildStorageDescriptionFor) — so the parity this test
+  // guards is now parity of ABSENCE, not presence. See the sibling describe
+  // above for why (server-wide /.well-known/void route vs. per-storage
+  // config mismatch).
   describe('MCP parity (void configured, mcp on)', () => {
     let base;
 
@@ -139,7 +151,7 @@ describe('lws: /.well-known/void rung', () => {
       await stopTestServer();
     });
 
-    it('the per-storage description resource mirrors /alice/lws-storage with void configured', async () => {
+    it('the per-storage description resource mirrors /alice/lws-storage with void configured (both suppress VoidService)', async () => {
       const httpRes = await fetch(`${base}/alice/lws-storage`);
       const httpBody = await httpRes.json();
 
@@ -155,8 +167,7 @@ describe('lws: /.well-known/void rung', () => {
       const resourceBody = JSON.parse(mcpJson.result.contents[0].text);
 
       const voidSvc = httpBody.service.find((s) => s.type === 'VoidService');
-      assert.ok(voidSvc, 'HTTP route must advertise VoidService when the config names a void pointer');
-      assert.equal(voidSvc.serviceEndpoint, `${base}/.well-known/void`);
+      assert.equal(voidSvc, undefined, 'HTTP route must NOT advertise VoidService (interim suppression)');
       assert.deepEqual(resourceBody.service, httpBody.service);
     });
   });

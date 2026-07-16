@@ -231,7 +231,17 @@ export function buildStorageDescription(origin, flags = {}) {
  */
 export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
   const base = storageRootUrl.replace(/\/$/, '');
-  return assembleDescription(storageRootUrl, `${base}/lws-storage`, flags);
+  // INTERIM SUPPRESSION (pre-merge fix, whole-branch review): VoidService
+  // here would point at the server-wide /.well-known/void route, but that
+  // route resolves the LEGACY server-wide podConfig (--lws-config), not this
+  // storage's own per-storage config voidPath is read from — a second
+  // tenant's void pointer would misdirect to (or 404 against) a DIFFERENT
+  // tenant's void. Suppress until a real per-storage void route exists
+  // (follow-up, recorded in FOLLOWUP.md). The origin form
+  // (buildStorageDescription) is untouched: its VoidService is server-wide
+  // correct by construction — it's the same podConfig the well-known route
+  // itself reads.
+  return assembleDescription(storageRootUrl, `${base}/lws-storage`, { ...flags, voidPath: null });
 }
 
 /**

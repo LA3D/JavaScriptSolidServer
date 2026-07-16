@@ -125,6 +125,28 @@ test('buildStorageDescriptionFor: ProfileIndexService composes off origin, not t
   assert.equal(pi.serviceEndpoint, 'http://h/alice/profiles/index.jsonld');
 });
 
+// Pre-merge fix (multi-tenant whole-branch review, Important finding): the
+// /.well-known/void HTTP route reads the LEGACY server-wide podConfig, not
+// the per-storage config buildStorageDescriptionFor derives voidPath from —
+// so advertising a VoidService here can misdirect a second tenant's void
+// pointer to a DIFFERENT tenant's void document (or 404). Suppressed until a
+// real per-storage void route exists. The origin form (buildStorageDescription)
+// is UNCHANGED — its own VoidService is server-wide-correct by construction
+// (it's the same podConfig the well-known route itself reads).
+test('buildStorageDescriptionFor suppresses VoidService (interim, cross-tenant misdirect)', () => {
+  const d = buildStorageDescriptionFor('http://h/alice/', {
+    voidPath: '/alice/profiles/void.jsonld', typeIndexEnabled: true, mcpEnabled: true,
+  });
+  assert.ok(d.service.some(s => s.type === 'TypeIndexService'));
+  assert.ok(d.service.some(s => s.type === 'McpService'));
+  assert.ok(!d.service.some(s => s.type === 'VoidService'), 'per-storage description must NOT advertise VoidService');
+});
+
+test('buildStorageDescription (origin form) still advertises VoidService (byte-identity preserved)', () => {
+  const d = buildStorageDescription('http://h', { voidPath: '/x' });
+  assert.ok(d.service.some(s => s.type === 'VoidService'), 'origin form must still advertise VoidService');
+});
+
 test('buildServerIndex lists storages, not a Storage', () => {
   const idx = buildServerIndex('http://h', [{ root: '/alice/' }, { root: '/bob/' }]);
   assert.equal(idx.type, 'ServerIndex');
