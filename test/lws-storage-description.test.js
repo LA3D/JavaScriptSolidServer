@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateStorageDescription, buildStorageDescription } from '../src/lws/storage-description.js';
+import { generateStorageDescription, buildStorageDescription, buildStorageDescriptionFor, buildServerIndex, storageDescriptionUrl } from '../src/lws/storage-description.js';
 
 const ROOT = 'http://localhost:3000/';
 const DESC = 'http://localhost:3000/.well-known/lws-storage';
@@ -65,4 +65,43 @@ test('McpService hint omits the budget sentence when anonRateLimitMax is not giv
   const sd = buildStorageDescription('https://pod.example', { mcpEnabled: true });
   const svc = sd.service.find(s => s.type === 'McpService');
   assert.doesNotMatch(svc.hint, /requests\/minute/);
+});
+
+// A4 (multi-tenant storage, additive): storageDescriptionUrl grows a 2nd,
+// optional arg — the 1-arg call stays the origin/.well-known form (server
+// index / legacy single-storage callers untouched), a per-storage root path
+// switches to the per-storage form.
+test('storageDescriptionUrl is per-storage when a root is given', () => {
+  assert.equal(
+    storageDescriptionUrl('http://h/alice/x.ttl', '/alice/'),
+    'http://h/alice/lws-storage');
+  assert.equal(
+    storageDescriptionUrl('http://h/.well-known/x', null),
+    'http://h/.well-known/lws-storage');
+});
+
+// buildStorageDescription (origin form) is UNCHANGED by this task — see the
+// byte-identity check in the task report. The per-storage id/endpoints land
+// on the new buildStorageDescriptionFor instead.
+test('buildStorageDescriptionFor id + services are pod-scoped', () => {
+  const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true });
+  assert.equal(d.id, 'http://h/alice/');
+  const sd = d.service.find(s => s.type === 'StorageDescription');
+  assert.equal(sd.serviceEndpoint, 'http://h/alice/lws-storage');
+  const ti = d.service.find(s => s.type === 'TypeIndexService');
+  assert.equal(ti.serviceEndpoint, 'http://h/alice/types/index');
+});
+
+test('buildStorageDescriptionFor keeps McpService origin-scoped, not storage-scoped', () => {
+  const d = buildStorageDescriptionFor('http://h/alice/', { mcpEnabled: true });
+  const mcp = d.service.find(s => s.type === 'McpService');
+  assert.equal(mcp.serviceEndpoint, 'http://h/mcp');
+});
+
+test('buildServerIndex lists storages, not a Storage', () => {
+  const idx = buildServerIndex('http://h', [{ root: '/alice/' }, { root: '/bob/' }]);
+  assert.equal(idx.type, 'ServerIndex');
+  assert.notEqual(idx.type, 'Storage');
+  assert.deepEqual(idx.storage.map(s => s.id), ['http://h/alice/', 'http://h/bob/']);
+  assert.equal(idx.storage[0].storageDescription, 'http://h/alice/lws-storage');
 });
