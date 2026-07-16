@@ -18,8 +18,11 @@ export function makePodConfig(storage, storagePath) {
       // mtime alone collides on coarse-granularity filesystems when two
       // writes land in the same tick; folding in size catches a same-mtime
       // content change of different length. Falls back to mtime alone if
-      // `size` isn't reported.
-      const key = st.size != null ? `${st.mtime.getTime()}:${st.size}` : `${st.mtime.getTime()}`;
+      // `size` isn't reported. Tolerates either a Date `mtime` (real
+      // storage backends) or a raw `mtimeMs` number (lightweight storage
+      // stubs, e.g. in tests) — same cache-freshness contract either way.
+      const mtimeKey = st.mtime instanceof Date ? st.mtime.getTime() : (st.mtimeMs ?? 0);
+      const key = st.size != null ? `${mtimeKey}:${st.size}` : `${mtimeKey}`;
       if (key !== cache.key) {
         try {
           const buf = await storage.read(storagePath);
@@ -32,6 +35,30 @@ export function makePodConfig(storage, storagePath) {
         }
       }
       return cache.value;
+    },
+  };
+}
+
+// Multi-tenant round: one pod-config resource PER STORAGE ROOT rather than
+// one server-wide file — `relConfigPath` is the `--lws-config` value
+// re-interpreted as relative under each storage root (e.g.
+// `profiles/pod-config.jsonld`), so `/alice/` and `/bob/` each get their own
+// {profileIndex, void, uriSpaces} without cross-tenant leakage. One
+// makePodConfig reader is cached per root (first access wins, same
+// mtime+size cache as above thereafter). `storageRootPath` is what
+// storageRootFor() (src/lws/storage-resolver.js) resolves; a falsy root
+// (server scope, or --lws off) is server-neutral: always empty config.
+export function makePodConfigResolver(storage, relConfigPath) {
+  const byRoot = new Map();
+  const empty = { get: async () => ({}) };
+  return {
+    for(storageRootPath) {
+      if (!storageRootPath) return empty;
+      if (!byRoot.has(storageRootPath)) {
+        const abs = storageRootPath + relConfigPath.replace(/^\//, '');
+        byRoot.set(storageRootPath, makePodConfig(storage, abs));
+      }
+      return byRoot.get(storageRootPath);
     },
   };
 }

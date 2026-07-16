@@ -37,7 +37,7 @@ import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescription, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
-import { makePodConfig } from './lws/pod-config.js';
+import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -111,6 +111,14 @@ export function createServer(options = {}) {
   // it, no restart needed. ONE instance shared by the HTTP routes below and
   // the MCP surface (src/mcp/index.js), so the two views can't diverge.
   const podConfig = makePodConfig(storage, lwsEnabled ? (options.lwsConfig ?? null) : null);
+  // Multi-tenant round (A3): a per-storage resolver ALONGSIDE the single
+  // podConfig above — nothing repointed yet (MCP registration + the
+  // /.well-known/lws-storage route below still read the server-wide
+  // instance; that migration is later tasks A5/A7). `options.lwsConfig` is
+  // read here as a path RELATIVE to each storage root (e.g.
+  // `profiles/pod-config.jsonld`), not the server-root-relative path the
+  // single `podConfig` above uses.
+  const podConfigResolver = lwsEnabled && options.lwsConfig ? makePodConfigResolver(storage, options.lwsConfig) : null;
   // Content Negotiation by Profile is ON by default whenever --lws is on;
   // --no-lws-profile-conneg is a per-deployment safety valve to disable just
   // the capability advertisement without disabling the rest of --lws.
@@ -420,6 +428,7 @@ export function createServer(options = {}) {
   fastify.decorateRequest('singleUser', null);
   fastify.decorateRequest('singleUserName', null);
   fastify.decorateRequest('podConfig', null);
+  fastify.decorateRequest('podConfigFor', null);
   // Task 7 (spec 2026-07-15): the navigator root/storage view builds the
   // SAME buildStorageDescription() call the /.well-known/lws-storage route
   // makes (src/handlers/resource.js) — it needs these two flags on
@@ -430,6 +439,7 @@ export function createServer(options = {}) {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
     request.podConfig = podConfig;
+    request.podConfigFor = (root) => podConfigResolver ? podConfigResolver.for(root) : { get: async () => ({}) };
     request.typeIndexEnabled = typeIndexEnabled;
     request.lwsProfileConneg = profileConnegEnabled;
     request.notificationsEnabled = notificationsEnabled || liveReloadEnabled;
