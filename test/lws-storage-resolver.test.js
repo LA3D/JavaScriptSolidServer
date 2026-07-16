@@ -32,3 +32,12 @@ test('an unmarked first segment resolves to null (not every path is a pod)', asy
   clearStorageRootCache();
   assert.equal(await storageRootFor(fakeStorage(), '/bob/x'), null); // /bob/ not marked here
 });
+
+test('a negative result is NOT cached (pod provisioned after a first miss resolves)', async () => {
+  clearStorageRootCache();
+  const marked = new Set();               // /bob/ not yet a storage
+  const s = fakeStorage(marked);
+  assert.equal(await storageRootFor(s, '/bob/x'), null);    // miss
+  marked.add('/bob/');                     // pod provisioned
+  assert.equal(await storageRootFor(s, '/bob/x'), '/bob/'); // resolves now (negative was not cached)
+});

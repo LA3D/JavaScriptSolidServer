@@ -1,16 +1,18 @@
 // src/lws/storage-resolver.js
 import { readDeclaredTypes, LWS_STORAGE } from './type-metadata.js';
 
-// cache: candidate-root path -> boolean (is a storage root). Reset via clearStorageRootCache.
+// cache: candidate-root path -> true, POSITIVE RESULTS ONLY (storage-root status is monotonic:
+// unmarked -> marked exactly once at provisioning, never unmarked). A miss is never cached, so a
+// pod provisioned after an earlier miss still resolves on the next check. Reset via clearStorageRootCache.
 const _isRoot = new Map();
 
 export function clearStorageRootCache() { _isRoot.clear(); }
 
 async function isStorageRoot(storage, rootPath) {
-  if (_isRoot.has(rootPath)) return _isRoot.get(rootPath);
+  if (_isRoot.get(rootPath)) return true;        // only positives are cached
   let marked = false;
   try { marked = (await readDeclaredTypes(storage, rootPath)).includes(LWS_STORAGE); } catch { marked = false; }
-  _isRoot.set(rootPath, marked);
+  if (marked) _isRoot.set(rootPath, true);       // cache only the positive; a miss re-checks next time
   return marked;
 }
 
