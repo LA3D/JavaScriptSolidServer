@@ -1381,7 +1381,17 @@ export async function handleGet(request, reply) {
   // skips that arm, so without this gate a raw GET of an audio/mpegurl type
   // (viewable to shouldServeMashlib but not to entityFaceViewable) would
   // still loop into the mashlib HTML wrapper.
-  if (!wantsRaw(request) && shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
+  // Review fix: ?raw is an --lws-only escape (see wantsRaw's own doc
+  // comment) — every OTHER call site ANDs it behind request.lwsEnabled, but
+  // this one didn't, and this branch (unlike the others) is the one that's
+  // actually reachable when !request.lwsEnabled. That let a bare ?raw on a
+  // --lws-OFF pod suppress the legacy mashlib wrapper too, changing
+  // --lws-OFF behavior (must stay byte-identical) and desyncing GET from
+  // HEAD (whose getMashlibEtag/isMashlibResponse were never ?raw-aware —
+  // RFC 9110 §9.3.2). `!request.lwsEnabled ||` makes wantsRaw a no-op here
+  // whenever --lws is off, restoring pre-?raw mashlib behavior exactly; the
+  // --lws-ON audio/mpegurl case above is unaffected (short-circuits false).
+  if ((!request.lwsEnabled || !wantsRaw(request)) && shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
     // #7 / #344: embed the resource as a JSON-LD data island so
     // non-mashlib consumers (search-engine rich-results, archival
     // crawlers) get the data without a second request, and so the

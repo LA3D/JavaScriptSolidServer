@@ -99,6 +99,55 @@ describe('lws: ?raw force-raw escape (navigator)', () => {
   });
 });
 
+// Regression (review of la3d/lws-force-raw): the mashlib gate this ?raw
+// escape guards (~line 1384) has NO lwsEnabled guard of its own — it's only
+// reachable when !request.lwsEnabled (the --lws-OFF legacy mashlib path;
+// under --lws it's shadowed by the entity-face arm, which returns first).
+// So a bare ?raw on an --lws-OFF pod was suppressing the mashlib wrapper
+// too, changing --lws-OFF behavior (the brief requires it byte-identical)
+// and putting GET/HEAD in disagreement (HEAD's getMashlibEtag/
+// isMashlibResponse were never touched, so HEAD still reports the mashlib
+// Content-Type/ETag while GET?raw reports the raw ones — RFC 9110 §9.3.2).
+describe('lws-OFF: ?raw must be a no-op (mashlib GET/HEAD parity, no --lws)', () => {
+  let base;
+
+  before(async () => {
+    await startTestServer({ mashlibCdn: true });
+    base = getBaseUrl();
+    await createTestPod('bob');
+    await request('/bob/public/note.jsonld', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      auth: 'bob',
+      body: JSON.stringify({ '@context': { schema: 'https://schema.org/' }, '@id': '#it', '@type': 'schema:Thing' }),
+    });
+  });
+  after(stopTestServer);
+
+  it('GET ?raw and GET (bare) return the IDENTICAL mashlib Content-Type + ETag', async () => {
+    const bare = await request('/bob/public/note.jsonld', { headers: { Accept: BROWSER_ACCEPT }, auth: 'bob' });
+    const raw = await request('/bob/public/note.jsonld?raw', { headers: { Accept: BROWSER_ACCEPT }, auth: 'bob' });
+    assert.equal(bare.status, 200);
+    assert.equal(raw.status, 200);
+    assert.match(bare.headers.get('content-type') || '', /text\/html/, 'bare GET must be the mashlib wrapper');
+    assert.equal(raw.headers.get('content-type'), bare.headers.get('content-type'), '?raw must not change Content-Type under --lws-off');
+    assert.equal(raw.headers.get('etag'), bare.headers.get('etag'), '?raw must not change ETag under --lws-off');
+    const rawBody = await raw.text();
+    assert.match(rawBody, /<!doctype html>/i, '?raw must still be the mashlib HTML wrapper, not raw bytes');
+  });
+
+  it('GET ?raw and HEAD ?raw agree on Content-Type + ETag (RFC 9110 9.3.2)', async () => {
+    const getRes = await request('/bob/public/note.jsonld?raw', { headers: { Accept: BROWSER_ACCEPT }, auth: 'bob' });
+    const headRes = await request('/bob/public/note.jsonld?raw', {
+      method: 'HEAD', headers: { Accept: BROWSER_ACCEPT }, auth: 'bob',
+    });
+    assert.equal(headRes.status, 200);
+    assert.equal(headRes.headers.get('content-type'), getRes.headers.get('content-type'));
+    assert.equal(headRes.headers.get('etag'), getRes.headers.get('etag'));
+    assert.match(headRes.headers.get('content-type') || '', /text\/html/);
+  });
+});
+
 describe('lws: ?raw force-raw escape — views unit (raw/machine-view link hrefs)', () => {
   it('renderEntityView: the "raw" link href carries ?raw', () => {
     const html = renderEntityView({ url: 'http://h/x', reps: { alternates: [] } });
