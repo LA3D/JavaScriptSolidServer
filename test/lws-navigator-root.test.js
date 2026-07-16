@@ -1,11 +1,20 @@
 // test/lws-navigator-root.test.js
-// Task 7 (fork, spec 2026-07-15): the navigator's root/storage view at
-// `/?view=nav` — renders the LWS storage description (services,
-// capabilities, uriSpace prefixes — the same buildStorageDescription the
-// /.well-known/lws-storage route serves) beside the WAC-filtered top-level
+// Task 7 (fork, spec 2026-07-15): the navigator's root/storage view —
+// renders the LWS storage description (services, capabilities, uriSpace
+// prefixes — the same buildStorageDescriptionFor the per-storage
+// `/<pod>/lws-storage` route serves) beside the WAC-filtered top-level
 // listing, instead of Task 5's generic container view. Reached only via the
 // explicit ?view=nav escape — the seeded index.html shadow keeps serving
 // plain GET / unchanged (deviation (4)).
+//
+// Task A10 (multi-tenant round) moved this view from the SERVER root
+// (`/?view=nav`) to each STORAGE's own root (`/<pod>/?view=nav`) — the
+// server root is now a WAC-filtered roster of every storage the pod hosts
+// (renderServerIndexView, test/lws-navigator-multitenant.test.js). The
+// per-storage-view assertions below were re-pointed at `/alice/?view=nav`
+// accordingly; the anon-vs-owner visibility suite stays at `/?view=nav`
+// (it's now testing the roster's own WAC filtering, which is the same
+// underlying guarantee — listVisibleStorageRoots — under a new name).
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs-extra';
@@ -41,16 +50,16 @@ describe('lws: navigator root/storage view (Task 7)', () => {
   // `acl:default` — so /alice/ itself is visible to anon here. The
   // negative case (a top-level container with no public grant at all) is
   // covered by the private-visibility suite below.
-  it('browser Accept + ?view=nav: 200 html, Storage heading, a service name, the configured uriSpace prefix, top-level container name', async () => {
-    const r = await request('/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
+  it('browser Accept + /alice/?view=nav: 200 html, Storage heading, a service name, the configured uriSpace prefix, top-level container name', async () => {
+    const r = await request('/alice/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
     assertStatus(r, 200);
     assert.match(r.headers.get('content-type') || '', /text\/html/);
     const body = await r.text();
     assert.match(body, /Storage/, 'must render the Storage heading');
     assert.match(body, /TypeIndexService/, 'must list a service name');
     assert.ok(body.includes(`${base}/id/`), 'must surface the configured uriSpace prefix');
-    assert.ok(body.includes(`${base}/alice/`), 'must list the top-level pod container (owner-visible)');
-    assert.match(body, /\/\.well-known\/lws-storage/, 'must link the machine view');
+    assert.ok(body.includes(`${base}/alice/public/`), 'must list alice\'s own top-level containers (public-read)');
+    assert.match(body, /\/alice\/lws-storage/, 'must link this storage\'s own machine view');
   });
 
   it('GET / browser Accept (no ?view=nav): the seeded index.html landing, unchanged', async () => {
@@ -59,6 +68,14 @@ describe('lws: navigator root/storage view (Task 7)', () => {
     const body = await r.text();
     assert.match(body, /Your JSS Solid pod is running/, 'seeded server-root landing must still serve');
     assert.doesNotMatch(body, /<h2>Storage<\/h2>/, 'must not render the nav root view');
+  });
+
+  it('GET /?view=nav: the server index roster (not a single storage\'s view), links to /alice/?view=nav', async () => {
+    const r = await request('/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(r, 200);
+    const body = await r.text();
+    assert.doesNotMatch(body, /<h2>Storage<\/h2>/, 'the server index is a roster, not a single storage\'s view');
+    assert.ok(body.includes(`${base}/alice/?view=nav`), 'must link alice\'s own storage view');
   });
 });
 
@@ -125,9 +142,17 @@ describe('lws: navigator root view — ?view=nav is inert without --lws', () => 
 // + visKey only — blind to which rendering branch would actually serve)
 // despite producing different bodies, so an If-None-Match minted from one
 // could bogus-304 the other.
+//
+// Task A10 widened this to a THREE-way disambiguation: `/` (generic
+// container view, unchanged), `/?view=nav` (now the server-index roster,
+// not a single storage's view), and `/alice/?view=nav` (the per-storage
+// root view Task 7 originally described) each mint their own '-nav' /
+// '-navindex' / '-navroot' ETag variant — none of the three may cross-304
+// another.
 describe('lws: navigator root view vs container view — ETag disambiguation (review fix)', () => {
   before(async () => {
     await startTestServer({ lws: true, mashlibCdn: true });
+    await createTestPod('alice');
     // Remove the seeded root index.html so plain GET / falls through past
     // the deviation-(4) landing-page shadow into the navigator's generic
     // container view (Task 5) instead — the operator-reachable case this
@@ -136,31 +161,45 @@ describe('lws: navigator root view vs container view — ETag disambiguation (re
   });
   after(stopTestServer);
 
-  it('/ (container view) and /?view=nav (root view) mint different ETags that can never cross-304', async () => {
+  it('/ (container view), /?view=nav (server index), /alice/?view=nav (storage view) mint distinct ETags that can never cross-304', async () => {
     const containerRes = await request('/', { headers: { Accept: BROWSER_ACCEPT } });
     assertStatus(containerRes, 200);
     const containerBody = await containerRes.text();
-    assert.doesNotMatch(containerBody, /<h2>Storage<\/h2>/, 'plain GET / (no seeded index.html) must render the container view, not the root view');
+    assert.doesNotMatch(containerBody, /<h2>Storage<\/h2>/, 'plain GET / (no seeded index.html) must render the container view, not a storage view');
     const etagA = containerRes.headers.get('etag');
     assert.ok(etagA, 'container view must carry an ETag');
 
-    const rootRes = await request('/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
+    const indexRes = await request('/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(indexRes, 200);
+    const indexBody = await indexRes.text();
+    assert.doesNotMatch(indexBody, /<h2>Storage<\/h2>/, 'GET /?view=nav must render the server-index roster, not a single storage\'s view');
+    const etagB = indexRes.headers.get('etag');
+    assert.ok(etagB, 'server-index view must carry an ETag');
+
+    const rootRes = await request('/alice/?view=nav', { headers: { Accept: BROWSER_ACCEPT } });
     assertStatus(rootRes, 200);
     const rootBody = await rootRes.text();
-    assert.match(rootBody, /<h2>Storage<\/h2>/, 'GET /?view=nav must render the root storage view');
-    const etagB = rootRes.headers.get('etag');
-    assert.ok(etagB, 'root view must carry an ETag');
+    assert.match(rootBody, /<h2>Storage<\/h2>/, 'GET /alice/?view=nav must render alice\'s own storage view');
+    const etagC = rootRes.headers.get('etag');
+    assert.ok(etagC, 'storage view must carry an ETag');
 
-    assert.notEqual(etagA, etagB, 'container-view and root-view ETags must not collide');
+    assert.notEqual(etagA, etagB, 'container-view and server-index ETags must not collide');
+    assert.notEqual(etagA, etagC, 'container-view and storage-view ETags must not collide');
+    assert.notEqual(etagB, etagC, 'server-index and storage-view ETags must not collide');
 
-    const crossCheck = await request('/?view=nav', {
+    const crossCheck = await request('/alice/?view=nav', {
       headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': etagA },
     });
-    assertStatus(crossCheck, 200, 'the container-view ETag must NOT validate a root-view conditional GET (no bogus 304)');
+    assertStatus(crossCheck, 200, 'the container-view ETag must NOT validate a storage-view conditional GET (no bogus 304)');
 
-    const ownCheck = await request('/?view=nav', {
+    const crossCheck2 = await request('/alice/?view=nav', {
       headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': etagB },
     });
-    assertStatus(ownCheck, 304, 'the root view must 304 against its own ETag');
+    assertStatus(crossCheck2, 200, 'the server-index ETag must NOT validate a storage-view conditional GET (no bogus 304)');
+
+    const ownCheck = await request('/alice/?view=nav', {
+      headers: { Accept: BROWSER_ACCEPT, 'If-None-Match': etagC },
+    });
+    assertStatus(ownCheck, 304, 'the storage view must 304 against its own ETag');
   });
 });
