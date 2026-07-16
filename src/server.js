@@ -22,6 +22,7 @@ import { idpPlugin } from './idp/index.js';
 import { isGitRequest, isGitWriteOperation, handleGit, setGitCorsHeaders } from './handlers/git.js';
 import { handleCorsProxy, isCorsProxyRequest, setProxyCorsHeaders } from './handlers/cors-proxy.js';
 import { AccessMode } from './wac/parser.js';
+import { checkAccess } from './wac/checker.js';
 import { registerNostrRelay } from './nostr/relay.js';
 import { createPayHandler, isPayRequest } from './handlers/pay.js';
 import { activityPubPlugin, getActorHandler } from './ap/index.js';
@@ -113,14 +114,21 @@ export function createServer(options = {}) {
   // it, no restart needed. ONE instance shared by the HTTP routes below and
   // the MCP surface (src/mcp/index.js), so the two views can't diverge.
   const podConfig = makePodConfig(storage, lwsEnabled ? (options.lwsConfig ?? null) : null);
-  // Multi-tenant round (A3): a per-storage resolver ALONGSIDE the single
-  // podConfig above — nothing repointed yet (MCP registration + the
-  // /.well-known/lws-storage route below still read the server-wide
-  // instance; that migration is later tasks A5/A7). `options.lwsConfig` is
-  // read here as a path RELATIVE to each storage root (e.g.
-  // `profiles/pod-config.jsonld`), not the server-root-relative path the
-  // single `podConfig` above uses.
-  const podConfigResolver = lwsEnabled && options.lwsConfig ? makePodConfigResolver(storage, options.lwsConfig) : null;
+  // Multi-tenant round (A3, fixed C2): a per-storage resolver ALONGSIDE the
+  // single podConfig above. C2 (code review): this used to read
+  // `options.lwsConfig` too — but that flag drives the LEGACY podConfig
+  // above as a server-root-relative (often absolute) path, e.g.
+  // `/alice/profiles/pod-config.jsonld`. Reinterpreting the SAME string as
+  // relative-per-root (podConfigResolver's contract) meant a deployment
+  // pointing --lws-config at an absolute path got a per-storage lookup of
+  // `/alice/alice/profiles/pod-config.jsonld` — nonexistent, so every
+  // per-storage description silently came back with no VoidService/
+  // ProfileIndex/uriSpaces. Decoupled: podConfigResolver always resolves at
+  // this FIXED relative convention under each storage root, independent of
+  // --lws-config. The legacy `podConfig` above (still driving
+  // /.well-known/void) is untouched.
+  const PER_STORAGE_CONFIG_REL = 'profiles/pod-config.jsonld';
+  const podConfigResolver = lwsEnabled ? makePodConfigResolver(storage, PER_STORAGE_CONFIG_REL) : null;
   // Content Negotiation by Profile is ON by default whenever --lws is on;
   // --no-lws-profile-conneg is a per-deployment safety valve to disable just
   // the capability advertisement without disabling the rest of --lws.
@@ -1118,10 +1126,27 @@ export function createServer(options = {}) {
     // tenant. `:pod` is only ever a storage root's first segment (path
     // mode); storageRootFor rejects anything unmarked as 404, so this route
     // can't be used to probe for arbitrary top-level directories.
+    //
+    // C3 (code review, security): the blanket preHandler bypass above
+    // (~line 905) exempts this route from the global WAC hook so it stays
+    // reachable regardless of the pod's own privacy — but that also meant
+    // an owner-only-private pod's description (id, services, uriSpaces,
+    // existence) was served to anon: a roster leak + existence oracle that
+    // defeats the multi-tenant round's D7 privacy model. So re-check READ
+    // on the pod ROOT here, same discipline listVisibleStorageRoots'
+    // filterReadableEntries uses for the ServerIndex roster (one WAC-filter
+    // implementation, two surfaces agreeing) — a storage the requester
+    // can't READ 401s instead of describing itself.
     fastify.get('/:pod/lws-storage', async (request, reply) => {
       const origin = `${request.protocol}://${request.hostname}`;
       const root = `/${request.params.pod}/`;
       if (!(await storageRootFor(storage, root))) return reply.callNotFound();
+      const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+      const { allowed } = await checkAccess({
+        resourceUrl: `${origin}${root}`, resourcePath: root, isContainer: true,
+        agentWebId: webId, requiredMode: AccessMode.READ,
+      });
+      if (!allowed) return reply.code(401).send();
       reply.header('Cache-Control', 'public, max-age=3600');
       reply.type(storageDescriptionContentType(request.headers.accept));
       // Same shared helper the well-known route used pre-multi-tenant and

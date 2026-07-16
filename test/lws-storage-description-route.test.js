@@ -18,10 +18,12 @@ import {
   startTestServer,
   stopTestServer,
   createTestPod,
+  getBaseUrl,
   request,
   assertStatus,
   assertHeaderContains
 } from './helpers.js';
+import { generatePrivateAcl, serializeAcl } from '../src/wac/parser.js';
 
 const LWS_PATH = '/.well-known/lws-storage';
 
@@ -115,6 +117,12 @@ describe('GET /:pod/lws-storage (--lws ON)', () => {
     await stopTestServer();
   });
 
+  // C3 (code review, security): also the positive-path half of the
+  // "re-check READ on the pod root" fix — alice's pod root carries the
+  // default owner ACL (owner Read/Write/Control + public Read on the root
+  // itself, generateOwnerAcl's `#public` authorization), so an anonymous
+  // requester's READ check on the root passes and the description is
+  // served. See the "private pod" describe below for the negative path.
   it('returns the per-storage description with id …/alice/, type Storage', async () => {
     const res = await request('/alice/lws-storage', {
       headers: { Accept: 'application/lws+json' }
@@ -168,6 +176,56 @@ describe('GET /:pod/lws-storage (--lws ON)', () => {
       headers: { Accept: 'application/lws+json' }
     });
     assertStatus(res, 404);
+  });
+});
+
+// C3 (code review, security): the preHandler bypass at src/server.js:~905
+// makes /:pod/lws-storage reachable regardless of the pod's own privacy —
+// but the handler must still re-check READ on the pod root itself, else an
+// owner-only-private pod's description (id, services, uriSpaces, mere
+// existence) leaks to anon: a roster leak + existence oracle. Own pod
+// ("carol") + describe so tightening its root ACL can't affect the
+// public-by-default "alice"/"bob" fixtures the sibling describes above rely
+// on (including the "no such pod" 404 case, which a real-but-private carol
+// would otherwise collide with if reused there).
+describe('GET /:pod/lws-storage on a PRIVATE pod (--lws ON)', () => {
+  let base, carol;
+
+  before(async () => {
+    await startTestServer({ lws: true });
+    base = getBaseUrl();
+    carol = await createTestPod('carol');
+    // Tighten the pod root's ACL to owner-only — overrides the default
+    // owner ACL's `#public` Read grant (generateOwnerAcl, src/wac/parser.js)
+    // that createTestPod's pod provisioning writes by default.
+    const res = await request('/carol/.acl', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      auth: 'carol',
+      body: serializeAcl(generatePrivateAcl(`${base}/carol/`, carol.webId, true)),
+    });
+    assert.ok(res.ok, `setup: tightening /carol/.acl must succeed, got ${res.status}`);
+  });
+
+  after(async () => {
+    await stopTestServer();
+  });
+
+  it('anonymous GET /carol/lws-storage returns 401 (READ denied on the pod root)', async () => {
+    const res = await request('/carol/lws-storage', {
+      headers: { Accept: 'application/lws+json' }
+    });
+    assertStatus(res, 401);
+  });
+
+  it('owner GET /carol/lws-storage still returns 200 (READ granted)', async () => {
+    const res = await request('/carol/lws-storage', {
+      headers: { Accept: 'application/lws+json' },
+      auth: 'carol',
+    });
+    assertStatus(res, 200);
+    const body = await res.json();
+    assert.ok(body.id.endsWith('/carol/'), `id: ${body.id}`);
   });
 });
 

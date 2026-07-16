@@ -28,11 +28,13 @@ describe('lws: /.well-known/void rung', () => {
   // This describe's --lws-config value is an ABSOLUTE path — the legacy
   // single-podConfig convention (server.js's server-wide `podConfig`, which
   // drives /.well-known/void and is untouched by Task A5). Its VoidService
-  // presence is checked separately below, on a RELATIVE-fixture describe —
+  // presence is checked separately below, on the per-storage describe —
   // request.podConfigFor (A3), which the per-storage /alice/lws-storage
-  // route now uses (D5), re-interprets --lws-config as a path relative to
-  // each storage root, so reusing this absolute CONFIG_PATH there would
-  // double the pod segment (/alice/alice/profiles/pod-config.jsonld).
+  // route uses (D5), is DECOUPLED from --lws-config (C2 review fix):
+  // podConfigResolver always resolves at the fixed relative convention
+  // `profiles/pod-config.jsonld` under each storage root, regardless of
+  // what --lws-config names, so this same absolute CONFIG_PATH is safe to
+  // reuse there too (see the describe below).
   describe('configured (--lws-config names a void pointer)', () => {
     let base;
 
@@ -76,14 +78,19 @@ describe('lws: /.well-known/void rung', () => {
 
   // Multi-tenant round (Task A5, D5): VoidService moved from the ServerIndex
   // well-known to the per-storage description (/alice/lws-storage), which
-  // resolves --lws-config via request.podConfigFor (A3) — a path RELATIVE
-  // to the storage root. Own fixture so it doesn't collide with the
-  // absolute-path convention the describe above depends on.
+  // resolves config via request.podConfigFor (A3) — pinned to the fixed
+  // relative convention `profiles/pod-config.jsonld` under the storage root,
+  // independent of --lws-config (C2 review fix). Reuses the SAME absolute
+  // CONFIG_PATH/lwsConfig fixture as the describe above — proof the two
+  // routes' config resolution no longer needs two different fixtures to
+  // both work (pre-fix, this describe needed its own relative lwsConfig
+  // value or the per-storage lookup would double the pod segment:
+  // /alice/alice/profiles/pod-config.jsonld).
   describe('configured (per-storage /:pod/lws-storage)', () => {
     let base;
 
     before(async () => {
-      await startTestServer({ lws: true, lwsConfig: 'profiles/pod-config.jsonld' });
+      await startTestServer({ lws: true, lwsConfig: CONFIG_PATH });
       base = getBaseUrl();
       await createTestPod('alice');
       await storage.write(CONFIG_PATH, JSON.stringify({ void: '/alice/profiles/void.jsonld' }));

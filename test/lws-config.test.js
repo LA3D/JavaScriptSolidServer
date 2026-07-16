@@ -9,12 +9,12 @@ import { startTestServer, stopTestServer, request, createTestPod, getPodToken, g
 // single-podConfig convention (server.js's server-wide `podConfig`, still
 // used by /.well-known/void, untouched by Task A5). Kept as-is here; do not
 // repoint its VoidService/ProfileIndexService presence checks at
-// /alice/lws-storage — that route resolves --lws-config through
-// request.podConfigFor (A3), which re-interprets the SAME flag value as a
-// path RELATIVE to each storage root (test/lws-pod-config-per-storage.test.js),
-// so an absolute value here doubles the pod segment
-// (/alice/alice/profiles/pod-config.jsonld — see the describe below, which
-// uses the correct relative fixture instead).
+// /alice/lws-storage — that route resolves config through
+// request.podConfigFor (A3), which is DECOUPLED from --lws-config (C2
+// review fix): it always resolves at the fixed relative convention
+// `profiles/pod-config.jsonld` under each storage root, regardless of what
+// --lws-config names (test/lws-pod-config-per-storage.test.js pins the
+// convention explicitly). See the describe below for the per-storage route.
 describe('--lws-config', () => {
   let base, tok;
   before(async () => {
