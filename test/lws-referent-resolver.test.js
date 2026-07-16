@@ -35,22 +35,25 @@ describe('303 referent resolver (live)', () => {
   before(async () => {
     await startTestServer({ lws: true, lwsConfig: '/alice/profiles/pod-config.jsonld' });
     base = getBaseUrl(); await createTestPod('alice'); tok = getPodToken('alice');
-    // pod-config declaring the plane-mapping
+    // pod-config declaring the plane-mapping — written at alice's own
+    // per-storage config path (Task A8, multi-tenant round: referent
+    // resolution now reads the OWNING storage's config, so a uriSpace's
+    // pathPrefix has to be namespaced under a pod; a root-level '/id/'
+    // prefix has no owning storage and can no longer resolve — was
+    // top-level here pre-A8, migrated in place rather than left broken).
     await request(`${base}/alice/profiles/pod-config.jsonld`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
       body: JSON.stringify({ profileIndex: '/alice/profiles/index.jsonld', void: '/alice/profiles/void.jsonld',
         // second entry ('/alice/vid/') is in-pod so the "real resource wins"
-        // test below can PUT there under alice's own inherited owner ACL —
-        // top-level '/id/' has no writer (root .acl is public-read-only, see
-        // ui/server-root.js), so it can't host that test's setup PUT.
+        // test below can PUT there under alice's own inherited owner ACL.
         uriSpaces: [
-          { pathPrefix: '/id/', container: '/alice/concepts/' },
+          { pathPrefix: '/alice/id/', container: '/alice/concepts/' },
           { pathPrefix: '/alice/vid/', container: '/alice/concepts/' }
         ] }) });
     // a real, PUBLIC-READ target the name resolves to
     await request(`${base}/alice/concepts/alpha`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
-      body: JSON.stringify({ '@id': `${base}/id/alpha#it`, 'http://purl.org/dc/terms/title': 'Alpha' }) });
+      body: JSON.stringify({ '@id': `${base}/alice/id/alpha#it`, 'http://purl.org/dc/terms/title': 'Alpha' }) });
     const { generatePublicReadAcl, serializeAcl } = await import('../src/wac/parser.js');
     await request(`${base}/alice/concepts/alpha.acl`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
@@ -58,45 +61,45 @@ describe('303 referent resolver (live)', () => {
     // a real, PRIVATE (owner-only ACL, no public grant) target — the no-oracle hide case
     await request(`${base}/alice/concepts/secret`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
-      body: JSON.stringify({ '@id': `${base}/id/secret#it`, 'http://purl.org/dc/terms/title': 'Secret' }) });
+      body: JSON.stringify({ '@id': `${base}/alice/id/secret#it`, 'http://purl.org/dc/terms/title': 'Secret' }) });
   });
   after(stopTestServer);
 
   it('303s a minted name to the public target (anonymous)', async () => {
-    const r = await request(`${base}/id/alpha`, { redirect: 'manual' });
+    const r = await request(`${base}/alice/id/alpha`, { redirect: 'manual' });
     assert.equal(r.status, 303);
     assert.equal(r.headers.get('location'), `${base}/alice/concepts/alpha`);
     assert.match(r.headers.get('link') || '', /rel="canonical"/);
   });
   it('404-hides a name with no backing target', async () => {
-    const r = await request(`${base}/id/missing`, { redirect: 'manual' });
+    const r = await request(`${base}/alice/id/missing`, { redirect: 'manual' });
     assert.equal(r.status, 404);
   });
   it('no-oracle: 404-hides a name whose target exists but is not readable (anonymous)', async () => {
-    const r = await request(`${base}/id/secret`, { redirect: 'manual' });
+    const r = await request(`${base}/alice/id/secret`, { redirect: 'manual' });
     assert.equal(r.status, 404);
   });
   it('HEAD mirrors GET: 303 to the public target, bodyless', async () => {
-    const r = await request(`${base}/id/alpha`, { method: 'HEAD', redirect: 'manual' });
+    const r = await request(`${base}/alice/id/alpha`, { method: 'HEAD', redirect: 'manual' });
     assert.equal(r.status, 303);
     assert.equal(r.headers.get('location'), `${base}/alice/concepts/alpha`);
     const body = await r.text();
     assert.equal(body, '');
   });
   it('no write-bypass: anonymous PUT to a virtual uriSpace name is WAC-gated, not exempted', async () => {
-    const r = await request(`${base}/id/beta`, { method: 'PUT',
+    const r = await request(`${base}/alice/id/beta`, { method: 'PUT',
       headers: { 'content-type': 'application/ld+json' }, body: JSON.stringify({ 'http://purl.org/dc/terms/title': 'Beta' }) });
     assert.ok(r.status === 401 || r.status === 403, `expected 401/403, got ${r.status}`);
   });
   it('no write-bypass: anonymous POST to a virtual uriSpace name is WAC-gated, not exempted', async () => {
-    const r = await request(`${base}/id/beta`, { method: 'POST',
+    const r = await request(`${base}/alice/id/beta`, { method: 'POST',
       headers: { 'content-type': 'application/ld+json' }, body: JSON.stringify({ 'http://purl.org/dc/terms/title': 'Beta' }) });
     assert.ok(r.status === 401 || r.status === 403, `expected 401/403, got ${r.status}`);
   });
   it('real resource wins: owner PUT at the virtual path makes resourceExists true, GET stops being 303-exempted', async () => {
     // '/alice/vid/gamma' is a second, in-pod uriSpace name (see the
-    // pod-config comment above) — it lets the owner actually create the
-    // real resource (root-level '/id/' has no writer to set that up).
+    // pod-config comment above) — a second in-pod prefix distinct from
+    // '/alice/id/' so this test's setup PUT can't collide with the others'.
     const put = await request(`${base}/alice/vid/gamma`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
       body: JSON.stringify({ 'http://purl.org/dc/terms/title': 'Gamma' }) });

@@ -26,6 +26,7 @@ import {
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { resolveReferent } from '../lws/referent-resolver.js';
+import { storageRootFor } from '../lws/storage-resolver.js';
 import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { emitChange } from '../notifications/events.js';
@@ -113,18 +114,22 @@ async function authorizedRepresentations(request, storagePath, resourceUrl) {
 /**
  * Referent identity & discovery (Task 3, 2026-07-13): the !stats seam for a
  * minted subject-IRI name (e.g. /id/{slug}) with no stored resource of its
- * own. Reads the pathPrefix->container plane-mapping from pod-config
- * (request.podConfig, decorated in server.js's onRequest hook) and resolves
- * the name to its backing resource's urlPath via the pure resolveReferent.
- * no-oracle: returns a target ONLY when it both exists and the requester may
- * READ it (same checkAccess the type-index walk uses,
+ * own. Reads the pathPrefix->container plane-mapping from the OWNING
+ * storage's per-storage pod-config (Task A8, multi-tenant round:
+ * storageRootFor (A2) resolves the request's own storage root, then
+ * request.podConfigFor(root) (A3) hands back that root's own config handle —
+ * NOT the single global request.podConfig, which would only see one tenant's
+ * uriSpaces) and resolves the name to its backing resource's urlPath via the
+ * pure resolveReferent. no-oracle: returns a target ONLY when it both exists
+ * and the requester may READ it (same checkAccess the type-index walk uses,
  * src/lws/authorized-resources.js) — a missing or unreadable target returns
  * null so the caller falls through to the ordinary 404 (never a 303 that
  * leaks existence to an unauthorized requester). --lws-gated.
  */
 async function resolveReferentTarget(request, urlPath) {
-  if (!request.lwsEnabled || !request.podConfig) return null;
-  const cfg = await request.podConfig.get();
+  if (!request.lwsEnabled) return null;
+  const root = await storageRootFor(storage, urlPath);
+  const cfg = await request.podConfigFor(root).get();
   const target = resolveReferent(urlPath, cfg.uriSpaces || []);
   if (!target) return null;
   // pod-relative storage path == urlPath in non-subdomain mode
