@@ -322,8 +322,25 @@ function negotiateQuadsTarget(acceptHeader, connegEnabled, lwsEnabled, urlPath) 
 // serve on BOTH methods call the SAME functions, following the
 // predictFileEtag precedent (one function, two call sites) instead of
 // re-deriving.
+// ?raw force-raw escape (fix branch la3d/lws-force-raw): the navigator's
+// "raw"/"machine view" links are clicked BY a browser, so they inherit that
+// browser's Accept: text/html — without an escape, following them just
+// re-serves the same HTML view (entity face / container view / index.html
+// shadow / face-dispatch 303 all loop). `?raw` (bare presence, no value
+// needed) says: for THIS request only, behave as if browserWantsHtml were
+// false — every site below that gates HTML-view/dispatch behavior on
+// browserWantsHtml (via willServeNavigatorView or directly) also ANDs in
+// `!wantsRaw`, so a raw request falls through to the exact same machine-
+// facing code (RDF conneg / container listing / plain bytes) a non-browser
+// client with the same Accept would hit. Distinct from `?view=nav` (asks
+// for MORE metadata) — `?raw` asks for LESS: the bytes, not a page about
+// them. The two escapes are independent; this predicate never reads `view`.
+function wantsRaw(request) {
+  return request.query?.raw !== undefined;
+}
+
 function willServeNavigatorView(request) {
-  return request.lwsEnabled && browserWantsHtml(request);
+  return request.lwsEnabled && browserWantsHtml(request) && !wantsRaw(request);
 }
 // Task A10 (multi-tenant round): the SERVER root's `?view=nav` now renders
 // the WAC-filtered roster of every storage the pod hosts
@@ -377,7 +394,8 @@ function predictFileEtag(request, stats, effectiveEtag, willServeMashlib, storag
   // (?view=nav). Mirrors the arm's own gate (~line 1094) and its HEAD-parity
   // twin (isEntityFaceResponse) exactly, so the predicted and emitted ETags
   // never drift apart.
-  if (browserWantsHtml(request) && (request.query?.view === 'nav' || entityFaceViewable(storedContentType))) {
+  if (browserWantsHtml(request) && !wantsRaw(request)
+      && (request.query?.view === 'nav' || entityFaceViewable(storedContentType))) {
     return variantEtag(stats.etag, 'nav');
   }
   const acceptHeader = request.headers.accept || '';
@@ -500,10 +518,13 @@ export async function handleGet(request, reply) {
   // stale '-nav' If-None-Match must never short-circuit here. The face
   // dispatch (~line 1166) never emits an ETag itself (a 303 always wins for
   // a live face) and the entity-face arm's own re-check (~line 1201) is
-  // what actually decides 304 vs 303 once dispatch is known.
+  // what actually decides 304 vs 303 once dispatch is known. `?raw`
+  // (wantsRaw) un-defers this: predictFileEtag's raw branch is deterministic
+  // (no face dispatch, no html-view over-approximation), so a raw request
+  // can safely resolve its 304 right here.
   const ifNoneMatch = request.headers['if-none-match'];
   if (ifNoneMatch && !stats.isDirectory && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending
-      && !(request.lwsEnabled && browserWantsHtml(request))) {
+      && !(request.lwsEnabled && browserWantsHtml(request) && !wantsRaw(request))) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, fileEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', fileEtag);
@@ -534,7 +555,10 @@ export async function handleGet(request, reply) {
     // above (not a bare `&& query.view !== 'nav'` tacked on unconditionally)
     // — a non-lws pod must stay byte-identical to pre-Task-5 behavior, and
     // an unguarded clause would let `?view=nav` skip the shadow there too.
-    if (indexExists && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav'))) {
+    // `?raw` (fix branch la3d/lws-force-raw) is a THIRD escape, same guard:
+    // a browser following the navigator's `?raw` machine-view link must
+    // reach the real listing, not loop back into index.html.
+    if (indexExists && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav' || wantsRaw(request)))) {
       // Serve index.html (contains JSON-LD structured data)
       const content = await storage.read(indexPath);
       const indexStats = await storage.stat(indexPath);
@@ -1250,8 +1274,10 @@ export async function handleGet(request, reply) {
   // by redirect, mirroring profile-conneg). ?view=nav opts out. --lws only.
   // Final-review I3: existence-gated (faceHrefIsLive) — a declared face that
   // no longer exists falls through to the entity-face arm below instead of
-  // 303ing to a dead target.
-  if (request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
+  // 303ing to a dead target. ?raw (fix branch la3d/lws-force-raw) ALSO opts
+  // out — a raw request wants THIS resource's own bytes, never a redirect to
+  // a different (human-face) resource.
+  if (request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav' && !wantsRaw(request)) {
     const face = advertisedReps?.alternates?.find(
       (r) => (r.format || '').split(';')[0].trim() === 'text/html');
     if (face && await faceHrefIsLive(face.href)) return reply.code(303).header('Location', face.href).send();
@@ -1271,8 +1297,10 @@ export async function handleGet(request, reply) {
   // (src/mashlib/index.js:380-382). ?view=nav is the explicit escape hatch —
   // it forces the entity face for ANY content type, matching what was
   // asked for. Same predicate predictFileEtag already applied above, so the
-  // ETag emitted here always matches what was predicted.
-  if (request.lwsEnabled && browserWantsHtml(request)
+  // ETag emitted here always matches what was predicted. ?raw (fix branch
+  // la3d/lws-force-raw) bypasses this arm entirely — falls through to the
+  // exact same RDF-conneg / plain-bytes code a non-browser Accept would hit.
+  if (request.lwsEnabled && browserWantsHtml(request) && !wantsRaw(request)
       && (request.query?.view === 'nav' || entityFaceViewable(storedContentType))) {
     // Defensive re-check (mirrors the file branch's repeated fileEtag
     // pattern at ~1002/1040/1303/1336): the early If-None-Match check above
@@ -1347,7 +1375,23 @@ export async function handleGet(request, reply) {
   // Check if we should serve Mashlib data browser (legacy — reachable only
   // when !request.lwsEnabled; see the entity-face arm above)
   // Only for RDF resources when Accept: text/html is requested
-  if (shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
+  // ?raw (fix branch la3d/lws-force-raw): this call has no lwsEnabled guard
+  // of its own — under --lws it's normally shadowed by the entity-face arm
+  // above (which returns first for every viewable type), but a raw request
+  // skips that arm, so without this gate a raw GET of an audio/mpegurl type
+  // (viewable to shouldServeMashlib but not to entityFaceViewable) would
+  // still loop into the mashlib HTML wrapper.
+  // Review fix: ?raw is an --lws-only escape (see wantsRaw's own doc
+  // comment) — every OTHER call site ANDs it behind request.lwsEnabled, but
+  // this one didn't, and this branch (unlike the others) is the one that's
+  // actually reachable when !request.lwsEnabled. That let a bare ?raw on a
+  // --lws-OFF pod suppress the legacy mashlib wrapper too, changing
+  // --lws-OFF behavior (must stay byte-identical) and desyncing GET from
+  // HEAD (whose getMashlibEtag/isMashlibResponse were never ?raw-aware —
+  // RFC 9110 §9.3.2). `!request.lwsEnabled ||` makes wantsRaw a no-op here
+  // whenever --lws is off, restoring pre-?raw mashlib behavior exactly; the
+  // --lws-ON audio/mpegurl case above is unaffected (short-circuits false).
+  if ((!request.lwsEnabled || !wantsRaw(request)) && shouldServeMashlib(request, request.mashlibEnabled, storedContentType)) {
     // #7 / #344: embed the resource as a JSON-LD data island so
     // non-mashlib consumers (search-engine rich-results, archival
     // crawlers) get the data without a second request, and so the
@@ -2003,9 +2047,10 @@ export async function handleHead(request, reply) {
     // below even when index.html exists and the Accept is HTML-shaped.
     // Missing here meant a HEAD /?view=nav reported the seeded landing
     // page's ETag while GET served the root storage view under a
-    // '-navroot' ETag.
+    // '-navroot' ETag. `?raw` (fix branch la3d/lws-force-raw) is a THIRD
+    // escape, same guard — mirrors GET's shadow condition exactly.
     const shadowActive = indexExists
-      && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav'));
+      && !(request.lwsEnabled && (!acceptsHtml(acceptHeader) || request.query?.view === 'nav' || wantsRaw(request)));
 
     if (negotiate) {
       // HEAD must mirror what GET would emit; otherwise client caches and
@@ -2155,10 +2200,10 @@ export async function handleHead(request, reply) {
   // with a later re-check to catch it (the entity-face arm's own re-check,
   // ~line 2159); a browser-shaped HEAD of a CONTAINER has no face dispatch
   // and no later re-check, so it must keep resolving its 304 here, exactly
-  // like today.
+  // like today. `?raw` un-defers this, mirroring GET (~line 527).
   const ifNoneMatch = request.headers['if-none-match'];
   if (ifNoneMatch && !wouldNotNegotiate && !hasAcceptProfile && !conversionPending
-      && !(!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request))) {
+      && !(!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request) && !wantsRaw(request))) {
     const check = checkIfNoneMatchForGet(ifNoneMatch, headEtag);
     if (!check.ok && check.notModified) {
       reply.header('ETag', headEtag);
@@ -2232,10 +2277,12 @@ export async function handleHead(request, reply) {
 
   // Face dispatch (spec 2026-07-15): mirrors the GET dispatch above — files
   // only (containers have no altr: "face" concept here); HEAD 303 carries no
-  // body. ?view=nav opts out. --lws only.
+  // body. ?view=nav opts out. --lws only. ?raw (fix branch la3d/lws-force-raw)
+  // also opts out, mirroring GET.
   // Final-review I3: existence-gated (faceHrefIsLive), same as GET — a
   // deleted face falls through to the entity-face arm below, HEAD parity.
-  if (!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request) && request.query?.view !== 'nav') {
+  if (!stats.isDirectory && request.lwsEnabled && browserWantsHtml(request)
+      && request.query?.view !== 'nav' && !wantsRaw(request)) {
     const face = advertisedReps?.alternates?.find(
       (r) => (r.format || '').split(';')[0].trim() === 'text/html');
     if (face && await faceHrefIsLive(face.href)) return reply.code(303).header('Location', face.href).send();
@@ -2248,8 +2295,9 @@ export async function handleHead(request, reply) {
   // reachable only when !request.lwsEnabled (isMashlibResponse is already
   // scoped that way via getMashlibEtag).
   // Review fix: same entityFaceViewable/?view=nav gate as GET's arm —
-  // storedContentType is already computed above (~line 1894).
-  const isEntityFaceResponse = !stats.isDirectory && request.lwsEnabled && browserWantsHtml(request)
+  // storedContentType is already computed above (~line 1894). ?raw (fix
+  // branch la3d/lws-force-raw) bypasses this arm entirely, mirroring GET.
+  const isEntityFaceResponse = !stats.isDirectory && request.lwsEnabled && browserWantsHtml(request) && !wantsRaw(request)
     && (request.query?.view === 'nav' || entityFaceViewable(storedContentType));
 
   let negotiationConverted = false;

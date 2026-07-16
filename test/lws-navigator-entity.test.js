@@ -68,7 +68,11 @@ describe('lws: navigator generic entity face (Task 6)', () => {
     assert.match(r.headers.get('content-type') || '', /text\/html/);
     const body = await r.text();
     assert.match(body, /TextDigitalDocument/, 'declared-type localName badge must render');
-    assert.match(body, new RegExp(`href="${RES}"[^<]*>raw<`), 'machine view must link the raw URL');
+    // ?raw force-raw escape (fix branch la3d/lws-force-raw): the "raw" link
+    // now carries ?raw so following it actually reaches the machine bytes
+    // instead of looping back into this same entity face — see
+    // test/lws-navigator-raw.test.js for the escape's own coverage.
+    assert.match(body, new RegExp(`href="${RES}\\?raw"[^<]*>raw<`), 'machine view must link the raw URL with the ?raw escape');
     assert.doesNotMatch(body, /databrowser/i, 'must not carry the mashlib marker');
   });
 
