@@ -81,21 +81,48 @@ test('storageDescriptionUrl is per-storage when a root is given', () => {
 });
 
 // buildStorageDescription (origin form) is UNCHANGED by this task — see the
-// byte-identity check in the task report. The per-storage id/endpoints land
-// on the new buildStorageDescriptionFor instead.
-test('buildStorageDescriptionFor id + services are pod-scoped', () => {
+// byte-identity check in the task report. The per-storage `id` and the
+// StorageDescription self-pointer land on the new buildStorageDescriptionFor
+// instead — every OTHER service stays origin-scoped (controller correction:
+// this round adds no per-storage service ROUTES, so e.g. /alice/types/index
+// would be a dead endpoint).
+test('buildStorageDescriptionFor: id + StorageDescription self-pointer are pod-scoped', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true });
   assert.equal(d.id, 'http://h/alice/');
   const sd = d.service.find(s => s.type === 'StorageDescription');
   assert.equal(sd.serviceEndpoint, 'http://h/alice/lws-storage');
+});
+
+test('buildStorageDescriptionFor: TypeIndexService/TypeSearchService are ORIGIN-scoped, not pod-scoped', () => {
+  const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true });
   const ti = d.service.find(s => s.type === 'TypeIndexService');
-  assert.equal(ti.serviceEndpoint, 'http://h/alice/types/index');
+  assert.equal(ti.serviceEndpoint, 'http://h/types/index');
+  const ts = d.service.find(s => s.type === 'TypeSearchService');
+  assert.equal(ts.serviceEndpoint, 'http://h/types/search');
 });
 
 test('buildStorageDescriptionFor keeps McpService origin-scoped, not storage-scoped', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', { mcpEnabled: true });
   const mcp = d.service.find(s => s.type === 'McpService');
   assert.equal(mcp.serviceEndpoint, 'http://h/mcp');
+});
+
+// Controller-specified combo: StorageDescription per-storage, TypeIndexService
+// + McpService origin-level, all in one call.
+test('buildStorageDescriptionFor: self-endpoint per-storage, server-wide services origin-level', () => {
+  const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true, mcpEnabled: true, voidPath: '/x' });
+  const sd = d.service.find(s => s.type === 'StorageDescription');
+  assert.equal(sd.serviceEndpoint, 'http://h/alice/lws-storage');
+  const ti = d.service.find(s => s.type === 'TypeIndexService');
+  assert.equal(ti.serviceEndpoint, 'http://h/types/index');
+  const mcp = d.service.find(s => s.type === 'McpService');
+  assert.equal(mcp.serviceEndpoint, 'http://h/mcp');
+});
+
+test('buildStorageDescriptionFor: ProfileIndexService composes off origin, not the storage base (avoids double /alice/)', () => {
+  const d = buildStorageDescriptionFor('http://h/alice/', { profileIndexPath: '/alice/profiles/index.jsonld' });
+  const pi = d.service.find(s => s.type === 'ProfileIndexService');
+  assert.equal(pi.serviceEndpoint, 'http://h/alice/profiles/index.jsonld');
 });
 
 test('buildServerIndex lists storages, not a Storage', () => {

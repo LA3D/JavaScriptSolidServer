@@ -118,11 +118,15 @@ describe('GET/POST /types/search', () => {
   });
 });
 
+// Multi-tenant round (Task A5, D5): TypeIndexService/TypeSearchService
+// (server-wide, per the controller correction) are advertised on the
+// per-storage description (/alice/lws-storage), not the ServerIndex
+// well-known — checked on a provisioned pod's route instead.
 describe('storage description advertises the services', () => {
-  before(async () => { await stopTestServer(); await startTestServer({ lws: true }); });
+  before(async () => { await stopTestServer(); await startTestServer({ lws: true }); await createTestPod('alice'); });
   after(async () => { await stopTestServer(); });
   it('lists TypeIndexService + TypeSearchService', async () => {
-    const sd = await (await fetch(`${getBaseUrl()}/.well-known/lws-storage`)).json();
+    const sd = await (await fetch(`${getBaseUrl()}/alice/lws-storage`)).json();
     const types = sd.service.map((s) => s.type);
     assert.ok(types.includes('TypeIndexService'));
     assert.ok(types.includes('TypeSearchService'));
@@ -193,10 +197,10 @@ describe('type endpoints are rate limited', () => {
 });
 
 describe('lwsTypeIndex config gate', () => {
-  before(async () => { await stopTestServer(); await startTestServer({ lws: true, lwsTypeIndex: false }); });
+  before(async () => { await stopTestServer(); await startTestServer({ lws: true, lwsTypeIndex: false }); await createTestPod('alice'); });
   after(async () => { await stopTestServer(); });
   it('when disabled, services are not advertised and endpoints are not the type handler', async () => {
-    const sd = await (await fetch(`${getBaseUrl()}/.well-known/lws-storage`)).json();
+    const sd = await (await fetch(`${getBaseUrl()}/alice/lws-storage`)).json();
     const types = sd.service.map((s) => s.type);
     assert.ok(!types.includes('TypeIndexService'));
     assert.ok(!types.includes('TypeSearchService'));

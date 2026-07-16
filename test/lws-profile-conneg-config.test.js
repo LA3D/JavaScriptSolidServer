@@ -11,13 +11,18 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
-import { startTestServer, stopTestServer, request, assertStatus } from './helpers.js';
+import { startTestServer, stopTestServer, createTestPod, request, assertStatus } from './helpers.js';
 
 const LWS_PATH = '/.well-known/lws-storage';
 
+// Multi-tenant round (Task A5, D5): capability[] (like the uriSpace
+// capability) is a per-storage property — checked on the per-storage
+// description (/alice/lws-storage), not the ServerIndex well-known, which
+// carries no `capability` field at all.
 describe('lwsProfileConneg gating (--lws ON, default)', () => {
   before(async () => {
     await startTestServer({ lws: true });
+    await createTestPod('alice');
   });
 
   after(async () => {
@@ -25,7 +30,7 @@ describe('lwsProfileConneg gating (--lws ON, default)', () => {
   });
 
   it('storage description advertises the ContentNegotiation capability by default', async () => {
-    const res = await request(LWS_PATH, { headers: { Accept: 'application/lws+json' } });
+    const res = await request('/alice/lws-storage', { headers: { Accept: 'application/lws+json' } });
     assertStatus(res, 200);
     const body = await res.json();
     assert.ok(Array.isArray(body.capability), 'capability[] should be present');
@@ -39,6 +44,7 @@ describe('lwsProfileConneg gating (--lws ON, default)', () => {
 describe('lwsProfileConneg gating (--lws-no-profile-conneg opt-out)', () => {
   before(async () => {
     await startTestServer({ lws: true, lwsProfileConneg: false });
+    await createTestPod('alice');
   });
 
   after(async () => {
@@ -46,7 +52,7 @@ describe('lwsProfileConneg gating (--lws-no-profile-conneg opt-out)', () => {
   });
 
   it('storage description omits capability[] when explicitly disabled', async () => {
-    const res = await request(LWS_PATH, { headers: { Accept: 'application/lws+json' } });
+    const res = await request('/alice/lws-storage', { headers: { Accept: 'application/lws+json' } });
     assertStatus(res, 200);
     const body = await res.json();
     assert.strictEqual('capability' in body, false, 'capability[] should be absent when disabled');

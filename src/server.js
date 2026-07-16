@@ -36,8 +36,10 @@ import { terminalPlugin } from './terminal/index.js';
 import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
-import { buildStorageDescription, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
+import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
+import { storageRootFor } from './lws/storage-resolver.js';
+import { listVisibleStorageRoots } from './lws/storage-index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -429,10 +431,11 @@ export function createServer(options = {}) {
   fastify.decorateRequest('singleUserName', null);
   fastify.decorateRequest('podConfig', null);
   fastify.decorateRequest('podConfigFor', null);
-  // Task 7 (spec 2026-07-15): the navigator root/storage view builds the
-  // SAME buildStorageDescription() call the /.well-known/lws-storage route
-  // makes (src/handlers/resource.js) — it needs these two flags on
-  // `request` for parity, mirroring lwsProfileConneg just below.
+  // Task 7 (spec 2026-07-15): the navigator root/storage view
+  // (src/handlers/resource.js) builds its own storage description — it
+  // needs these two flags on `request` for parity, mirroring
+  // lwsProfileConneg just below. The multi-tenant /:pod/lws-storage HTTP
+  // route (below) reads the same flags off its own local closures.
   fastify.decorateRequest('mcpEnabled', null);
   fastify.decorateRequest('anonRateLimitMax', null);
   fastify.addHook('onRequest', async (request) => {
@@ -890,6 +893,16 @@ export function createServer(options = {}) {
         request.url.startsWith('/storage/') ||
         (typeIndexEnabled && (request.url === '/types/index' || request.url.startsWith('/types/index?'))) ||
         (typeIndexEnabled && (request.url === '/types/search' || request.url.startsWith('/types/search?'))) ||
+        // Per-storage description (/:pod/lws-storage, multi-tenant round):
+        // the SAME public-discovery-metadata rationale as /.well-known/*
+        // above — a storage description is meant to be fetchable
+        // regardless of the pod's own privacy (mirrors OIDC-style
+        // well-known discovery). storageRootFor's marker check inside the
+        // route handler still 404s any segment that isn't a real
+        // provisioned storage, so this bypass can't be used to probe
+        // arbitrary pod-relative paths — it only ever reaches that one
+        // route's own gate.
+        (lwsEnabled && /^\/[^/]+\/lws-storage(\?.*)?$/.test(request.url)) ||
         (payEnabled && isPayRequest(request.url)) ||
         (mongoEnabled && (request.url === '/db' || request.url.startsWith('/db/'))) ||
         (mcpEnabled && (request.url === '/mcp' || request.url.startsWith('/mcp?'))) ||
@@ -1079,35 +1092,54 @@ export function createServer(options = {}) {
   // (~line 713) so no additional auth wiring is needed here.
   if (lwsEnabled) {
     const lwsStoragePath = '/.well-known/lws-storage';
+    // Multi-tenant round (D5): the well-known is now a SERVER INDEX — a
+    // roster of every storage this pod hosts, WAC-filtered per requester
+    // (listVisibleStorageRoots) — not a single Storage description. This is
+    // an intentional shape change: a pre-multi-tenant client that read
+    // `type: 'Storage'` here now sees `type: 'ServerIndex'` and follows
+    // `storage[].storageDescription` to the per-storage document instead.
     fastify.get(lwsStoragePath, async (request, reply) => {
       const origin = `${request.protocol}://${request.hostname}`;
-      reply.header('Cache-Control', 'public, max-age=3600');
+      reply.header('Cache-Control', 'public, max-age=60');
       // P3 (LWS media-type MUST): label-only conneg — same body, whichever
       // of lws+json/ld+json/json spelling was asked for (storage-description.js).
       reply.type(storageDescriptionContentType(request.headers.accept));
-      // Use request.notificationsEnabled (the onRequest-decorated OR of
-      // notificationsEnabled || liveReloadEnabled, ~line 397) rather than the
-      // raw notificationsEnabled local, so this matches both the actual
-      // NotificationService registration condition (~line 464) and the MCP
-      // storage-description resource ctx (src/mcp/index.js) — otherwise HTTP
-      // under-advertises NotificationService when liveReload is on but
-      // notifications is off.
-      // Task 10: recognition prefixes for the capability (void:uriSpace form,
-      // {origin}/{pathPrefix}). resolveStorageDescriptionInputs mirrors
-      // resolveReferent's FULL guard — string pathPrefix ending in '/' AND
-      // string container — so a malformed uriSpaces entry that
-      // resolveReferent would skip (e.g. a pathPrefix with no container) is
-      // never advertised as recognizable either. Task 7: the SAME helper
-      // now also backs the navigator root/storage view (src/handlers/
-      // resource.js), so this route and that view can't drift.
-      const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
-        await resolveStorageDescriptionInputs(podConfig, origin, lwsEnabled);
-      return buildStorageDescription(origin, { typeIndexEnabled, notificationsEnabled: request.notificationsEnabled, profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled, uriSpacePrefixes, mcpEnabled, anonRateLimitMax });
+      const roots = await listVisibleStorageRoots(storage, request);
+      return buildServerIndex(origin, roots.map((root) => ({ root })));
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.
     for (const m of ['put', 'post', 'patch', 'delete']) {
       fastify[m](lwsStoragePath, methodNotAllowed);
+    }
+
+    // Per-storage description — the actual `Storage` document a pre-multi-
+    // tenant client expected at the well-known path now lives here, one per
+    // tenant. `:pod` is only ever a storage root's first segment (path
+    // mode); storageRootFor rejects anything unmarked as 404, so this route
+    // can't be used to probe for arbitrary top-level directories.
+    fastify.get('/:pod/lws-storage', async (request, reply) => {
+      const origin = `${request.protocol}://${request.hostname}`;
+      const root = `/${request.params.pod}/`;
+      if (!(await storageRootFor(storage, root))) return reply.callNotFound();
+      reply.header('Cache-Control', 'public, max-age=3600');
+      reply.type(storageDescriptionContentType(request.headers.accept));
+      // Same shared helper the well-known route used pre-multi-tenant and
+      // the navigator root view (src/handlers/resource.js) still uses —
+      // origin stays the 2nd arg (uriSpacePrefixesFor needs the full
+      // pathPrefix, e.g. {origin}/alice/id/), request.podConfigFor(root) is
+      // the per-storage config handle (A3) in place of the server-wide
+      // podConfig this route used before storages were per-tenant.
+      const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
+        await resolveStorageDescriptionInputs(request.podConfigFor(root), origin, request.lwsEnabled);
+      return buildStorageDescriptionFor(`${origin}${root}`, {
+        typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
+        profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
+        uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
+      });
+    });
+    for (const m of ['put', 'post', 'patch', 'delete']) {
+      fastify[m]('/:pod/lws-storage', methodNotAllowed);
     }
 
     // VoID rung — /.well-known/void 303s to the configured pod resource
