@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateStorageDescription, buildStorageDescriptionFor, buildServerIndex, storageDescriptionUrl } from '../src/lws/storage-description.js';
 
@@ -81,11 +81,8 @@ test('storageDescriptionUrl is per-storage when a root is given', () => {
 });
 
 // buildStorageDescriptionFor's `id` and StorageDescription self-pointer are
-// pod-scoped — every OTHER service stays origin-scoped (controller
-// correction: this round adds no per-storage service ROUTES, so e.g.
-// /alice/types/index would be a dead endpoint). The origin form
-// (buildStorageDescription) was deleted (R9) — zero callers since the
-// multi-tenant round.
+// pod-scoped. The origin form (buildStorageDescription) was deleted (R9) —
+// zero callers since the multi-tenant round.
 test('buildStorageDescriptionFor: id + StorageDescription self-pointer are pod-scoped', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true });
   assert.equal(d.id, 'http://h/alice/');
@@ -93,12 +90,15 @@ test('buildStorageDescriptionFor: id + StorageDescription self-pointer are pod-s
   assert.equal(sd.serviceEndpoint, 'http://h/alice/lws-storage');
 });
 
-test('buildStorageDescriptionFor: TypeIndexService/TypeSearchService are ORIGIN-scoped, not pod-scoped', () => {
+// Services round (R7): TypeIndexService/TypeSearchService flipped from
+// origin-scoped to STORAGE-scoped — Task 6's routes now exist at exactly
+// these URLs, so advertising them per-storage is no longer a dead endpoint.
+test('buildStorageDescriptionFor: TypeIndexService/TypeSearchService are STORAGE-scoped, not origin-scoped', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true });
   const ti = d.service.find(s => s.type === 'TypeIndexService');
-  assert.equal(ti.serviceEndpoint, 'http://h/types/index');
+  assert.equal(ti.serviceEndpoint, 'http://h/alice/types/index');
   const ts = d.service.find(s => s.type === 'TypeSearchService');
-  assert.equal(ts.serviceEndpoint, 'http://h/types/search');
+  assert.equal(ts.serviceEndpoint, 'http://h/alice/types/search');
 });
 
 test('buildStorageDescriptionFor keeps McpService origin-scoped, not storage-scoped', () => {
@@ -107,14 +107,14 @@ test('buildStorageDescriptionFor keeps McpService origin-scoped, not storage-sco
   assert.equal(mcp.serviceEndpoint, 'http://h/mcp');
 });
 
-// Controller-specified combo: StorageDescription per-storage, TypeIndexService
-// + McpService origin-level, all in one call.
-test('buildStorageDescriptionFor: self-endpoint per-storage, server-wide services origin-level', () => {
+// Combo: StorageDescription + TypeIndexService storage-scoped, McpService
+// stays origin-level (one gateway per pod), all in one call.
+test('buildStorageDescriptionFor: self-endpoint + TypeIndexService storage-scoped, McpService origin-level', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true, mcpEnabled: true, voidPath: '/x' });
   const sd = d.service.find(s => s.type === 'StorageDescription');
   assert.equal(sd.serviceEndpoint, 'http://h/alice/lws-storage');
   const ti = d.service.find(s => s.type === 'TypeIndexService');
-  assert.equal(ti.serviceEndpoint, 'http://h/types/index');
+  assert.equal(ti.serviceEndpoint, 'http://h/alice/types/index');
   const mcp = d.service.find(s => s.type === 'McpService');
   assert.equal(mcp.serviceEndpoint, 'http://h/mcp');
 });
@@ -125,19 +125,18 @@ test('buildStorageDescriptionFor: ProfileIndexService composes off origin, not t
   assert.equal(pi.serviceEndpoint, 'http://h/alice/profiles/index.jsonld');
 });
 
-// Pre-merge fix (multi-tenant whole-branch review, Important finding): the
-// /.well-known/void HTTP route reads the LEGACY server-wide podConfig, not
-// the per-storage config buildStorageDescriptionFor derives voidPath from —
-// so advertising a VoidService here can misdirect a second tenant's void
-// pointer to a DIFFERENT tenant's void document (or 404). Suppressed until a
-// real per-storage void route exists (FOLLOWUP.md).
-test('buildStorageDescriptionFor suppresses VoidService (interim, cross-tenant misdirect)', () => {
+// Services round (R7): the interim suppression is lifted — VoidService is
+// now a direct per-storage pointer (no 303 indirection through the
+// server-wide /.well-known/void route, so no cross-tenant misdirect risk).
+test('buildStorageDescriptionFor advertises VoidService as a direct per-storage pointer', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', {
     voidPath: '/alice/profiles/void.jsonld', typeIndexEnabled: true, mcpEnabled: true,
   });
   assert.ok(d.service.some(s => s.type === 'TypeIndexService'));
   assert.ok(d.service.some(s => s.type === 'McpService'));
-  assert.ok(!d.service.some(s => s.type === 'VoidService'), 'per-storage description must NOT advertise VoidService');
+  const vs = d.service.find(s => s.type === 'VoidService');
+  assert.ok(vs, 'per-storage description must advertise VoidService');
+  assert.equal(vs.serviceEndpoint, 'http://h/alice/profiles/void.jsonld');
 });
 
 test('buildServerIndex lists storages, not a Storage', () => {
@@ -146,4 +145,29 @@ test('buildServerIndex lists storages, not a Storage', () => {
   assert.notEqual(idx.type, 'Storage');
   assert.deepEqual(idx.storage.map(s => s.id), ['http://h/alice/', 'http://h/bob/']);
   assert.equal(idx.storage[0].storageDescription, 'http://h/alice/lws-storage');
+});
+
+describe('per-storage service endpoints (services round)', () => {
+  it('type endpoints are storage-scoped, derived from the storage root', () => {
+    const sd = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true });
+    assert.equal(sd.service.find(s => s.type === 'TypeIndexService').serviceEndpoint,
+      'http://h/alice/types/index');
+    assert.equal(sd.service.find(s => s.type === 'TypeSearchService').serviceEndpoint,
+      'http://h/alice/types/search');
+  });
+  it('root-pod form keeps the origin endpoints (same URLs as before)', () => {
+    const sd = buildStorageDescriptionFor('http://h/', { typeIndexEnabled: true });
+    assert.equal(sd.service.find(s => s.type === 'TypeIndexService').serviceEndpoint,
+      'http://h/types/index');
+  });
+  it('VoidService is restored as a DIRECT per-storage pointer (no 303 route)', () => {
+    const sd = buildStorageDescriptionFor('http://h/alice/', { voidPath: '/alice/profiles/void.jsonld' });
+    const vs = sd.service.find(s => s.type === 'VoidService');
+    assert.equal(vs.serviceEndpoint, 'http://h/alice/profiles/void.jsonld');
+    assert.ok(!vs.hint.includes('303'), 'hint must not describe a 303 anymore');
+  });
+  it('no voidPath -> no VoidService', () => {
+    const sd = buildStorageDescriptionFor('http://h/alice/', {});
+    assert.equal(sd.service.find(s => s.type === 'VoidService'), undefined);
+  });
 });

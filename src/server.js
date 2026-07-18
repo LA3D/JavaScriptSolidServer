@@ -126,8 +126,11 @@ export function createServer(options = {}) {
   // per-storage description silently came back with no VoidService/
   // ProfileIndex/uriSpaces. Decoupled: podConfigResolver always resolves at
   // this FIXED relative convention under each storage root, independent of
-  // --lws-config. The legacy `podConfig` above (still driving
-  // /.well-known/void) is untouched.
+  // --lws-config. The legacy `podConfig` above (still driving the origin
+  // /.well-known/void 303 rail) is untouched — a per-storage
+  // VoidService (services round, R7) now advertises the SAME per-storage
+  // voidPath directly, so the two can name different targets in a
+  // mixed-mode deployment (recorded, not reconciled — spec §5).
   const PER_STORAGE_CONFIG_REL = 'profiles/pod-config.jsonld';
   const podConfigResolver = lwsEnabled ? makePodConfigResolver(storage, PER_STORAGE_CONFIG_REL) : null;
   // Content Negotiation by Profile is ON by default whenever --lws is on;

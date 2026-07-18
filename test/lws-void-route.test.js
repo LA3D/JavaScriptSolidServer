@@ -87,13 +87,10 @@ describe('lws: /.well-known/void rung', () => {
   // value or the per-storage lookup would double the pod segment:
   // /alice/alice/profiles/pod-config.jsonld).
   //
-  // Pre-merge fix (whole-branch review, Important finding): VoidService is
-  // now SUPPRESSED on the per-storage description, even when the per-storage
-  // config names a void pointer — the server-wide /.well-known/void route
-  // (above) reads the LEGACY server-wide podConfig, not this per-storage
-  // config, so advertising it here could misdirect a second tenant to (or
-  // 404 against) a DIFFERENT tenant's void. Interim, pending a real
-  // per-storage void route (src/lws/storage-description.js).
+  // Services round (R7): the interim suppression is lifted — VoidService is
+  // now a DIRECT pointer to the per-storage config's own void resource, not
+  // a 303 through the server-wide /.well-known/void route (above), so there
+  // is no cross-tenant misdirect risk to guard against anymore.
   describe('configured (per-storage /:pod/lws-storage)', () => {
     let base;
 
@@ -108,12 +105,14 @@ describe('lws: /.well-known/void rung', () => {
       await stopTestServer();
     });
 
-    it('storage description does NOT advertise VoidService (interim suppression, cross-tenant misdirect)', async () => {
+    it('storage description advertises VoidService as a direct per-storage pointer', async () => {
       const res = await request('/alice/lws-storage', {
         headers: { Accept: 'application/lws+json' },
       });
       const sd = await res.json();
-      assert.equal(sd.service.some((s) => s.type === 'VoidService'), false, 'VoidService must be suppressed on the per-storage description');
+      const vs = sd.service.find((s) => s.type === 'VoidService');
+      assert.ok(vs, 'VoidService must be advertised on the per-storage description');
+      assert.equal(vs.serviceEndpoint, `${base}/alice/profiles/void.jsonld`);
     });
   });
 
@@ -131,12 +130,9 @@ describe('lws: /.well-known/void rung', () => {
   // Description now resolves too (previously skip()'d with a documented
   // KNOWN GAP; the gap is closed).
   //
-  // Pre-merge fix (whole-branch review, Important finding): VoidService is
-  // now suppressed on BOTH the HTTP and MCP per-storage descriptions (both
-  // call the SAME buildStorageDescriptionFor) — so the parity this test
-  // guards is now parity of ABSENCE, not presence. See the sibling describe
-  // above for why (server-wide /.well-known/void route vs. per-storage
-  // config mismatch).
+  // Services round (R7): VoidService is now advertised on BOTH the HTTP and
+  // MCP per-storage descriptions (both call the SAME buildStorageDescriptionFor)
+  // — the parity this test guards is now parity of PRESENCE, matching serviceEndpoint.
   describe('MCP parity (void configured, mcp on)', () => {
     let base;
 
@@ -151,7 +147,7 @@ describe('lws: /.well-known/void rung', () => {
       await stopTestServer();
     });
 
-    it('the per-storage description resource mirrors /alice/lws-storage with void configured (both suppress VoidService)', async () => {
+    it('the per-storage description resource mirrors /alice/lws-storage with void configured (both advertise VoidService)', async () => {
       const httpRes = await fetch(`${base}/alice/lws-storage`);
       const httpBody = await httpRes.json();
 
@@ -167,7 +163,8 @@ describe('lws: /.well-known/void rung', () => {
       const resourceBody = JSON.parse(mcpJson.result.contents[0].text);
 
       const voidSvc = httpBody.service.find((s) => s.type === 'VoidService');
-      assert.equal(voidSvc, undefined, 'HTTP route must NOT advertise VoidService (interim suppression)');
+      assert.ok(voidSvc, 'HTTP route must advertise VoidService');
+      assert.equal(voidSvc.serviceEndpoint, `${base}/alice/profiles/void.jsonld`);
       assert.deepEqual(resourceBody.service, httpBody.service);
     });
   });

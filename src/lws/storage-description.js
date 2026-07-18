@@ -77,14 +77,15 @@ export async function resolveStorageDescriptionInputs(podConfig, origin, lwsEnab
 
 /**
  * Shared service-list + capability + linkset assembly for
- * `buildStorageDescriptionFor`, the sole description builder. This
- * multi-tenant round adds NO per-storage service ROUTES — only server-wide
- * routes exist (/types/index, /types/search, /.well-known/void, /mcp) — so
- * every service endpoint below is ORIGIN-scoped (derived from `idUrl`'s
- * origin). profileIndexPath is itself an absolute-from-origin path (e.g.
- * `/alice/profiles/index.jsonld`, per pod-config.js), so composing it
- * against origin (not a storage-scoped base) already lands per-storage
- * without a second `/alice/` prefix.
+ * `buildStorageDescriptionFor`, the sole description builder.
+ * TypeIndexService/TypeSearchService are STORAGE-scoped (services round,
+ * R7): derived from `idUrl` itself, so they land at `/alice/types/index`
+ * for a per-storage `idUrl` and stay origin-identical (`/types/index`) for
+ * the root-pod `/` form — either way the endpoint exists (Task 6's routes
+ * mirror this derivation). VoidService is a direct pointer composed off
+ * `origin` (voidPath is itself absolute-from-origin, same convention as
+ * profileIndexPath — see below). McpService stays ORIGIN-scoped on purpose:
+ * MCP is one gateway per pod, not per storage.
  * @param {string} idUrl  the description's own `id` (trailing slash)
  * @param {string} sdEndpoint  this description's own serviceEndpoint
  * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
@@ -94,10 +95,13 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, prof
   const origin = new URL(idUrl).origin;
   const services = [{ type: 'StorageDescription', serviceEndpoint: sdEndpoint }];
   if (typeIndexEnabled) {
-    services.push({ type: 'TypeIndexService', serviceEndpoint: `${origin}/types/index` });
+    // Storage-scoped (services round, R7): derived from idUrl, not origin —
+    // idUrl always ends with '/', so this is per-storage for '/alice/' and
+    // origin-identical for the root-pod '/' form (no dead endpoint either way).
+    services.push({ type: 'TypeIndexService', serviceEndpoint: `${idUrl}types/index` });
     services.push({
       type: 'TypeSearchService',
-      serviceEndpoint: `${origin}/types/search`,
+      serviceEndpoint: `${idUrl}types/search`,
       // Steering (unmapped, like the McpService/linkset hints): verified 2026-07-11
       // against src/handlers/type-index.js handleTypeSearch + src/lws/type-index.js
       // parseFilter/matchesTypeFilter — `type` is the CNF filter param (comma =
@@ -110,10 +114,12 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, prof
     services.push({ type: 'ProfileIndexService', serviceEndpoint: `${origin}${profileIndexPath}` });
   }
   if (voidPath) {
-    services.push({ type: 'VoidService', serviceEndpoint: `${origin}/.well-known/void`,
-      // Steering (unmapped, like the TypeSearchService/McpService hints):
-      // the endpoint is a 303, so a cold agent needs told what's behind it.
-      hint: 'VoID description of the datasets this storage serves — the vocabularies in use (each with a pod-served copy), root resources, and the subject URI space. GET follows a 303 to the description document.' });
+    services.push({ type: 'VoidService', serviceEndpoint: `${origin}${voidPath}`,
+      // Direct pointer to the pod-served VoID document (services round): the
+      // SD is generated from the same per-storage pod-config at request
+      // time, so a 303 indirection here buys nothing. The origin
+      // /.well-known/void 303 stays as the legacy/root rail.
+      hint: 'VoID description of the datasets this storage serves — the vocabularies in use (each with a pod-served copy), root resources, and the subject URI space.' });
   }
   if (mcpEnabled) {
     // MCP is one gateway per pod, not per storage — always the origin.
@@ -190,27 +196,22 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, prof
  * Build the full LWS Storage Description document for a SINGLE STORAGE ROOT
  * inside a multi-tenant pod (`id` = the storage root itself, StorageDescription
  * self-pointer at `${base}/lws-storage` instead of the origin well-known
- * path). Every OTHER service (TypeIndexService, TypeSearchService,
- * VoidService, McpService) stays origin-scoped — this round adds no
- * per-storage service routes, so advertising e.g. `/alice/types/index` would
- * be a dead endpoint. ProfileIndexService and the uriSpace capability are the
- * two genuinely per-storage pieces (the former because profileIndexPath is
- * itself an absolute-from-origin path baked at publish time, the latter
- * because the caller passes storage-scoped prefixes).
+ * path). Services are storage-scoped by construction (see assembleDescription):
+ * TypeIndexService/TypeSearchService/VoidService derive from the caller's
+ * `storageRootUrl`/`voidPath`, ProfileIndexService and the uriSpace
+ * capability were already per-storage. McpService is the one deliberate
+ * exception (one gateway per pod). Recorded limitation (spec §5): a
+ * storage's `voidPath` and the origin-level `/.well-known/void` 303 rail are
+ * two independent config reads (per-storage vs. legacy server-wide
+ * podConfig) — a mixed-mode deployment naming different targets in each is
+ * not reconciled here.
  * @param {string} storageRootUrl  absolute, trailing slash, e.g. 'http://h/alice/'
  * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
  * @returns {object}
  */
 export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
   const base = storageRootUrl.replace(/\/$/, '');
-  // INTERIM SUPPRESSION (pre-merge fix, whole-branch review): VoidService
-  // here would point at the server-wide /.well-known/void route, but that
-  // route resolves the LEGACY server-wide podConfig (--lws-config), not this
-  // storage's own per-storage config voidPath is read from — a second
-  // tenant's void pointer would misdirect to (or 404 against) a DIFFERENT
-  // tenant's void. Suppress until a real per-storage void route exists
-  // (follow-up, recorded in FOLLOWUP.md).
-  return assembleDescription(storageRootUrl, `${base}/lws-storage`, { ...flags, voidPath: null });
+  return assembleDescription(storageRootUrl, `${base}/lws-storage`, flags);
 }
 
 /**
