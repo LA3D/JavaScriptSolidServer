@@ -84,6 +84,7 @@ function needsTrustAwareRateLimit(request) {
   if (path === '/idp' || path.startsWith('/idp/') || path.startsWith('/oauth/')) return false;
   if (path.startsWith('/.well-known/')) return false;
   if (path === '/types/index' || path === '/types/search') return true;
+  if (/^\/[^/]+\/types\/(index|search)$/.test(path)) return true;
   return TRUST_AWARE_WRITE_METHODS.has(request.method);
 }
 
@@ -927,6 +928,11 @@ export function createServer(options = {}) {
         request.url.startsWith('/storage/') ||
         (typeIndexEnabled && (request.url === '/types/index' || request.url.startsWith('/types/index?'))) ||
         (typeIndexEnabled && (request.url === '/types/search' || request.url.startsWith('/types/search?'))) ||
+        // Per-storage type aggregates (services round): same virtual-aggregate
+        // self-authz rationale as origin /types/* above; the route's own
+        // storageRootFor equality gate 404s any segment that isn't a real
+        // storage, so this bypass only ever reaches those routes' own guards.
+        (lwsEnabled && typeIndexEnabled && /^\/[^/]+\/types\/(index|search)(\?.*)?$/.test(request.url)) ||
         // Per-storage description (/:pod/lws-storage, multi-tenant round):
         // the SAME public-discovery-metadata rationale as /.well-known/*
         // above — a storage description is meant to be fetchable
@@ -1303,6 +1309,34 @@ export function createServer(options = {}) {
       });
       for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
       for (const m of ['put', 'patch', 'delete']) fastify[m]('/types/search', methodNotAllowed);
+
+      if (lwsEnabled) {
+        // Per-storage TypeIndex/TypeSearch (R7): the scoped twin of the origin
+        // aggregates. The equality check is the no-oracle gate — and it also
+        // stops the R6 root-pod '/' fallback from aliasing /bogus/ to '/'.
+        const perStorageScope = async (request, reply) => {
+          const root = `/${request.params.pod}/`;
+          if ((await storageRootFor(storage, root)) !== root) { reply.code(404).send(); return null; }
+          return root;
+        };
+        // Same typeQueryRateLimit-timing gap as the origin routes above —
+        // deferred via fastify.after() so the rate-limit plugin's onRoute
+        // hook has run before these register.
+        fastify.after(() => {
+          fastify.get('/:pod/types/index', typeQueryRateLimit, async (request, reply) => {
+            const scopeRoot = await perStorageScope(request, reply);
+            return scopeRoot === null ? reply : handleTypeIndex(request, reply, { scopeRoot });
+          });
+          const perStorageSearch = async (request, reply) => {
+            const scopeRoot = await perStorageScope(request, reply);
+            return scopeRoot === null ? reply : handleTypeSearch(request, reply, { scopeRoot });
+          };
+          fastify.get('/:pod/types/search', typeQueryRateLimit, perStorageSearch);
+          fastify.post('/:pod/types/search', typeQueryRateLimit, perStorageSearch);
+        });
+        for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/:pod/types/index', methodNotAllowed);
+        for (const m of ['put', 'patch', 'delete']) fastify[m]('/:pod/types/search', methodNotAllowed);
+      }
     }
   }
 
