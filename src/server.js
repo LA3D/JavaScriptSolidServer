@@ -41,6 +41,7 @@ import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContent
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
 import { storageRootFor } from './lws/storage-resolver.js';
 import { listVisibleStorageRoots } from './lws/storage-index.js';
+import { sendJsonWithEtag } from './utils/conditional.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -1139,7 +1140,8 @@ export function createServer(options = {}) {
       // helper without a fastify request to resolve identity from.
       const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       const roots = await listVisibleStorageRoots(storage, { origin, webId });
-      return buildServerIndex(origin, roots.map((root) => ({ root })));
+      const body = buildServerIndex(origin, roots.map((root) => ({ root })));
+      return sendJsonWithEtag(request, reply, body);
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.
@@ -1183,11 +1185,12 @@ export function createServer(options = {}) {
       // podConfig this route used before storages were per-tenant.
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor(root), origin, request.lwsEnabled);
-      return buildStorageDescriptionFor(`${origin}${root}`, {
+      const body = buildStorageDescriptionFor(`${origin}${root}`, {
         typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
         uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
       });
+      return sendJsonWithEtag(request, reply, body);
     });
     for (const m of ['put', 'post', 'patch', 'delete']) {
       fastify[m]('/:pod/lws-storage', methodNotAllowed);

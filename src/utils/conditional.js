@@ -5,6 +5,7 @@
  * - If-Match: Proceed only if ETag matches (for safe updates)
  * - If-None-Match: Proceed only if ETag doesn't match (for caching/create-only)
  */
+import { createHash } from 'node:crypto';
 
 /**
  * Normalize an ETag value (remove weak prefix and quotes)
@@ -150,4 +151,21 @@ export function checkIfNoneMatchForWrite(ifNoneMatchHeader, currentEtag) {
   }
 
   return { ok: true };
+}
+
+/**
+ * ETag + If-None-Match/304 for server-GENERATED JSON documents (R3/R4:
+ * "ETags MUST be provided in all GET/HEAD responses"). Strong md5-of-body
+ * ETag: the body already encodes every input that varies it (requester
+ * visibility included), so hashing the serialization IS the variant key.
+ * Vary: Authorization because bodies are requester-dependent; Accept for
+ * the lws+json/ld+json/json label conneg.
+ */
+export function sendJsonWithEtag(request, reply, body) {
+  const etag = `"${createHash('md5').update(JSON.stringify(body)).digest('hex')}"`;
+  reply.header('ETag', etag);
+  reply.header('Vary', 'Accept, Authorization');
+  const cond = checkIfNoneMatchForGet(request.headers['if-none-match'], etag);
+  if (!cond.ok && cond.notModified) return reply.code(304).send();
+  return body;
 }
