@@ -11,6 +11,8 @@
 // surface in the server.
 import { storageRootFor } from './storage-resolver.js';
 import { filterReadableEntries } from './authorized-listing.js';
+import { checkAccess } from '../wac/checker.js';
+import { AccessMode } from '../wac/parser.js';
 
 /**
  * The storage roots (e.g. `['/alice/']`) visible to the requester: every
@@ -36,9 +38,25 @@ export async function listVisibleStorageRoots(storage, { origin, webId }) {
   for (const e of dirs) {
     if (await storageRootFor(storage, `/${e.name}/`)) marked.push(e);
   }
-  if (!marked.length) return [];
-  const readable = await filterReadableEntries({
-    entries: marked, containerUrl: `${origin}/`, containerStoragePath: '/', agentWebId: webId ?? null,
-  });
-  return readable.map((e) => `/${e.name}/`);
+  const roots = [];
+  // Root-pod (R6): `/` itself may carry the lws:Storage marker (single-user root
+  // deploy). The named-root scan above never sees `/`, so add it here — WAC-
+  // filtered on READ of `/` itself, the same discipline every named root gets —
+  // so root-pod discovery (Link -> ServerIndex -> this roster) resolves instead
+  // of landing on an empty index. Named-pod deployments never mark `/`, so
+  // `storageRootFor(storage, '/')` is null for them and the roster is unchanged.
+  if (await storageRootFor(storage, '/')) {
+    const { allowed } = await checkAccess({
+      resourceUrl: `${origin}/`, resourcePath: '/', isContainer: true,
+      agentWebId: webId ?? null, requiredMode: AccessMode.READ,
+    });
+    if (allowed) roots.push('/');
+  }
+  if (marked.length) {
+    const readable = await filterReadableEntries({
+      entries: marked, containerUrl: `${origin}/`, containerStoragePath: '/', agentWebId: webId ?? null,
+    });
+    roots.push(...readable.map((e) => `/${e.name}/`));
+  }
+  return roots;
 }

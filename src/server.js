@@ -41,6 +41,7 @@ import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContent
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
 import { storageRootFor } from './lws/storage-resolver.js';
 import { listVisibleStorageRoots } from './lws/storage-index.js';
+import { sendJsonWithEtag } from './utils/conditional.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -933,6 +934,15 @@ export function createServer(options = {}) {
         // arbitrary pod-relative paths — it only ever reaches that one
         // route's own gate.
         (lwsEnabled && /^\/[^/]+\/lws-storage(\?.*)?$/.test(request.url)) ||
+        // Root-pod storage description (R6): the bare `/lws-storage` is the
+        // per-storage document for a single-user root pod. Same public-discovery
+        // rationale as `/:pod/lws-storage` above, but scoped to root-pod mode
+        // only — `request.storageRootPath` (resolved in the onRequest hook) is
+        // `/` exactly when `/` carries the lws:Storage marker, so a NAMED-pod
+        // deployment (where `/` is unmarked) never bypasses WAC here: its
+        // `/lws-storage` stays an ordinary LDP path. The route's own READ-on-`/`
+        // check then gates the description (a private root pod 401s anon).
+        (lwsEnabled && request.storageRootPath === '/' && /^\/lws-storage(\?.*)?$/.test(request.url)) ||
         (payEnabled && isPayRequest(request.url)) ||
         (mongoEnabled && (request.url === '/db' || request.url.startsWith('/db/'))) ||
         (mcpEnabled && (request.url === '/mcp' || request.url.startsWith('/mcp?'))) ||
@@ -1139,7 +1149,8 @@ export function createServer(options = {}) {
       // helper without a fastify request to resolve identity from.
       const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       const roots = await listVisibleStorageRoots(storage, { origin, webId });
-      return buildServerIndex(origin, roots.map((root) => ({ root })));
+      const body = buildServerIndex(origin, roots.map((root) => ({ root })));
+      return sendJsonWithEtag(request, reply, body);
     });
     // Block writes — this is a read-only well-known resource.
     // Reuse the methodNotAllowed helper defined above for /.well-known/did/nostr.
@@ -1183,15 +1194,65 @@ export function createServer(options = {}) {
       // podConfig this route used before storages were per-tenant.
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor(root), origin, request.lwsEnabled);
-      return buildStorageDescriptionFor(`${origin}${root}`, {
+      const body = buildStorageDescriptionFor(`${origin}${root}`, {
         typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
         uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
       });
+      return sendJsonWithEtag(request, reply, body);
     });
     for (const m of ['put', 'post', 'patch', 'delete']) {
       fastify[m]('/:pod/lws-storage', methodNotAllowed);
     }
+
+    // Root-pod storage description (R6): storageDescriptionUrl(url, '/') yields
+    // {origin}/lws-storage, which /:pod/lws-storage can't match (pod=""). When
+    // `/` is unmarked (named-pod mode) fall through to LDP so an ordinary
+    // resource named /lws-storage is not shadowed. When `/` IS marked this is
+    // the single Storage document (the well-known stays the ServerIndex roster,
+    // which now lists `/` too — storage-index.js). Mirrors /:pod/lws-storage:
+    // the blanket preHandler bypass above exempts it in root-pod mode, so the
+    // READ-on-`/` check here IS the gate (a private root pod 401s anon).
+    fastify.get('/lws-storage', async (request, reply) => {
+      if ((await storageRootFor(storage, '/')) !== '/') return handleGet(request, reply);
+      const origin = `${request.protocol}://${request.hostname}`;
+      const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+      const { allowed } = await checkAccess({
+        resourceUrl: `${origin}/`, resourcePath: '/', isContainer: true,
+        agentWebId: webId, requiredMode: AccessMode.READ,
+      });
+      if (!allowed) return reply.code(401).send();
+      reply.header('Cache-Control', 'public, max-age=3600');
+      reply.type(storageDescriptionContentType(request.headers.accept));
+      const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
+        await resolveStorageDescriptionInputs(request.podConfigFor('/'), origin, request.lwsEnabled);
+      const body = buildStorageDescriptionFor(`${origin}/`, {
+        typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
+        profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
+        uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
+      });
+      return sendJsonWithEtag(request, reply, body);
+    });
+    // Write reservation for the bare /lws-storage — scoped to ROOT-POD mode.
+    // When `/` is marked this is the read-only Storage description (405 writes,
+    // mirroring /:pod/lws-storage). When `/` is unmarked (named-pod mode)
+    // /lws-storage is an ordinary origin-root LDP path, so delegate to the SAME
+    // wildcard write handlers — they derive the path from request.url, not the
+    // route param, so they behave identically — under the SAME writeRateLimit,
+    // so named-pod write behavior is byte-identical to any other resource (no
+    // reserved-path 405, no rate-limit skip). Deferred via fastify.after() for
+    // the same reason the wildcard write routes are (the rate-limit plugin's
+    // onRoute hook must have booted, or the route-level cap silently no-ops).
+    const rootPodOnly = (handler) => async (request, reply) =>
+      (await storageRootFor(storage, '/')) === '/'
+        ? methodNotAllowed(request, reply)
+        : handler(request, reply);
+    fastify.after(() => {
+      fastify.put('/lws-storage', writeRateLimit, rootPodOnly(handlePut));
+      fastify.post('/lws-storage', writeRateLimit, rootPodOnly(handlePost));
+      fastify.patch('/lws-storage', writeRateLimit, rootPodOnly(handlePatch));
+      fastify.delete('/lws-storage', writeRateLimit, rootPodOnly(handleDelete));
+    });
 
     // VoID rung — /.well-known/void 303s to the configured pod resource
     // (the `void` pointer in --lws-config's pod resource). Pure routing
