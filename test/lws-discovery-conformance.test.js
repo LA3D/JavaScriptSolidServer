@@ -7,7 +7,8 @@
  *   3. Per-resource linkset via conneg (Tasks 4/5)
  *   4. HEAD content-type parity for linkset+json (Task 6)
  *   5. Negative controls: lws OFF → no rels/route; lws ON + default Accept → LDP
- *   6. NotificationService entry in storage description (Task 2 gap)
+ *   6. NO NotificationService entry in storage description (R9 — dead
+ *      /notification/api dropped)
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -230,12 +231,13 @@ describe('LWS discovery negative controls (--lws OFF)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// NotificationService in storage description (Task 2 gap)
+// NO NotificationService in storage description (R9 — dead /notification/api
+// dropped; real LWS notifications = recorded future round)
 // ---------------------------------------------------------------------------
-describe('LWS NotificationService in storage description (--lws + --notifications)', () => {
+describe('NO NotificationService in storage description (--lws + --notifications)', () => {
   before(async () => {
     await startTestServer({ lws: true, notifications: true });
-    // NotificationService (like every other server-wide service) is
+    // NotificationService (like every other server-wide service) would be
     // advertised on the per-storage description (/:pod/lws-storage), not
     // the ServerIndex well-known — multi-tenant round, D5.
     await createTestPod('alice');
@@ -245,17 +247,12 @@ describe('LWS NotificationService in storage description (--lws + --notification
     await stopTestServer();
   });
 
-  it('service array contains a NotificationService entry', async () => {
+  it('service array contains NO NotificationService entry (dead /notification/api dropped; real LWS notifications = recorded future round)', async () => {
     const res = await request('/alice/lws-storage', { headers: { Accept: 'application/lws+json' } });
     assertStatus(res, 200);
     const body = await res.json();
     assert.ok(Array.isArray(body.service), 'service must be an array');
-    const ns = body.service.find(s => s.type === 'NotificationService');
-    assert.ok(ns, 'service must contain a NotificationService entry');
-    assert.ok(ns.serviceEndpoint, 'NotificationService must have serviceEndpoint');
-    assert.ok(
-      ns.serviceEndpoint.endsWith('/notification/api'),
-      `NotificationService serviceEndpoint should end with /notification/api, got: ${ns.serviceEndpoint}`
-    );
+    assert.equal(body.service.find(s => s.type === 'NotificationService'), undefined,
+      'NotificationService must not be advertised');
   });
 });

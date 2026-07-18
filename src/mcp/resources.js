@@ -104,7 +104,7 @@ async function readPerStorageDescription(ctx, uri, root) {
   const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
     await resolveStorageDescriptionInputs(podConfig, ctx.origin, ctx.lwsEnabled);
   const sd = buildStorageDescriptionFor(`${ctx.origin}${root}`, {
-    typeIndexEnabled: ctx.typeIndexEnabled, notificationsEnabled: ctx.notificationsEnabled,
+    typeIndexEnabled: ctx.typeIndexEnabled,
     profileIndexPath, voidPath,
     profileConnegEnabled: ctx.profileConnegEnabled,
     referentResolutionEnabled, uriSpacePrefixes,

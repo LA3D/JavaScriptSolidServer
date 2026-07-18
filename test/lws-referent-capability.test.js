@@ -2,25 +2,25 @@
 // DX-PROF-CONNEG capability — a cold agent (and the MCP surface) discovers
 // the pod dereferences minted subject-IRI names by 303 via a URI-typed
 // entry in the storage description's `capability` array. Pure unit tests
-// on buildStorageDescription — no server.
+// on buildStorageDescriptionFor — no server.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStorageDescription } from '../src/lws/storage-description.js';
+import { buildStorageDescriptionFor } from '../src/lws/storage-description.js';
 import { uriSpacePrefixesFor, resolveReferent } from '../src/lws/referent-resolver.js';
 
 const CAP = 'https://w3id.org/lws-pod/capability/ReferentResolution';
 
 test('advertises the referent-resolution capability when enabled', () => {
-  const sd = buildStorageDescription('https://pod.example', { referentResolutionEnabled: true });
+  const sd = buildStorageDescriptionFor('https://pod.example/', { referentResolutionEnabled: true });
   assert.ok((sd.capability || []).some((c) => c.type === CAP), 'capability missing');
 });
 test('absent when disabled; default path unchanged', () => {
-  const sd = buildStorageDescription('https://pod.example', {});
+  const sd = buildStorageDescriptionFor('https://pod.example/', {});
   assert.ok(!(sd.capability || []).some((c) => c.type === CAP));
   assert.ok(!('capability' in sd), 'capability key must be absent, not an empty array');
 });
 test('coexists with the profile-conneg capability', () => {
-  const sd = buildStorageDescription('https://pod.example', { profileConnegEnabled: true, referentResolutionEnabled: true });
+  const sd = buildStorageDescriptionFor('https://pod.example/', { profileConnegEnabled: true, referentResolutionEnabled: true });
   const types = (sd.capability || []).map((c) => c.type);
   assert.ok(types.includes('http://www.w3.org/ns/dx/connegp/profile/http'));
   assert.ok(types.includes(CAP));
@@ -32,17 +32,17 @@ test('coexists with the profile-conneg capability', () => {
 // VoID document two hops later).
 test('the ReferentResolution capability carries structured uriSpace prefixes', () => {
   const origin = 'https://pod.example';
-  const sd = buildStorageDescription(origin, { referentResolutionEnabled: true, uriSpacePrefixes: [`${origin}/id/`] });
+  const sd = buildStorageDescriptionFor(`${origin}/`, { referentResolutionEnabled: true, uriSpacePrefixes: [`${origin}/id/`] });
   const cap = sd.capability.find((c) => c.type === CAP);
   assert.ok(Array.isArray(cap.uriSpace), 'uriSpace is an array');
   assert.ok(cap.uriSpace.some((u) => u.endsWith('/id/')), 'uriSpace names the minted prefix');
 });
 test('uriSpacePrefixes absent/empty leaves the capability byte-identical to today (no uriSpace key)', () => {
-  const sd1 = buildStorageDescription('https://pod.example', { referentResolutionEnabled: true });
+  const sd1 = buildStorageDescriptionFor('https://pod.example/', { referentResolutionEnabled: true });
   const cap1 = sd1.capability.find((c) => c.type === CAP);
   assert.ok(!('uriSpace' in cap1), 'no uriSpace key when uriSpacePrefixes absent');
 
-  const sd2 = buildStorageDescription('https://pod.example', { referentResolutionEnabled: true, uriSpacePrefixes: [] });
+  const sd2 = buildStorageDescriptionFor('https://pod.example/', { referentResolutionEnabled: true, uriSpacePrefixes: [] });
   const cap2 = sd2.capability.find((c) => c.type === CAP);
   assert.ok(!('uriSpace' in cap2), 'no uriSpace key when uriSpacePrefixes empty');
 });

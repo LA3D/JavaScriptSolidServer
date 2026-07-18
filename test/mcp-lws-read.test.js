@@ -227,15 +227,12 @@ test('the per-storage description resource mirrors /:pod/lws-storage with profil
   assert.deepEqual(resourceBody.service, httpBody.service);
 });
 
-// Edge combo: liveReload on, notifications explicitly off. The
-// NotificationService plugin is still registered in this combo
-// (notificationsEnabled || liveReloadEnabled, src/server.js ~464), and the
-// request-level decoration used by both surfaces agrees (~397). Before the
-// fix, the HTTP route passed the raw (false) notifications flag and
-// under-advertised NotificationService while the MCP ctx (which reads
-// request.notificationsEnabled) correctly advertised it — this proves both
-// surfaces now agree, matching actual service registration.
-test('the per-storage description resource and HTTP route agree when liveReload is on but notifications is off', async (t) => {
+// Edge combo: liveReload on, notifications explicitly off. NotificationService
+// is no longer advertised at all (R9 — dead /notification/api dropped; the
+// real mechanism is the legacy Updates-Via + /.notifications WS, untouched) —
+// this proves the HTTP route and MCP ctx still AGREE (both omit it), same
+// drift-guard as the sibling tests above.
+test('the per-storage description resource and HTTP route agree: neither advertises NotificationService', async (t) => {
   await startTestServer({ lws: true, mcp: true, liveReload: true, notifications: false });
   t.after(async () => { await stopTestServer(); });
   const base = getBaseUrl();
@@ -257,8 +254,8 @@ test('the per-storage description resource and HTTP route agree when liveReload 
 
   const httpHasNotify = httpBody.service.some((s) => s.type === 'NotificationService');
   const mcpHasNotify = resourceBody.service.some((s) => s.type === 'NotificationService');
-  assert.equal(httpHasNotify, true, 'HTTP route must advertise NotificationService when liveReload is on');
-  assert.equal(mcpHasNotify, true, 'MCP ctx must advertise NotificationService when liveReload is on');
+  assert.equal(httpHasNotify, false, 'HTTP route must not advertise NotificationService');
+  assert.equal(mcpHasNotify, false, 'MCP ctx must not advertise NotificationService');
   assert.deepEqual(resourceBody.service, httpBody.service);
 });
 

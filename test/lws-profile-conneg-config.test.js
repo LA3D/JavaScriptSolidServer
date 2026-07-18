@@ -5,7 +5,7 @@
  * request from test/helpers.js) — this is a config/gating test, not a
  * capability-shape test (that's lws-storage-description-capability.test.js,
  * Task 5). Asserts the capability[] entry is actually wired end-to-end
- * through createServer -> request.lwsProfileConneg -> buildStorageDescription
+ * through createServer -> request.lwsProfileConneg -> buildStorageDescriptionFor
  * on the real HTTP route, on by default under --lws, off when --lws is off.
  */
 

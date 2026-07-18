@@ -13,7 +13,7 @@ import { ResourceError } from '../src/mcp/errors.js';
 import { startLwsPod, ownerCtx, putFile } from './helpers.js';
 import { generatePublicReadAcl, serializeAcl } from '../src/wac/parser.js';
 import * as storage from '../src/storage/filesystem.js';
-import { buildStorageDescription } from '../src/lws/storage-description.js';
+import { buildStorageDescriptionFor } from '../src/lws/storage-description.js';
 import http from 'node:http';
 
 test('parseRemoteLinks extracts json-ld#context, ld+json alternate, and linkset rels', () => {
@@ -259,7 +259,7 @@ test('index-shadowed container ADVERTISES rel="linkset" again (A2, spec 2026-07-
 });
 
 test('storage description names RFC 9264 linkset negotiation (priming-ablation steering)', () => {
-  const sd = buildStorageDescription('https://pod.example', {});
+  const sd = buildStorageDescriptionFor('https://pod.example/', {});
   assert.equal(sd.linkset.mediaType, 'application/linkset+json');
   assert.equal(sd.linkset.conformsTo, 'https://www.rfc-editor.org/rfc/rfc9264');
   assert.match(sd.linkset.hint, /RFC 9264/);

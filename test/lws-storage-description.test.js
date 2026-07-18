@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateStorageDescription, buildStorageDescription, buildStorageDescriptionFor, buildServerIndex, storageDescriptionUrl } from '../src/lws/storage-description.js';
+import { generateStorageDescription, buildStorageDescriptionFor, buildServerIndex, storageDescriptionUrl } from '../src/lws/storage-description.js';
 
 const ROOT = 'http://localhost:3000/';
 const DESC = 'http://localhost:3000/.well-known/lws-storage';
@@ -18,22 +18,22 @@ test('storage description: required top-level shape', () => {
 test('storage description: every service has type + serviceEndpoint', () => {
   const d = generateStorageDescription(ROOT, [
     { type: 'StorageDescription', serviceEndpoint: DESC },
-    { type: 'NotificationService', serviceEndpoint: ROOT + 'notification/api' },
+    { type: 'ExampleService', serviceEndpoint: ROOT + 'example/api' },
   ]);
   for (const s of d.service) {
     assert.equal(typeof s.type, 'string');
     assert.equal(typeof s.serviceEndpoint, 'string');
   }
   assert.ok(d.service.some(s => s.type === 'StorageDescription' && s.serviceEndpoint === DESC));
-  assert.ok(d.service.some(s => s.type === 'NotificationService'));
+  assert.ok(d.service.some(s => s.type === 'ExampleService'));
 });
 
 test('McpService advertised iff MCP is enabled (S5 — /mcp was invisible to HTTP-cold agents)', () => {
-  const on = buildStorageDescription('https://pod.example', { mcpEnabled: true });
+  const on = buildStorageDescriptionFor('https://pod.example/', { mcpEnabled: true });
   const svc = on.service.find(s => s.type === 'McpService');
   assert.ok(svc);
   assert.equal(svc.serviceEndpoint, 'https://pod.example/mcp');
-  const off = buildStorageDescription('https://pod.example', {});
+  const off = buildStorageDescriptionFor('https://pod.example/', {});
   assert.ok(!off.service.some(s => s.type === 'McpService'));
 });
 
@@ -41,13 +41,13 @@ test('McpService advertised iff MCP is enabled (S5 — /mcp was invisible to HTT
 // (a specific non-HTML Accept now reaches the real listing, root included),
 // so the linkset hint must teach the escape instead of a bare "descend".
 test('linkset hint teaches the shadow escape (root is listable by conneg)', () => {
-  const sd = buildStorageDescription('https://pod.example', {});
+  const sd = buildStorageDescriptionFor('https://pod.example/', {});
   assert.match(sd.linkset.hint, /non-HTML Accept/);
   assert.match(sd.linkset.hint, /application\/lws\+json/);
 });
 
 test('TypeSearchService carries a query-syntax hint', () => {
-  const sd = buildStorageDescription('https://pod.example', { typeIndexEnabled: true });
+  const sd = buildStorageDescriptionFor('https://pod.example/', { typeIndexEnabled: true });
   const ts = sd.service.find(s => s.type === 'TypeSearchService');
   assert.match(ts.hint, /\?type=/);
 });
@@ -55,14 +55,14 @@ test('TypeSearchService carries a query-syntax hint', () => {
 // probe #7 batch: a cold agent hitting 429s otherwise has no way to learn the
 // budget is per-IP-anonymous, not a pod-wide outage.
 test('McpService hint names the anonymous rate-limit budget when anonRateLimitMax is given', () => {
-  const sd = buildStorageDescription('https://pod.example', { mcpEnabled: true, anonRateLimitMax: 60 });
+  const sd = buildStorageDescriptionFor('https://pod.example/', { mcpEnabled: true, anonRateLimitMax: 60 });
   const svc = sd.service.find(s => s.type === 'McpService');
   assert.match(svc.hint, /Anonymous callers: 60 requests\/minute/);
   assert.match(svc.hint, /x-ratelimit/i);
 });
 
 test('McpService hint omits the budget sentence when anonRateLimitMax is not given', () => {
-  const sd = buildStorageDescription('https://pod.example', { mcpEnabled: true });
+  const sd = buildStorageDescriptionFor('https://pod.example/', { mcpEnabled: true });
   const svc = sd.service.find(s => s.type === 'McpService');
   assert.doesNotMatch(svc.hint, /requests\/minute/);
 });
@@ -80,12 +80,12 @@ test('storageDescriptionUrl is per-storage when a root is given', () => {
     'http://h/.well-known/lws-storage');
 });
 
-// buildStorageDescription (origin form) is UNCHANGED by this task — see the
-// byte-identity check in the task report. The per-storage `id` and the
-// StorageDescription self-pointer land on the new buildStorageDescriptionFor
-// instead — every OTHER service stays origin-scoped (controller correction:
-// this round adds no per-storage service ROUTES, so e.g. /alice/types/index
-// would be a dead endpoint).
+// buildStorageDescriptionFor's `id` and StorageDescription self-pointer are
+// pod-scoped — every OTHER service stays origin-scoped (controller
+// correction: this round adds no per-storage service ROUTES, so e.g.
+// /alice/types/index would be a dead endpoint). The origin form
+// (buildStorageDescription) was deleted (R9) — zero callers since the
+// multi-tenant round.
 test('buildStorageDescriptionFor: id + StorageDescription self-pointer are pod-scoped', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', { typeIndexEnabled: true });
   assert.equal(d.id, 'http://h/alice/');
@@ -130,9 +130,7 @@ test('buildStorageDescriptionFor: ProfileIndexService composes off origin, not t
 // the per-storage config buildStorageDescriptionFor derives voidPath from —
 // so advertising a VoidService here can misdirect a second tenant's void
 // pointer to a DIFFERENT tenant's void document (or 404). Suppressed until a
-// real per-storage void route exists. The origin form (buildStorageDescription)
-// is UNCHANGED — its own VoidService is server-wide-correct by construction
-// (it's the same podConfig the well-known route itself reads).
+// real per-storage void route exists (FOLLOWUP.md).
 test('buildStorageDescriptionFor suppresses VoidService (interim, cross-tenant misdirect)', () => {
   const d = buildStorageDescriptionFor('http://h/alice/', {
     voidPath: '/alice/profiles/void.jsonld', typeIndexEnabled: true, mcpEnabled: true,
@@ -140,11 +138,6 @@ test('buildStorageDescriptionFor suppresses VoidService (interim, cross-tenant m
   assert.ok(d.service.some(s => s.type === 'TypeIndexService'));
   assert.ok(d.service.some(s => s.type === 'McpService'));
   assert.ok(!d.service.some(s => s.type === 'VoidService'), 'per-storage description must NOT advertise VoidService');
-});
-
-test('buildStorageDescription (origin form) still advertises VoidService (byte-identity preserved)', () => {
-  const d = buildStorageDescription('http://h', { voidPath: '/x' });
-  assert.ok(d.service.some(s => s.type === 'VoidService'), 'origin form must still advertise VoidService');
 });
 
 test('buildServerIndex lists storages, not a Storage', () => {

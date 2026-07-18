@@ -886,7 +886,6 @@ export async function handleGet(request, reply) {
           await resolveStorageDescriptionInputs(request.podConfigFor(root), originStr, request.lwsEnabled);
         const sd = buildStorageDescriptionFor(`${originStr}${root}`, {
           typeIndexEnabled: request.typeIndexEnabled,
-          notificationsEnabled: request.notificationsEnabled,
           profileIndexPath,
           voidPath,
           profileConnegEnabled: request.lwsProfileConneg,

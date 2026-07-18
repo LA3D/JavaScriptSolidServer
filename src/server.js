@@ -1195,7 +1195,7 @@ export function createServer(options = {}) {
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor(root), origin, request.lwsEnabled);
       const body = buildStorageDescriptionFor(`${origin}${root}`, {
-        typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
+        typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
         uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
       });
@@ -1227,7 +1227,7 @@ export function createServer(options = {}) {
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor('/'), origin, request.lwsEnabled);
       const body = buildStorageDescriptionFor(`${origin}/`, {
-        typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
+        typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
         uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
       });

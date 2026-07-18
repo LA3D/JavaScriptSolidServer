@@ -55,7 +55,7 @@ export function generateStorageDescription(storageRootUrl, services = []) {
 }
 
 /**
- * Resolve the pod-config-derived inputs to buildStorageDescription's
+ * Resolve the pod-config-derived inputs to buildStorageDescriptionFor's
  * referent-resolution capability (Task 7, spec 2026-07-15): reads
  * profileIndex/void/uriSpaces off the decorated podConfig and derives
  * referentResolutionEnabled + its uriSpacePrefixes via the SAME
@@ -76,27 +76,21 @@ export async function resolveStorageDescriptionInputs(podConfig, origin, lwsEnab
 }
 
 /**
- * Shared service-list + capability + linkset assembly for both the
- * single-origin (`buildStorageDescription`) and per-storage
- * (`buildStorageDescriptionFor`) description builders. This multi-tenant
- * round adds NO per-storage service ROUTES — only server-wide routes exist
- * (/types/index, /types/search, /.well-known/void, /notification/api,
- * /mcp) — so every service endpoint below is ORIGIN-scoped (derived from
- * `idUrl`'s origin), matching whatever `buildStorageDescription` (the
- * pre-multi-tenant origin form) already emitted. The two builders differ
- * only in `idUrl` (the description's own `id`) and `sdEndpoint` (this
- * description's OWN StorageDescription self-pointer — per-storage for
- * `buildStorageDescriptionFor`, origin-well-known for `buildStorageDescription`).
- * profileIndexPath is itself an absolute-from-origin path (e.g.
+ * Shared service-list + capability + linkset assembly for
+ * `buildStorageDescriptionFor`, the sole description builder. This
+ * multi-tenant round adds NO per-storage service ROUTES — only server-wide
+ * routes exist (/types/index, /types/search, /.well-known/void, /mcp) — so
+ * every service endpoint below is ORIGIN-scoped (derived from `idUrl`'s
+ * origin). profileIndexPath is itself an absolute-from-origin path (e.g.
  * `/alice/profiles/index.jsonld`, per pod-config.js), so composing it
  * against origin (not a storage-scoped base) already lands per-storage
  * without a second `/alice/` prefix.
  * @param {string} idUrl  the description's own `id` (trailing slash)
  * @param {string} sdEndpoint  this description's own serviceEndpoint
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
  * @returns {object}
  */
-function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, notificationsEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, uriSpacePrefixes = [], mcpEnabled = false, anonRateLimitMax = null } = {}) {
+function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, uriSpacePrefixes = [], mcpEnabled = false, anonRateLimitMax = null } = {}) {
   const origin = new URL(idUrl).origin;
   const services = [{ type: 'StorageDescription', serviceEndpoint: sdEndpoint }];
   if (typeIndexEnabled) {
@@ -111,9 +105,6 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, noti
       // and `conformsTo` are the other two indexed relations, same CNF syntax.
       hint: 'GET with ?type=<uri> returns instances of that type; comma-separate values in one param for OR, repeat the parameter for AND. A bare GET returns the full inventory. The same CNF syntax also filters by indexed relations: ?describedby=<uri> and ?conformsTo=<uri>.',
     });
-  }
-  if (notificationsEnabled) {
-    services.push({ type: 'NotificationService', serviceEndpoint: `${origin}/notification/api` });
   }
   if (profileIndexPath) {
     services.push({ type: 'ProfileIndexService', serviceEndpoint: `${origin}${profileIndexPath}` });
@@ -196,37 +187,18 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, noti
 }
 
 /**
- * Build the full LWS Storage Description document for an origin, given
- * which optional services are enabled. Single source of the service list —
- * the HTTP GET /.well-known/lws-storage route and the MCP storage-description
- * resource (read at /.well-known/lws-storage) both call this so the advertised
- * service set can never drift between the two surfaces.
- *
- * This is the ORIGIN-scoped form (id = `${origin}/`, single well-known
- * endpoint) — pre-multi-tenant callers (server.js, mcp/resources.js,
- * handlers/resource.js) all still call this. See `buildStorageDescriptionFor`
- * for the per-storage-root form used by multi-tenant pods.
- * @param {string} origin  `${proto}://${host}` (no trailing slash)
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
- * @returns {object}
- */
-export function buildStorageDescription(origin, flags = {}) {
-  return assembleDescription(`${origin}/`, `${origin}/.well-known/lws-storage`, flags);
-}
-
-/**
  * Build the full LWS Storage Description document for a SINGLE STORAGE ROOT
  * inside a multi-tenant pod (`id` = the storage root itself, StorageDescription
  * self-pointer at `${base}/lws-storage` instead of the origin well-known
  * path). Every OTHER service (TypeIndexService, TypeSearchService,
- * VoidService, NotificationService, McpService) stays origin-scoped — this
- * round adds no per-storage service routes, so advertising e.g.
- * `/alice/types/index` would be a dead endpoint. ProfileIndexService and the
- * uriSpace capability are the two genuinely per-storage pieces (the former
- * because profileIndexPath is itself an absolute-from-origin path baked at
- * publish time, the latter because the caller passes storage-scoped prefixes).
+ * VoidService, McpService) stays origin-scoped — this round adds no
+ * per-storage service routes, so advertising e.g. `/alice/types/index` would
+ * be a dead endpoint. ProfileIndexService and the uriSpace capability are the
+ * two genuinely per-storage pieces (the former because profileIndexPath is
+ * itself an absolute-from-origin path baked at publish time, the latter
+ * because the caller passes storage-scoped prefixes).
  * @param {string} storageRootUrl  absolute, trailing slash, e.g. 'http://h/alice/'
- * @param {{typeIndexEnabled?:boolean, notificationsEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
  * @returns {object}
  */
 export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
@@ -237,10 +209,7 @@ export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
   // storage's own per-storage config voidPath is read from — a second
   // tenant's void pointer would misdirect to (or 404 against) a DIFFERENT
   // tenant's void. Suppress until a real per-storage void route exists
-  // (follow-up, recorded in FOLLOWUP.md). The origin form
-  // (buildStorageDescription) is untouched: its VoidService is server-wide
-  // correct by construction — it's the same podConfig the well-known route
-  // itself reads.
+  // (follow-up, recorded in FOLLOWUP.md).
   return assembleDescription(storageRootUrl, `${base}/lws-storage`, { ...flags, voidPath: null });
 }
 
