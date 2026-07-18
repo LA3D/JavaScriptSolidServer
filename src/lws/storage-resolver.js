@@ -19,16 +19,23 @@ async function isStorageRoot(storage, rootPath) {
 /**
  * The owning storage root path for a URL path, or null for server scope.
  * Fast path: first segment -> `/<seg>/` candidate, verified by the marker
- * (cached). null when the path is `/`, a `.well-known`, or a first segment
- * with no lws:Storage marker.
+ * (cached). Falls back to the root-pod `/` marker (R6) when no named-pod
+ * candidate matched. null for a `.well-known` path, or when neither the named
+ * candidate nor `/` carries the lws:Storage marker.
  * @param {{exists:Function, read:Function}} storage
  * @param {string} urlPath  URL pathname (== storage path in --lws path mode)
  */
 export async function storageRootFor(storage, urlPath) {
-  if (!urlPath || urlPath === '/') return null;
+  if (!urlPath) return null;
   const segs = urlPath.split('/').filter(Boolean);
-  if (!segs.length) return null;
   if (segs[0] === '.well-known') return null;
-  const candidate = `/${segs[0]}/`;
-  return (await isStorageRoot(storage, candidate)) ? candidate : null;
+  if (segs.length) {
+    const candidate = `/${segs[0]}/`;
+    if (await isStorageRoot(storage, candidate)) return candidate;
+  }
+  // Root-pod fallback (R6): a single-user deployment marks `/` itself
+  // (createRootPodStructure). Without this, root-pod resources point their
+  // storageDescription at the empty ServerIndex and referent 303s never arm.
+  // Named-pod deployments never mark `/`, so this stays null for them.
+  return (await isStorageRoot(storage, '/')) ? '/' : null;
 }

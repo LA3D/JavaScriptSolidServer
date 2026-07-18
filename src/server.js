@@ -934,6 +934,15 @@ export function createServer(options = {}) {
         // arbitrary pod-relative paths — it only ever reaches that one
         // route's own gate.
         (lwsEnabled && /^\/[^/]+\/lws-storage(\?.*)?$/.test(request.url)) ||
+        // Root-pod storage description (R6): the bare `/lws-storage` is the
+        // per-storage document for a single-user root pod. Same public-discovery
+        // rationale as `/:pod/lws-storage` above, but scoped to root-pod mode
+        // only — `request.storageRootPath` (resolved in the onRequest hook) is
+        // `/` exactly when `/` carries the lws:Storage marker, so a NAMED-pod
+        // deployment (where `/` is unmarked) never bypasses WAC here: its
+        // `/lws-storage` stays an ordinary LDP path. The route's own READ-on-`/`
+        // check then gates the description (a private root pod 401s anon).
+        (lwsEnabled && request.storageRootPath === '/' && /^\/lws-storage(\?.*)?$/.test(request.url)) ||
         (payEnabled && isPayRequest(request.url)) ||
         (mongoEnabled && (request.url === '/db' || request.url.startsWith('/db/'))) ||
         (mcpEnabled && (request.url === '/mcp' || request.url.startsWith('/mcp?'))) ||
@@ -1194,6 +1203,38 @@ export function createServer(options = {}) {
     });
     for (const m of ['put', 'post', 'patch', 'delete']) {
       fastify[m]('/:pod/lws-storage', methodNotAllowed);
+    }
+
+    // Root-pod storage description (R6): storageDescriptionUrl(url, '/') yields
+    // {origin}/lws-storage, which /:pod/lws-storage can't match (pod=""). When
+    // `/` is unmarked (named-pod mode) fall through to LDP so an ordinary
+    // resource named /lws-storage is not shadowed. When `/` IS marked this is
+    // the single Storage document (the well-known stays the ServerIndex roster,
+    // which now lists `/` too — storage-index.js). Mirrors /:pod/lws-storage:
+    // the blanket preHandler bypass above exempts it in root-pod mode, so the
+    // READ-on-`/` check here IS the gate (a private root pod 401s anon).
+    fastify.get('/lws-storage', async (request, reply) => {
+      if ((await storageRootFor(storage, '/')) !== '/') return handleGet(request, reply);
+      const origin = `${request.protocol}://${request.hostname}`;
+      const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+      const { allowed } = await checkAccess({
+        resourceUrl: `${origin}/`, resourcePath: '/', isContainer: true,
+        agentWebId: webId, requiredMode: AccessMode.READ,
+      });
+      if (!allowed) return reply.code(401).send();
+      reply.header('Cache-Control', 'public, max-age=3600');
+      reply.type(storageDescriptionContentType(request.headers.accept));
+      const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
+        await resolveStorageDescriptionInputs(request.podConfigFor('/'), origin, request.lwsEnabled);
+      const body = buildStorageDescriptionFor(`${origin}/`, {
+        typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
+        profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
+        uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
+      });
+      return sendJsonWithEtag(request, reply, body);
+    });
+    for (const m of ['put', 'post', 'patch', 'delete']) {
+      fastify[m]('/lws-storage', methodNotAllowed);
     }
 
     // VoID rung — /.well-known/void 303s to the configured pod resource
