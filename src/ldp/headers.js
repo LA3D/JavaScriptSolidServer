@@ -4,9 +4,11 @@
 
 import { getAcceptHeaders, getVaryHeader } from '../rdf/conneg.js';
 import { storageDescriptionUrl } from '../lws/storage-description.js';
+import { parentContainerUrl } from '../utils/url.js';
 
 const LDP = 'http://www.w3.org/ns/ldp#';
 const LWS_STORAGE_DESC_REL = 'https://www.w3.org/ns/lws#storageDescription';
+const LWS_NS = 'https://www.w3.org/ns/lws#';
 
 /**
  * Get Link headers for a resource
@@ -154,10 +156,16 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
     ...getCorsHeaders(origin)
   };
   if (lwsEnabled && resourceUrl) {
+    // R1/R2: up + type in the HTTP Link header, derived by the SAME helpers as
+    // the linkset body (parentContainerUrl / Container-vs-DataResource) so the
+    // two surfaces can never disagree.
     const parts = [
+      `<${LWS_NS}${isContainer ? 'Container' : 'DataResource'}>; rel="type"`,
       `<${storageDescriptionUrl(resourceUrl, storageRootPath)}>; rel="${LWS_STORAGE_DESC_REL}"`,
       `<${resourceUrl}>; rel="linkset"; type="application/linkset+json"`
     ];
+    const parent = parentContainerUrl(resourceUrl);
+    if (parent) parts.unshift(`<${parent}>; rel="up"`);
     const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
   }

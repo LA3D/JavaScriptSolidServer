@@ -1058,12 +1058,6 @@ export async function handleGet(request, reply) {
         representations: advertisedReps
       });
       headers['Cache-Control'] = RDF_CACHE_CONTROL;
-      const parent = parentContainerUrl(resourceUrl);
-      if (parent) {
-        headers['Link'] = headers['Link']
-          ? `${headers['Link']}, <${parent}>; rel="up"`
-          : `<${parent}>; rel="up"`;
-      }
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
       return reply.send(JSON.stringify(lws, null, 2));
     }
