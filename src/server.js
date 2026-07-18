@@ -1317,6 +1317,20 @@ export function createServer(options = {}) {
         const perStorageScope = async (request, reply) => {
           const root = `/${request.params.pod}/`;
           if ((await storageRootFor(storage, root)) !== root) { reply.code(404).send(); return null; }
+          // C3 parity: these aggregates carry the SAME root-READ gate as
+          // /:pod/lws-storage above — a private storage's type inventory
+          // (which otherwise always includes the always-public scaffold
+          // resources, e.g. profile/) must not be enumerable anonymously
+          // just because the pod name is known. Per-resource WAC filtering
+          // inside handleTypeIndex/handleTypeSearch still governs which
+          // individual items a caller who passes this gate can see.
+          const origin = `${request.protocol}://${request.hostname}`;
+          const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+          const { allowed } = await checkAccess({
+            resourceUrl: `${origin}${root}`, resourcePath: root, isContainer: true,
+            agentWebId: webId, requiredMode: AccessMode.READ,
+          });
+          if (!allowed) { reply.code(401).send(); return null; }
           return root;
         };
         // Same typeQueryRateLimit-timing gap as the origin routes above —

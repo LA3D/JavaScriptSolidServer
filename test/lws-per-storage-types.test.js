@@ -123,3 +123,44 @@ describe('per-storage /:pod/types/* negative control (no --lws)', () => {
     assert.equal(res.status, 404);
   });
 });
+
+describe('per-storage /:pod/types/* root-READ gate on a private storage (C3 parity)', () => {
+  // Before the fix, /:pod/types/index and /:pod/types/search never checked
+  // the pod root's WAC at all — a private pod's always-public scaffold
+  // resources (profile/, etc.) were listable by anyone who knew the pod
+  // name. The sibling /:pod/lws-storage route already re-checks READ on the
+  // pod root for exactly this reason (C3); these aggregates must match.
+  let base, token;
+  before(async () => {
+    await startTestServer({ lws: true });
+    base = getBaseUrl();
+    const res = await fetch(`${base}/.pods`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'priv', visibility: 'private' }),
+    });
+    assert.equal(res.status, 201);
+    ({ token } = await res.json());
+  });
+  after(async () => { await stopTestServer(); });
+
+  it('anon GET /priv/types/index 401s (pre-fix: 200, scaffold enumerable by pod name)', async () => {
+    const res = await fetch(`${base}/priv/types/index`);
+    assert.equal(res.status, 401);
+  });
+
+  it('anon GET /priv/types/search 401s', async () => {
+    const res = await fetch(`${base}/priv/types/search`);
+    assert.equal(res.status, 401);
+  });
+
+  it('owner GET /priv/types/index 200s', async () => {
+    const res = await fetch(`${base}/priv/types/index`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(res.status, 200);
+  });
+
+  it('no-oracle unchanged: anon GET /nosuchpod/types/index is still a plain 404', async () => {
+    const res = await fetch(`${base}/nosuchpod/types/index`);
+    assert.equal(res.status, 404);
+  });
+});
