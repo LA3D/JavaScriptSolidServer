@@ -55,18 +55,17 @@ describe('--lws-config (per-storage /:pod/lws-storage)', () => {
     assert.ok(!(sd.service || []).some(s => s.type === 'VoidService'));
   });
 
-  it('after the config resource is written, ProfileIndexService appears (no restart); VoidService stays suppressed', async () => {
+  it('after the config resource is written, ProfileIndexService and VoidService both appear (no restart)', async () => {
     await request(`${base}/alice/profiles/pod-config.jsonld`, { method: 'PUT',
       headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/ld+json' },
       body: JSON.stringify({ profileIndex: '/alice/profiles/index.jsonld', void: '/alice/profiles/void.jsonld' }) });
     const sd = await (await request(`${base}/alice/lws-storage`)).json();
-    // Pre-merge fix (whole-branch review, Important finding): VoidService is
-    // interim-suppressed on the per-storage description even when the
-    // per-storage config names a void pointer — the server-wide
-    // /.well-known/void route resolves a DIFFERENT (legacy, server-wide)
-    // podConfig, so advertising it here could misdirect a second tenant.
-    // See src/lws/storage-description.js.
-    assert.ok(!(sd.service || []).some(s => s.type === 'VoidService'));
+    // Services round (R7): VoidService is now a direct per-storage pointer
+    // (no 303 through the server-wide /.well-known/void route), so it's no
+    // longer suppressed here. See src/lws/storage-description.js.
+    const vs = (sd.service || []).find(s => s.type === 'VoidService');
+    assert.ok(vs, 'VoidService must be advertised');
+    assert.equal(vs.serviceEndpoint, `${base}/alice/profiles/void.jsonld`);
     assert.ok((sd.service || []).some(s => s.type === 'ProfileIndexService'));
   });
 });

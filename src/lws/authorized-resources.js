@@ -27,10 +27,15 @@ const RELATION_READERS = {
 // id — the HTTP handler needs subdomain-mode-aware `buildResourceUrl`
 // (path-mode `origin + urlPath` differs from it when subdomains are on), so
 // it passes its own; MCP tools have no subdomain concern and use the default.
-export async function collectAuthorizedResources({ agentWebId, origin, neededRelations = [], buildId } = {}) {
+export async function collectAuthorizedResources({ agentWebId, origin, neededRelations = [], buildId, scopeRoot = '/' } = {}) {
   const idOf = buildId || ((urlPath) => idFor(origin, urlPath));
   const aclCache = new Map();
-  const resources = await walkResources('/');
+  // scopeRoot bounds the walk to one storage's subtree (per-storage
+  // /:pod/types/* routes, services round). Named storages resolve by FIRST
+  // path segment only (storage-resolver.js), so a subtree walk IS the
+  // owning-storage scope — no per-resource re-resolution needed. The walk
+  // excludes the base itself, mirroring the origin walk's exclusion of '/'.
+  const resources = await walkResources(scopeRoot);
   const out = [];
   for (const r of resources) {
     const id = idOf(r.urlPath);

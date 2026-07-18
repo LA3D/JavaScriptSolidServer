@@ -138,17 +138,15 @@ describe('GET /:pod/lws-storage (--lws ON)', () => {
       `StorageDescription serviceEndpoint should end with /alice/lws-storage, got: ${sd.serviceEndpoint}`);
   });
 
-  it('server-wide services (TypeIndexService) are origin-level, not pod-scoped', async () => {
+  it('TypeIndexService is storage-scoped (services round, R7)', async () => {
     const res = await request('/alice/lws-storage', {
       headers: { Accept: 'application/lws+json' }
     });
     const body = await res.json();
     const ti = body.service.find(s => s.type === 'TypeIndexService');
     assert.ok(ti, 'TypeIndexService must be advertised (default on under --lws)');
-    assert.ok(!ti.serviceEndpoint.includes('/alice/'),
-      `TypeIndexService should be origin-level, not pod-scoped, got: ${ti.serviceEndpoint}`);
-    assert.ok(ti.serviceEndpoint.endsWith('/types/index'),
-      `TypeIndexService should end with /types/index, got: ${ti.serviceEndpoint}`);
+    assert.ok(ti.serviceEndpoint.endsWith('/alice/types/index'),
+      `TypeIndexService should be storage-scoped, got: ${ti.serviceEndpoint}`);
   });
 
   it('PUT returns 405', async () => {

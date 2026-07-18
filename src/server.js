@@ -84,6 +84,7 @@ function needsTrustAwareRateLimit(request) {
   if (path === '/idp' || path.startsWith('/idp/') || path.startsWith('/oauth/')) return false;
   if (path.startsWith('/.well-known/')) return false;
   if (path === '/types/index' || path === '/types/search') return true;
+  if (/^\/[^/]+\/types\/(index|search)$/.test(path)) return true;
   return TRUST_AWARE_WRITE_METHODS.has(request.method);
 }
 
@@ -126,8 +127,11 @@ export function createServer(options = {}) {
   // per-storage description silently came back with no VoidService/
   // ProfileIndex/uriSpaces. Decoupled: podConfigResolver always resolves at
   // this FIXED relative convention under each storage root, independent of
-  // --lws-config. The legacy `podConfig` above (still driving
-  // /.well-known/void) is untouched.
+  // --lws-config. The legacy `podConfig` above (still driving the origin
+  // /.well-known/void 303 rail) is untouched — a per-storage
+  // VoidService (services round, R7) now advertises the SAME per-storage
+  // voidPath directly, so the two can name different targets in a
+  // mixed-mode deployment (recorded, not reconciled — spec §5).
   const PER_STORAGE_CONFIG_REL = 'profiles/pod-config.jsonld';
   const podConfigResolver = lwsEnabled ? makePodConfigResolver(storage, PER_STORAGE_CONFIG_REL) : null;
   // Content Negotiation by Profile is ON by default whenever --lws is on;
@@ -924,6 +928,11 @@ export function createServer(options = {}) {
         request.url.startsWith('/storage/') ||
         (typeIndexEnabled && (request.url === '/types/index' || request.url.startsWith('/types/index?'))) ||
         (typeIndexEnabled && (request.url === '/types/search' || request.url.startsWith('/types/search?'))) ||
+        // Per-storage type aggregates (services round): same virtual-aggregate
+        // self-authz rationale as origin /types/* above; the route's own
+        // storageRootFor equality gate 404s any segment that isn't a real
+        // storage, so this bypass only ever reaches those routes' own guards.
+        (lwsEnabled && typeIndexEnabled && /^\/[^/]+\/types\/(index|search)(\?.*)?$/.test(request.url)) ||
         // Per-storage description (/:pod/lws-storage, multi-tenant round):
         // the SAME public-discovery-metadata rationale as /.well-known/*
         // above — a storage description is meant to be fetchable
@@ -1149,7 +1158,8 @@ export function createServer(options = {}) {
       // helper without a fastify request to resolve identity from.
       const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       const roots = await listVisibleStorageRoots(storage, { origin, webId });
-      const body = buildServerIndex(origin, roots.map((root) => ({ root })));
+      const body = buildServerIndex(origin, roots.map((root) => ({ root })),
+        { typeIndexEnabled, mcpEnabled, anonRateLimitMax });
       return sendJsonWithEtag(request, reply, body);
     });
     // Block writes — this is a read-only well-known resource.
@@ -1195,7 +1205,7 @@ export function createServer(options = {}) {
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor(root), origin, request.lwsEnabled);
       const body = buildStorageDescriptionFor(`${origin}${root}`, {
-        typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
+        typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
         uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
       });
@@ -1227,7 +1237,7 @@ export function createServer(options = {}) {
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor('/'), origin, request.lwsEnabled);
       const body = buildStorageDescriptionFor(`${origin}/`, {
-        typeIndexEnabled, notificationsEnabled: request.notificationsEnabled,
+        typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
         uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
       });
@@ -1299,6 +1309,48 @@ export function createServer(options = {}) {
       });
       for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/types/index', methodNotAllowed);
       for (const m of ['put', 'patch', 'delete']) fastify[m]('/types/search', methodNotAllowed);
+
+      if (lwsEnabled) {
+        // Per-storage TypeIndex/TypeSearch (R7): the scoped twin of the origin
+        // aggregates. The equality check is the no-oracle gate — and it also
+        // stops the R6 root-pod '/' fallback from aliasing /bogus/ to '/'.
+        const perStorageScope = async (request, reply) => {
+          const root = `/${request.params.pod}/`;
+          if ((await storageRootFor(storage, root)) !== root) { reply.code(404).send(); return null; }
+          // C3 parity: these aggregates carry the SAME root-READ gate as
+          // /:pod/lws-storage above — a private storage's type inventory
+          // (which otherwise always includes the always-public scaffold
+          // resources, e.g. profile/) must not be enumerable anonymously
+          // just because the pod name is known. Per-resource WAC filtering
+          // inside handleTypeIndex/handleTypeSearch still governs which
+          // individual items a caller who passes this gate can see.
+          const origin = `${request.protocol}://${request.hostname}`;
+          const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
+          const { allowed } = await checkAccess({
+            resourceUrl: `${origin}${root}`, resourcePath: root, isContainer: true,
+            agentWebId: webId, requiredMode: AccessMode.READ,
+          });
+          if (!allowed) { reply.code(401).send(); return null; }
+          return root;
+        };
+        // Same typeQueryRateLimit-timing gap as the origin routes above —
+        // deferred via fastify.after() so the rate-limit plugin's onRoute
+        // hook has run before these register.
+        fastify.after(() => {
+          fastify.get('/:pod/types/index', typeQueryRateLimit, async (request, reply) => {
+            const scopeRoot = await perStorageScope(request, reply);
+            return scopeRoot === null ? reply : handleTypeIndex(request, reply, { scopeRoot });
+          });
+          const perStorageSearch = async (request, reply) => {
+            const scopeRoot = await perStorageScope(request, reply);
+            return scopeRoot === null ? reply : handleTypeSearch(request, reply, { scopeRoot });
+          };
+          fastify.get('/:pod/types/search', typeQueryRateLimit, perStorageSearch);
+          fastify.post('/:pod/types/search', typeQueryRateLimit, perStorageSearch);
+        });
+        for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/:pod/types/index', methodNotAllowed);
+        for (const m of ['put', 'patch', 'delete']) fastify[m]('/:pod/types/search', methodNotAllowed);
+      }
     }
   }
 
