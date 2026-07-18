@@ -1,7 +1,9 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseTypeFilter, matchesTypeFilter, isAbsoluteUri, FilterError, intrinsicType, resourceTypes, buildTypeIndex, containerItemTypes, MAX_GROUPS, MAX_VALUES_PER_GROUP, MAX_TOTAL_TERMS } from '../src/lws/type-index.js';
 import { parseFilter, matchesFilter, INDEXED_RELATIONS } from '../src/lws/type-index.js';
+import { collectAuthorizedResources } from '../src/lws/authorized-resources.js';
+import { startTestServer, stopTestServer, getBaseUrl, createTestPod } from './helpers.js';
 
 const A = 'https://schema.org/Person';
 const B = 'http://xmlns.com/foaf/0.1/Person';
@@ -191,5 +193,29 @@ describe('matchesFilter', () => {
   });
   it('empty filter matches everything', () => {
     assert.equal(matchesFilter(r, { type: [], relations: {}, hasUnindexed: false }), true);
+  });
+});
+
+describe('collectAuthorizedResources scopeRoot', () => {
+  let base, alice, bob;
+  before(async () => {
+    await startTestServer({ lws: true });
+    base = getBaseUrl();
+    alice = await createTestPod('alice'); bob = await createTestPod('bob');
+    for (const [pod, type] of [['alice', 'https://schema.org/Person'], ['bob', 'https://schema.org/Event']]) {
+      const token = pod === 'alice' ? alice.token : bob.token;
+      const put = await fetch(`${base}/${pod}/x1`, { method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, Link: `<${type}>; rel="type"` },
+        body: JSON.stringify({ n: 1 }) });
+      assert.equal(put.status, 201);
+    }
+  });
+  after(async () => { await stopTestServer(); });
+
+  it('scopeRoot limits the walk to one storage subtree', async () => {
+    const all = await collectAuthorizedResources({ agentWebId: null, origin: base });
+    const scoped = await collectAuthorizedResources({ agentWebId: null, origin: base, scopeRoot: '/alice/' });
+    assert.ok(all.some(r => r.id.includes('/bob/')), 'unscoped walk sees bob');
+    assert.ok(scoped.length > 0 && scoped.every(r => r.id.includes('/alice/')), 'scoped walk sees only alice');
   });
 });
