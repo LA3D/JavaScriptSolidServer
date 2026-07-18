@@ -1233,9 +1233,26 @@ export function createServer(options = {}) {
       });
       return sendJsonWithEtag(request, reply, body);
     });
-    for (const m of ['put', 'post', 'patch', 'delete']) {
-      fastify[m]('/lws-storage', methodNotAllowed);
-    }
+    // Write reservation for the bare /lws-storage — scoped to ROOT-POD mode.
+    // When `/` is marked this is the read-only Storage description (405 writes,
+    // mirroring /:pod/lws-storage). When `/` is unmarked (named-pod mode)
+    // /lws-storage is an ordinary origin-root LDP path, so delegate to the SAME
+    // wildcard write handlers — they derive the path from request.url, not the
+    // route param, so they behave identically — under the SAME writeRateLimit,
+    // so named-pod write behavior is byte-identical to any other resource (no
+    // reserved-path 405, no rate-limit skip). Deferred via fastify.after() for
+    // the same reason the wildcard write routes are (the rate-limit plugin's
+    // onRoute hook must have booted, or the route-level cap silently no-ops).
+    const rootPodOnly = (handler) => async (request, reply) =>
+      (await storageRootFor(storage, '/')) === '/'
+        ? methodNotAllowed(request, reply)
+        : handler(request, reply);
+    fastify.after(() => {
+      fastify.put('/lws-storage', writeRateLimit, rootPodOnly(handlePut));
+      fastify.post('/lws-storage', writeRateLimit, rootPodOnly(handlePost));
+      fastify.patch('/lws-storage', writeRateLimit, rootPodOnly(handlePatch));
+      fastify.delete('/lws-storage', writeRateLimit, rootPodOnly(handleDelete));
+    });
 
     // VoID rung — /.well-known/void 303s to the configured pod resource
     // (the `void` pointer in --lws-config's pod resource). Pure routing

@@ -6,6 +6,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs-extra';
 import { createServer } from '../src/server.js';
+import { generateOwnerAcl, serializeAcl } from '../src/wac/parser.js';
 import { storageRootFor, clearStorageRootCache } from '../src/lws/storage-resolver.js';
 
 // Minimal storage stub adapted to readDeclaredTypes' real calls: it reads
@@ -52,6 +53,7 @@ test('.well-known stays server-scope even when / is marked', async () => {
 // serves one data root).
 const ROOT_DIR = './test-data-lws-root-pod';
 const NAMED_DIR = './test-data-lws-root-pod-named';
+const PRIVATE_DIR = './test-data-lws-root-pod-private';
 
 describe('R6 root-pod wire', () => {
   let server, baseUrl, savedDataRoot;
@@ -124,5 +126,57 @@ describe('R6 named-pod negative control', () => {
     // path, never the root storage description.
     const r = await fetch(`${baseUrl}/lws-storage`);
     assert.notEqual(r.headers.get('content-type'), 'application/lws+json');
+  });
+
+  test('named-pod mode: PUT /lws-storage passes through to LDP, NOT the reserved 405', async () => {
+    // The write reservation is root-pod-scoped: in named-pod mode /lws-storage
+    // is an ordinary origin-root path, so a write delegates to the wildcard LDP
+    // handler (which here WAC-denies the anon write) — never the reserved 405.
+    const r = await fetch(`${baseUrl}/lws-storage`, {
+      method: 'PUT', headers: { 'Content-Type': 'text/turtle' }, body: '<a> <b> <c> .',
+    });
+    assert.notEqual(r.status, 405, `expected LDP pass-through (not the root-pod reserved 405), got ${r.status}`);
+  });
+});
+
+describe('R6 private root-pod (no description leak; roster omits /)', () => {
+  let server, baseUrl, savedDataRoot;
+  before(async () => {
+    clearStorageRootCache();
+    savedDataRoot = process.env.DATA_ROOT;
+    await fs.remove(PRIVATE_DIR);
+    await fs.ensureDir(PRIVATE_DIR);
+    server = createServer({ logger: false, lws: true, singleUser: true, root: PRIVATE_DIR, forceCloseConnections: true });
+    await server.listen({ port: 0, host: '127.0.0.1' });
+    baseUrl = `http://127.0.0.1:${server.server.address().port}`;
+    // Root-pod provisioning has no private-visibility flag — it always writes a
+    // public-read root ACL. Overwrite `/.acl` with an owner-only ACL (no
+    // #public, exactly like a private named pod / bob) to model a private root
+    // pod; the WAC checker never caches ACLs across requests, so the next
+    // request sees it.
+    await fs.writeFile(`${PRIVATE_DIR}/.acl`,
+      serializeAcl(generateOwnerAcl('./', './profile/card.jsonld#me', true, { publicRead: false })));
+  });
+  after(async () => {
+    await server.close();
+    await fs.remove(PRIVATE_DIR);
+    clearStorageRootCache();
+    if (savedDataRoot === undefined) delete process.env.DATA_ROOT;
+    else process.env.DATA_ROOT = savedDataRoot;
+  });
+
+  test('anon GET /lws-storage -> 401 (no description leak, mirrors bob)', async () => {
+    const r = await fetch(`${baseUrl}/lws-storage`, { headers: { Accept: 'application/lws+json' } });
+    assert.equal(r.status, 401);
+  });
+
+  test('anon ServerIndex roster omits / for a private root pod', async () => {
+    const idx = await fetch(`${baseUrl}/.well-known/lws-storage`, { headers: { Accept: 'application/lws+json' } });
+    assert.equal(idx.status, 200);          // the index itself never leaks existence — it just lists nothing
+    const body = await idx.json();
+    assert.equal(body.type, 'ServerIndex');
+    const descs = (body.storage || []).map((s) => s.storageDescription || '');
+    assert.ok(!descs.some((d) => /^https?:\/\/[^/]+\/lws-storage$/.test(d)),
+      `private root must not appear in the anon roster, got ${JSON.stringify(body.storage)}`);
   });
 });
