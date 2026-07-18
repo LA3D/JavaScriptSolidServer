@@ -1848,6 +1848,19 @@ async function negotiateHeadFileContentType({ request, storagePath, urlPath, sta
   // Spec §4a: --lws mandates the negotiation surface; conneg is implied by it.
   const negotiate = connegEnabled || lwsEnabled;
 
+  // R5 fix: mirror GET's linkset check (~line 1512), which runs BEFORE its
+  // own F3 teaching-406 gate — linkset is a meta-representation available
+  // for ANY resource, RDF or not, independent of the Turtle conneg flag
+  // (selectContentType's own linkset-is-always-negotiable rule). Without
+  // this early return, a non-RDF source (e.g. text/plain) explicitly
+  // negotiating linkset+json fell through to the F3 gate below (which only
+  // knows the resource's OWN content type) and 406'd before ever reaching
+  // the caller's linkset override — a HEAD/GET divergence GET never hit
+  // because its linkset check preempts its own F3 gate the same way.
+  if (lwsEnabled && selectContentType(acceptHeader, connegEnabled) === RDF_TYPES.LINKSET) {
+    return { contentType: RDF_TYPES.LINKSET, converted: true };
+  }
+
   if (negotiate) {
     // --lws serving-arm parity (spec 2026-07-10 §2): HEAD answers the same
     // 406 a GET would, and the same converted content-type. Large files stay

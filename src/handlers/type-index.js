@@ -8,6 +8,7 @@ import { AccessMode } from '../wac/parser.js';
 import { getWebIdFromRequestAsync } from '../auth/token.js';
 import { buildResourceUrl } from '../auth/middleware.js';
 import { collectAuthorizedResources } from '../lws/authorized-resources.js';
+import { sendJsonWithEtag } from '../utils/conditional.js';
 
 const LWS_JSON = 'application/lws+json';
 
@@ -38,7 +39,8 @@ export async function handleTypeIndex(request, reply) {
   const lists = await authorizedTypeLists(request);
   reply.header('Cache-Control', 'private, no-store');
   reply.type(LWS_JSON);
-  return reply.send(JSON.stringify(buildTypeIndex(lists), null, 2));
+  // R3/R5: GET-only route (no POST /types/index) — always the ETag arm.
+  return sendJsonWithEtag(request, reply, buildTypeIndex(lists));
 }
 
 const LWS_CONTEXT = 'https://www.w3.org/ns/lws/v1';
@@ -96,8 +98,13 @@ export async function handleTypeSearch(request, reply) {
   const matched = resources.filter((r) => matchesFilter(r, filter));
   reply.header('Cache-Control', 'private, no-store');
   reply.type(LWS_JSON);
-  return reply.send(JSON.stringify({
+  const body = {
     '@context': LWS_CONTEXT, type: 'ContainerPage', totalItems: matched.length,
     items: matched.map((r) => ({ id: r.id, type: containerItemTypes(r.types) })),
-  }, null, 2));
+  };
+  // R3/R5: GET gets the ETag treatment; POST (this route also handles
+  // POST /types/search) is left completely untouched — same body shape,
+  // same reply.send(JSON.stringify(..., null, 2)) as before.
+  if (request.method === 'GET') return sendJsonWithEtag(request, reply, body);
+  return reply.send(JSON.stringify(body, null, 2));
 }
