@@ -76,6 +76,32 @@ export async function resolveStorageDescriptionInputs(podConfig, origin, lwsEnab
 }
 
 /**
+ * McpService entry — one gateway per pod, not per storage, so both
+ * `assembleDescription` (per-storage/root-pod description) and
+ * `buildServerIndex` (the cross-storage roster) share this single builder
+ * rather than duplicating the hint + budget-sentence text (services round).
+ * @param {string} origin
+ * @param {number|null} anonRateLimitMax
+ * @returns {object}
+ */
+function mcpServiceEntry(origin, anonRateLimitMax) {
+  // Budget sentence appended when the caller threads the configured
+  // anonymous rate-limit cap through (server.js's anonRateLimitMax) — a
+  // cold agent hitting 429s otherwise has no way to learn the budget is
+  // per-IP-anonymous, not a pod-wide outage (probe #7 batch).
+  const budgetHint = anonRateLimitMax != null
+    ? ` Anonymous callers: ${anonRateLimitMax} requests/minute — authenticate for more; the x-ratelimit headers carry your remaining budget.`
+    : '';
+  return {
+    type: 'McpService',
+    serviceEndpoint: `${origin}/mcp`,
+    // Steering (unmapped, like the linkset hint): the endpoint 405s GETs,
+    // so a cold agent needs told HOW to speak to it.
+    hint: 'Model Context Protocol gateway — JSON-RPC 2.0 over Streamable HTTP: POST initialize to this endpoint, then notifications/initialized; the read loop is the read_resource/list_resources tools.' + budgetHint,
+  };
+}
+
+/**
  * Shared service-list + capability + linkset assembly for
  * `buildStorageDescriptionFor`, the sole description builder.
  * TypeIndexService/TypeSearchService are STORAGE-scoped (services round,
@@ -121,23 +147,8 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, prof
       // /.well-known/void 303 stays as the legacy/root rail.
       hint: 'VoID description of the datasets this storage serves — the vocabularies in use (each with a pod-served copy), root resources, and the subject URI space.' });
   }
-  if (mcpEnabled) {
-    // MCP is one gateway per pod, not per storage — always the origin.
-    // Budget sentence appended when the caller threads the configured
-    // anonymous rate-limit cap through (server.js's anonRateLimitMax) — a
-    // cold agent hitting 429s otherwise has no way to learn the budget is
-    // per-IP-anonymous, not a pod-wide outage (probe #7 batch).
-    const budgetHint = anonRateLimitMax != null
-      ? ` Anonymous callers: ${anonRateLimitMax} requests/minute — authenticate for more; the x-ratelimit headers carry your remaining budget.`
-      : '';
-    services.push({
-      type: 'McpService',
-      serviceEndpoint: `${origin}/mcp`,
-      // Steering (unmapped, like the linkset hint): the endpoint 405s GETs,
-      // so a cold agent needs told HOW to speak to it.
-      hint: 'Model Context Protocol gateway — JSON-RPC 2.0 over Streamable HTTP: POST initialize to this endpoint, then notifications/initialized; the read loop is the read_resource/list_resources tools.' + budgetHint,
-    });
-  }
+  // MCP is one gateway per pod, not per storage — always the origin.
+  if (mcpEnabled) services.push(mcpServiceEntry(origin, anonRateLimitMax));
   const doc = {
     ...generateStorageDescription(idUrl, services),
     // Steering, not spec vocabulary (unmapped in the LWS @context — the
@@ -222,10 +233,11 @@ export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
  * a storage itself.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
  * @param {Array<{root:string}>} storages  e.g. [{ root: '/alice/' }]
+ * @param {{typeIndexEnabled?:boolean, mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
  * @returns {object}
  */
-export function buildServerIndex(origin, storages = []) {
-  return {
+export function buildServerIndex(origin, storages = [], { typeIndexEnabled = false, mcpEnabled = false, anonRateLimitMax = null } = {}) {
+  const idx = {
     '@context': LWS_CONTEXT,
     id: `${origin}/`,
     type: 'ServerIndex',
@@ -234,4 +246,17 @@ export function buildServerIndex(origin, storages = []) {
       storageDescription: `${origin}${s.root}lws-storage`,
     })),
   };
+  // Extension surface (ServerIndex is itself a JSS extension): the
+  // cross-storage aggregates live here, NOT in per-storage descriptions —
+  // each storage advertises only its own scoped services (R7).
+  const service = [];
+  if (typeIndexEnabled) {
+    service.push({ type: 'TypeIndexService', serviceEndpoint: `${origin}/types/index`,
+      hint: 'Cross-storage inventory: distinct resource types across ALL storages on this server, filtered to what you are authorized to read. Each storage advertises its own storage-scoped index in its storage description.' });
+    service.push({ type: 'TypeSearchService', serviceEndpoint: `${origin}/types/search`,
+      hint: 'Cross-storage search over ALL storages on this server (authorization-filtered). GET with ?type=<uri>; comma-separate values in one param for OR, repeat the parameter for AND; ?describedby=<uri> and ?conformsTo=<uri> filter by indexed relations. Each storage advertises its own storage-scoped search in its storage description.' });
+  }
+  if (mcpEnabled) service.push(mcpServiceEntry(origin, anonRateLimitMax));
+  if (service.length) idx.service = service;
+  return idx;
 }

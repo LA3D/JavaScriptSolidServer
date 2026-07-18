@@ -79,7 +79,8 @@ async function readSkills(ctx, uri) {
 // storages a given requester is told about.
 async function readServerIndex(ctx, uri) {
   const roots = await listVisibleStorageRoots(storage, { origin: ctx.origin, webId: ctx.webId });
-  const idx = buildServerIndex(ctx.origin, roots.map((root) => ({ root })));
+  const idx = buildServerIndex(ctx.origin, roots.map((root) => ({ root })),
+    { typeIndexEnabled: ctx.typeIndexEnabled, mcpEnabled: true, anonRateLimitMax: ctx.anonRateLimitMax });
   return jsonContents(uri, withInlineContext(idx), 'application/lws+json');
 }
 

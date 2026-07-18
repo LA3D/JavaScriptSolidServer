@@ -171,3 +171,19 @@ describe('per-storage service endpoints (services round)', () => {
     assert.equal(sd.service.find(s => s.type === 'VoidService'), undefined);
   });
 });
+
+describe('ServerIndex extension service array (services round)', () => {
+  it('advertises the cross-storage surfaces when enabled', () => {
+    const idx = buildServerIndex('http://h', [{ root: '/alice/' }],
+      { typeIndexEnabled: true, mcpEnabled: true, anonRateLimitMax: 60 });
+    assert.equal(idx.service.find(s => s.type === 'TypeIndexService').serviceEndpoint, 'http://h/types/index');
+    assert.ok(idx.service.find(s => s.type === 'TypeIndexService').hint.includes('ALL storages'));
+    assert.equal(idx.service.find(s => s.type === 'TypeSearchService').serviceEndpoint, 'http://h/types/search');
+    assert.equal(idx.service.find(s => s.type === 'McpService').serviceEndpoint, 'http://h/mcp');
+    assert.equal(idx.service.find(s => s.type === 'NotificationService'), undefined);
+  });
+  it('no flags -> no service key (pre-round shape preserved)', () => {
+    const idx = buildServerIndex('http://h', [{ root: '/alice/' }]);
+    assert.equal('service' in idx, false);
+  });
+});
