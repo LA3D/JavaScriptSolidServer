@@ -513,6 +513,105 @@ describe('synthetic-view stamp suppression: entity-face wrapper (?view=nav) must
   });
 });
 
+// Fix (I1, whole-branch review 2026-07-19): the mashlib HTML data-browser
+// wrapper (src/handlers/resource.js ~1455, the `shouldServeMashlib` GET
+// branch) is ALSO a synthetic server-rendered shell, not the resource's own
+// bytes — same class the entity-face fix above (7199726) closed, but that
+// commit only patched the entity-face call site and left this one open.
+// Needs BOTH --lws and mashlibCdn to reach (the fork rig runs --lws without
+// mashlib; the committed Dockerfile runs mashlib without --lws), so this
+// block stands up its own server config rather than reusing an existing one.
+describe('synthetic-view stamp suppression: mashlib data-browser wrapper (I1)', () => {
+  const LYING_PATH = '/ivy/media/lying.mp3';
+  const HONEST_PATH = '/ivy/media/honest.mp3';
+  const MASH_PROFILE = 'https://profiles.example/ivy-mash';
+  const AUDIO_PROFILE = 'https://profiles.example/ivy-audio';
+  const BROWSER_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+  let LYING, HONEST;
+
+  before(async () => {
+    await startTestServer({ lws: true, mashlibCdn: true, public: true });
+    await createTestPod('ivy');
+    const base = getBaseUrl();
+    LYING = `${base}${LYING_PATH}`;
+    HONEST = `${base}${HONEST_PATH}`;
+
+    await request('/ivy/media/', { method: 'PUT', auth: 'ivy' });
+
+    // Bare-arm fixture: an audio file whose .meta LIES about its own
+    // default representation (declares text/html — the same media type the
+    // mashlib wrapper hardcodes). Pre-fix, defaultProfileFor's media-equality
+    // guard compares the wrapper's contentType against this declared format
+    // and passes (both "text/html"), deriving a false stamp on the bare
+    // (no Accept-Profile) arm. Client-managed garbage-in, same class as M1.
+    await request(LYING_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'audio/mpeg' },
+      body: 'fake-audio-bytes',
+      auth: 'ivy',
+    });
+    await request(`${LYING_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': LYING,
+        'altr:hasDefaultRepresentation': {
+          '@id': LYING, 'dct:format': 'text/html', 'dct:conformsTo': { '@id': MASH_PROFILE },
+        },
+      }),
+      auth: 'ivy',
+    });
+
+    // Negotiated-arm fixture: an audio file with an HONEST default rep
+    // (declared format matches the stored bytes). Pre-fix, an Accept-Profile
+    // matching this profile sets chosenProfile — which getAllHeaders stamps
+    // unconditionally (no media guard applies to the explicit negotiated
+    // outcome) — falsely claiming the audio profile for the HTML wrapper.
+    await request(HONEST_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'audio/mpeg' },
+      body: 'fake-audio-bytes',
+      auth: 'ivy',
+    });
+    await request(`${HONEST_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': HONEST,
+        'altr:hasDefaultRepresentation': {
+          '@id': HONEST, 'dct:format': 'audio/mpeg', 'dct:conformsTo': { '@id': AUDIO_PROFILE },
+        },
+      }),
+      auth: 'ivy',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('bare browser GET (no Accept-Profile) of a mashlib-wrapped audio file with a lying text/html default -> wrapper 200, NO Content-Profile', async () => {
+    const res = await request(LYING_PATH, { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type') || '', /text\/html/);
+    assert.equal(res.headers.get('content-profile'), null, 'mashlib wrapper must not claim a profile');
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+    const link = res.headers.get('link') || '';
+    assert.ok(link.includes(`<${LYING}>; rel="canonical"; type="text/html"; formats="${MASH_PROFILE}"`),
+      `canonical entry must still be advertised (honest, distinct from claiming to BE it), got: ${link}`);
+  });
+
+  it('Accept-Profile matching the honest audio default (negotiated self) -> mashlib wrapper 200, chosenProfile ALSO suppressed', async () => {
+    const res = await request(HONEST_PATH, {
+      headers: { Accept: BROWSER_ACCEPT, 'Accept-Profile': `<${AUDIO_PROFILE}>` },
+    });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type') || '', /text\/html/);
+    assert.equal(res.headers.get('content-profile'), null, 'negotiated self must not stamp a synthetic view');
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+  });
+});
+
 // R15 (PROF/conneg closeout Task 5, spec §3 F5): profile selection never
 // changes bytes at a URL — a 'self' outcome serves the default
 // representation's own bytes, every alternate is a 303 to its own URL — so

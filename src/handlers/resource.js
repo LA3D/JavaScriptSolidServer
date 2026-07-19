@@ -1463,7 +1463,13 @@ export async function handleGet(request, reply) {
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
       chosenProfile,
-      representations: advertisedReps
+      representations: advertisedReps,
+      // Fix (I1, whole-branch review 2026-07-19): the mashlib wrapper is a
+      // synthetic view, not a declared representation — same class as the
+      // entity-face fix above (7199726); a hardcoded text/html wrapper here
+      // must never carry a Content-Profile claim about the underlying
+      // resource.
+      syntheticView: true
     });
     headers['X-Frame-Options'] = 'DENY';
     headers['Content-Security-Policy'] = "frame-ancestors 'none'";
