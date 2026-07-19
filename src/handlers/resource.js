@@ -985,7 +985,7 @@ export async function handleGet(request, reply) {
     let advertisedReps = null;
     if (request.lwsProfileConneg && request.headers['accept-profile']) {
       const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
-      const neg = negotiateProfile(request.headers['accept-profile'], reps);
+      const neg = negotiateProfile(request.headers['accept-profile'], reps, request.headers.accept || '');
       if (neg.outcome === 'redirect') {
         // A redirect is not a 406 — the pre-existing "304 wins over 303"
         // ordering (a cache-valid conditional short-circuits before any
@@ -1199,7 +1199,7 @@ export async function handleGet(request, reply) {
   let advertisedReps = null;
   if (request.lwsProfileConneg && request.headers['accept-profile']) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
-    const neg = negotiateProfile(request.headers['accept-profile'], reps);
+    const neg = negotiateProfile(request.headers['accept-profile'], reps, request.headers.accept || '');
     if (neg.outcome === 'redirect') {
       // A redirect is not a 406 — the pre-existing "304 wins over 303"
       // ordering (a cache-valid conditional short-circuits before any
@@ -2229,7 +2229,7 @@ export async function handleHead(request, reply) {
   // universal chosenProfile stamp across every file serve branch.
   if (!skipProfileNegotiation && request.lwsProfileConneg && request.headers['accept-profile']) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
-    const neg = negotiateProfile(request.headers['accept-profile'], reps);
+    const neg = negotiateProfile(request.headers['accept-profile'], reps, request.headers.accept || '');
     if (neg.outcome === 'redirect') {
       // A redirect is not a 406 — 304-wins-over-303 is unaffected by spec
       // §3, which only closes the 406 case. Check inline before 303.

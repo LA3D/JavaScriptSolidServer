@@ -176,24 +176,51 @@ export function parseAcceptProfile(header) {
  * Negotiate a profile-conneg outcome (DX-PROF-CONNEG cnpr:http) against a
  * resource's declared representations (readRepresentations()'s shape:
  * { default, alternates }). EXACT match only — no profile hierarchy (P13).
+ * R14: when several representations share the winning profile, disambiguate
+ * by Accept media preference (q-ordered, q=0 excluded); tie or no Accept
+ * falls back to declaration order (default slot first).
  * @param {string} acceptProfileHeader
  * @param {{default: object|null, alternates: object[]}} representations
+ * @param {string} [acceptHeader] - Accept media header, for R14 disambiguation
  * @returns {{outcome: 'none'|'self'|'redirect'|'notacceptable', rep: object|null}}
  */
-export function negotiateProfile(acceptProfileHeader, representations) {
+export function negotiateProfile(acceptProfileHeader, representations, acceptHeader = '') {
   const requested = parseAcceptProfile(acceptProfileHeader);
   if (!requested.length) return { outcome: 'none', rep: null };
   for (const wanted of requested) {              // preference order; EXACT match (no hierarchy — P13)
     // Outcome is decided by WHICH SLOT matched, never by href equality: an
     // alternate whose href collapses to the resource's own URL (blank-node/
     // self-authored) must not serve the default's bytes under the alternate's
-    // profile (mis-stamp). Default checked first, so a duplicate profile
-    // declaration resolves to 'self'.
-    if (representations?.default?.profile === wanted) return { outcome: 'self', rep: representations.default };
-    const rep = (representations?.alternates || []).find((r) => r.profile === wanted);
-    if (rep) return { outcome: 'redirect', rep };
+    // profile (mis-stamp). Default pushed first, so a duplicate profile
+    // declaration tie-breaks to 'self'.
+    const matches = [];
+    if (representations?.default?.profile === wanted) matches.push({ outcome: 'self', rep: representations.default });
+    for (const r of representations?.alternates || []) {
+      if (r.profile === wanted) matches.push({ outcome: 'redirect', rep: r });
+    }
+    if (!matches.length) continue;
+    // R14: any application may declare several representations under one
+    // profile — the request's media preference (Accept, q-ordered, q=0
+    // excluded) disambiguates; tie or no Accept → declaration order (default
+    // slot first). Deterministic and taught in the capability hint.
+    return matches.length === 1 ? matches[0] : pickByMedia(matches, acceptHeader);
   }
   return { outcome: 'notacceptable', rep: null };
+}
+
+function pickByMedia(matches, acceptHeader) {
+  if (acceptHeader && acceptHeader.trim()) {
+    const hit = (type, format) => {
+      const main = (format || '').split(';')[0].trim().toLowerCase();
+      return main && (type === '*/*' || type === main || type === `${main.split('/')[0]}/*`);
+    };
+    for (const { type, q } of parseAcceptHeader(acceptHeader)) {
+      if (q === 0) continue;
+      const m = matches.find((x) => hit(type, x.rep.format));
+      if (m) return m;
+    }
+  }
+  return matches[0];
 }
 
 /**
