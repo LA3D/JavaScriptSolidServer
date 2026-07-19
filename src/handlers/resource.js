@@ -159,7 +159,7 @@ function profileNotAcceptableProblem(reps, instance) {
     .map((r) => r.profile).filter(Boolean);
   return {
     type: 'about:blank', title: 'Not Acceptable', status: 406,
-    detail: `no representation conforms to the requested profile(s). Profiles that conform: ${conforming.length ? conforming.join(', ') : '(none declared)'}.`,
+    detail: `no representation conforms to the requested profile(s); matching is by exact profile URI (tokens and isProfileOf hierarchy are not supported). Profiles that conform: ${conforming.length ? conforming.join(', ') : '(none declared)'}.`,
     instance,
   };
 }
@@ -985,7 +985,7 @@ export async function handleGet(request, reply) {
     let advertisedReps = null;
     if (request.lwsProfileConneg && request.headers['accept-profile']) {
       const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
-      const neg = negotiateProfile(request.headers['accept-profile'], reps);
+      const neg = negotiateProfile(request.headers['accept-profile'], reps, request.headers.accept || '');
       if (neg.outcome === 'redirect') {
         // A redirect is not a 406 — the pre-existing "304 wins over 303"
         // ordering (a cache-valid conditional short-circuits before any
@@ -1199,7 +1199,7 @@ export async function handleGet(request, reply) {
   let advertisedReps = null;
   if (request.lwsProfileConneg && request.headers['accept-profile']) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
-    const neg = negotiateProfile(request.headers['accept-profile'], reps);
+    const neg = negotiateProfile(request.headers['accept-profile'], reps, request.headers.accept || '');
     if (neg.outcome === 'redirect') {
       // A redirect is not a 406 — the pre-existing "304 wins over 303"
       // ordering (a cache-valid conditional short-circuits before any
@@ -1358,7 +1358,14 @@ export async function handleGet(request, reply) {
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
       chosenProfile,
-      representations: advertisedReps
+      representations: advertisedReps,
+      // Fix (review finding, spec 2026-07-19): this IS the synthetic
+      // entity-face wrapper (renderEntityView), never the resource's own
+      // bytes — a hardcoded text/html Content-Type here must never be
+      // read as a profile claim about the declared representation, even
+      // when they happen to share a media type or Accept-Profile
+      // negotiated 'self'. See headers.js's syntheticView doc.
+      syntheticView: true
     });
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -1456,7 +1463,13 @@ export async function handleGet(request, reply) {
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
       chosenProfile,
-      representations: advertisedReps
+      representations: advertisedReps,
+      // Fix (I1, whole-branch review 2026-07-19): the mashlib wrapper is a
+      // synthetic view, not a declared representation — same class as the
+      // entity-face fix above (7199726); a hardcoded text/html wrapper here
+      // must never carry a Content-Profile claim about the underlying
+      // resource.
+      syntheticView: true
     });
     headers['X-Frame-Options'] = 'DENY';
     headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -2229,7 +2242,7 @@ export async function handleHead(request, reply) {
   // universal chosenProfile stamp across every file serve branch.
   if (!skipProfileNegotiation && request.lwsProfileConneg && request.headers['accept-profile']) {
     const reps = await authorizedRepresentations(request, storagePath, resourceUrl);
-    const neg = negotiateProfile(request.headers['accept-profile'], reps);
+    const neg = negotiateProfile(request.headers['accept-profile'], reps, request.headers.accept || '');
     if (neg.outcome === 'redirect') {
       // A redirect is not a 406 — 304-wins-over-303 is unaffected by spec
       // §3, which only closes the 406 case. Check inline before 303.
@@ -2388,7 +2401,14 @@ export async function handleHead(request, reply) {
     lwsEnabled: request.lwsEnabled,
     storageRootPath: request.storageRootPath,
     chosenProfile,
-    representations: advertisedReps
+    representations: advertisedReps,
+    // Fix (review finding, spec 2026-07-19) HEAD parity: this getAllHeaders
+    // call is shared by every HEAD serve branch (mashlib, entity-face,
+    // negotiated RDF) — isEntityFaceResponse (computed above, same
+    // predicate as GET's entity-face gate) is true only when this response
+    // IS the synthetic entity-face wrapper, so every other branch is
+    // byte-identical to before. See headers.js's syntheticView doc.
+    syntheticView: isEntityFaceResponse
   });
 
   // Mirror GET's Cache-Control for RDF responses (#552 header parity).

@@ -126,6 +126,19 @@ export function representationLinks(representations) {
   return parts.length ? parts.join(', ') : null;
 }
 
+// R12 (spec 2026-07-19, DX-PROF-CONNEG R.1.2.a): an UN-negotiated response
+// still identifies its representation's profile — but only when the served
+// body IS the declared default representation. The guard is media equality:
+// a converted variant (turtle→JSON-LD, a server-rendered nav face) must
+// never carry the declared representation's profile claim.
+function defaultProfileFor(representations, contentType) {
+  const d = representations?.default;
+  if (!d?.profile || !d.format || !contentType) return null;
+  const served = contentType.split(';')[0].trim().toLowerCase();
+  const declared = d.format.split(';')[0].trim().toLowerCase();
+  return served === declared ? d.profile : null;
+}
+
 /**
  * Get all headers combined
  * @param {object} options
@@ -135,7 +148,10 @@ export function representationLinks(representations) {
  *   + Link rel="profile") regardless of which serve branch handles the
  *   response — centralizing this in getAllHeaders means every branch that
  *   builds its headers here gets the stamp for free, instead of each branch
- *   having to remember to append it itself.
+ *   having to remember to append it itself. Negotiated 'self' outcomes pass
+ *   it explicitly; UN-negotiated responses derive the stamp instead from
+ *   `representations.default` under the media-equality guard (R12, see
+ *   `defaultProfileFor` above).
  * @param {object|null} [options.representations] - authz-filtered
  *   { default, alternates } set: when present, the DX-PROF-CONNEG §8.2.1
  *   list-profiles advertisement (rel="canonical"/"alternate" Link parts) is
@@ -148,9 +164,19 @@ export function representationLinks(representations) {
  *   request pipeline — getAllHeaders is sync and can't resolve it itself.
  *   `null` (default) keeps the pre-multi-tenant server-scope well-known
  *   target, unchanged for every caller that doesn't pass it.
+ * @param {boolean} [options.syntheticView] - true when the response body is
+ *   a server-rendered VIEW of the resource (e.g. the navigator's generic
+ *   entity face, `?view=nav`) rather than the resource's own bytes. Profile
+ *   claims (Content-Profile + Link rel="profile") bind to a declared
+ *   representation; a synthetic view is not one, even when it happens to
+ *   share the declared representation's media type or a negotiated
+ *   Accept-Profile matched 'self'. Suppresses BOTH the explicit
+ *   `chosenProfile` and the derived `defaultProfileFor` stamp — but
+ *   `representationLinks` (rel="canonical"/"alternate") still gets emitted,
+ *   since advertising what representations exist is still honest.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null, storageRootPath = null }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null, storageRootPath = null, syntheticView = false }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
@@ -169,9 +195,14 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
     const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
   }
-  if (chosenProfile) {
-    const profileLink = `<${chosenProfile}>; rel="profile"`;
-    headers['Content-Profile'] = `<${chosenProfile}>`;
+  // Profile claims bind to a declared representation; a server-rendered
+  // VIEW of the resource (the navigator's entity face, ?view=nav) is not
+  // one — never stamp on it, neither the explicit negotiated outcome nor
+  // the derived default. representationLinks below still runs regardless.
+  const stampProfile = syntheticView ? null : (chosenProfile || defaultProfileFor(representations, contentType));
+  if (stampProfile) {
+    const profileLink = `<${stampProfile}>; rel="profile"`;
+    headers['Content-Profile'] = `<${stampProfile}>`;
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${profileLink}` : profileLink;
   }
   const repLinks = representationLinks(representations);

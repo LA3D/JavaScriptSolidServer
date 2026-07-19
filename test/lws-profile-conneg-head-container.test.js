@@ -93,14 +93,17 @@ describe('Accept-Profile HEAD/GET parity — files', () => {
     assertStatus(headRes, 406);
   });
 
-  it('bare HEAD (no Accept-Profile) → unchanged, no Content-Profile stamp', async () => {
+  // R12 (spec 2026-07-19): a bare HEAD (no Accept-Profile) of a resource
+  // with a declared default rep now stamps too — same as GET (parity) —
+  // since HEAD's served contentType matches the declared default's format.
+  it('bare HEAD (no Accept-Profile) → R12 default-rep stamp, same as GET (parity)', async () => {
     const getRes = await request(RES_PATH);
     const headRes = await request(RES_PATH, { method: 'HEAD' });
     assertStatus(getRes, 200);
     assertStatus(headRes, 200);
-    assert.equal(headRes.headers.get('content-profile'), null);
-    assert.equal(getRes.headers.get('content-profile'), null);
-    assert.doesNotMatch(headRes.headers.get('link') || '', /rel="profile"/);
+    assert.equal(headRes.headers.get('content-profile'), `<${CONTENT_PROFILE}>`);
+    assert.equal(headRes.headers.get('content-profile'), getRes.headers.get('content-profile'));
+    assert.match(headRes.headers.get('link') || '', /rel="profile"/);
   });
 
   // 304-vs-profile-negotiation ordering: a cache-valid conditional request
@@ -190,10 +193,13 @@ describe('Accept-Profile container GET negotiation (no index.html)', () => {
     assertStatus(res, 406);
   });
 
-  it('bare GET container (no Accept-Profile) → unaffected, no stamp', async () => {
+  // R12: this container's .meta declares a default representation whose
+  // format ('application/ld+json') matches the bare-GET served body — the
+  // media-equality guard passes, so the stamp now applies here too.
+  it('bare GET container (no Accept-Profile) → R12 default-rep stamp applies (media match)', async () => {
     const res = await request(CONTAINER_PATH);
     assertStatus(res, 200);
-    assert.equal(res.headers.get('content-profile'), null);
+    assert.equal(res.headers.get('content-profile'), `<${DEFAULT_PROFILE}>`);
   });
 
   it('HEAD container Accept-Profile parity: redirect/self/406 match GET', async () => {
@@ -264,5 +270,115 @@ describe('Accept-Profile container GET — index.html shadowed (out of scope, re
     assertStatus(getRes, 200);
     assertStatus(headRes, 200);
     assert.equal(headRes.headers.get('content-profile'), getRes.headers.get('content-profile'));
+  });
+});
+
+// R12 negative: the wiki family gives containers no default rep, so a
+// container with none must stay stamp-free even when a bare GET is served —
+// defaultProfileFor requires representations.default to exist at all.
+describe('R12: container with only alternates (no default rep) stays stamp-free', () => {
+  const CONTAINER_PATH = '/gina/mem/';
+  const ALT_PATH = '/gina/mem-alt.jsonld';
+  const ALT_PROFILE = 'https://profiles.example/gina-alt';
+  let CONTAINER, ALT;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('gina');
+    const base = getBaseUrl();
+    CONTAINER = `${base}${CONTAINER_PATH}`;
+    ALT = `${base}${ALT_PATH}`;
+
+    await request(CONTAINER_PATH, { method: 'PUT', auth: 'gina' });
+    await request(`${CONTAINER_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': CONTAINER,
+        'altr:hasRepresentation': {
+          '@id': ALT, 'dct:format': 'application/ld+json', 'dct:conformsTo': { '@id': ALT_PROFILE },
+        },
+      }),
+      auth: 'gina',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('bare GET → no Content-Profile (no default rep declared)', async () => {
+    const res = await request(CONTAINER_PATH);
+    assertStatus(res, 200);
+    assert.equal(res.headers.get('content-profile'), null);
+  });
+
+  it('bare HEAD → no Content-Profile, matches GET', async () => {
+    const getRes = await request(CONTAINER_PATH);
+    const headRes = await request(CONTAINER_PATH, { method: 'HEAD' });
+    assertStatus(headRes, 200);
+    assert.equal(headRes.headers.get('content-profile'), null);
+    assert.equal(headRes.headers.get('content-profile'), getRes.headers.get('content-profile'));
+  });
+});
+
+// Fix (review finding, spec 2026-07-19) HEAD parity: the entity-face
+// wrapper's HEAD twin (resource.js isEntityFaceResponse branch) must
+// suppress the profile stamp exactly like GET does — see the GET-side
+// fixture/rationale in test/lws-profile-conneg-get.test.js.
+describe('synthetic-view stamp suppression: entity-face wrapper (?view=nav) HEAD parity', () => {
+  const RES_PATH5 = '/henry/wiki/page.html';
+  const PROFILE_H = 'https://profiles.example/henry-wiki';
+  const BROWSER_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+  const PAGE_BODY = '<html><body>henry page</body></html>';
+  let RES5;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('henry');
+    const base = getBaseUrl();
+    RES5 = `${base}${RES_PATH5}`;
+
+    await request('/henry/wiki/', { method: 'PUT', auth: 'henry' });
+    await request(RES_PATH5, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/html' },
+      body: PAGE_BODY,
+      auth: 'henry',
+    });
+    await request(`${RES_PATH5}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RES5,
+        'altr:hasDefaultRepresentation': {
+          '@id': RES5, 'dct:format': 'text/html', 'dct:conformsTo': { '@id': PROFILE_H },
+        },
+      }),
+      auth: 'henry',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('HEAD direct (own bytes, no ?view=nav) -> Content-Profile present, parity with GET (unchanged)', async () => {
+    const getRes = await request(RES_PATH5);
+    const headRes = await request(RES_PATH5, { method: 'HEAD' });
+    assertStatus(getRes, 200);
+    assertStatus(headRes, 200);
+    assert.equal(headRes.headers.get('content-profile'), `<${PROFILE_H}>`);
+    assert.equal(headRes.headers.get('content-profile'), getRes.headers.get('content-profile'));
+  });
+
+  it('HEAD ?view=nav (synthetic entity-face wrapper) -> 200, NO Content-Profile, parity with GET', async () => {
+    const getRes = await request(`${RES_PATH5}?view=nav`, { headers: { Accept: BROWSER_ACCEPT } });
+    const headRes = await request(`${RES_PATH5}?view=nav`, { method: 'HEAD', headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(getRes, 200);
+    assertStatus(headRes, 200);
+    assert.equal(headRes.headers.get('content-profile'), null);
+    assert.equal(headRes.headers.get('content-profile'), getRes.headers.get('content-profile'));
+    assert.doesNotMatch(headRes.headers.get('link') || '', /rel="profile"/);
+    const link = headRes.headers.get('link') || '';
+    assert.ok(link.includes('rel="canonical"'), `canonical entry must still be advertised, got: ${link}`);
   });
 });

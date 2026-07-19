@@ -102,11 +102,11 @@ describe('Accept-Profile file GET (--lws, lwsProfileConneg ON by default)', () =
     assert.match(vary, /Accept-Profile/, `406 Vary must include Accept-Profile, got: ${vary}`);
   });
 
-  it('no Accept-Profile → conneg block skipped entirely, bare GET unchanged (200, no stamp)', async () => {
+  it('no Accept-Profile → conneg block skipped, but R12 default-rep stamp still applies (200, stamped)', async () => {
     const res = await request(RES_PATH);
     assertStatus(res, 200);
-    assert.equal(res.headers.get('content-profile'), null);
-    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+    assert.equal(res.headers.get('content-profile'), `<${CONTENT_PROFILE}>`);
+    assert.match(res.headers.get('link') || '', /rel="profile"/);
     assert.equal(await res.text(), '# hello');
   });
 });
@@ -328,12 +328,411 @@ describe('representation-list advertisement (DX-PROF-CONNEG §8.2.1 list-profile
     assert.equal(res.headers.get('content-profile'), null);
   });
 
-  it('bare GET advertises the declared reps (A1) but stamps no Content-Profile', async () => {
+  it('bare GET advertises the declared reps (A1) AND stamps Content-Profile (R12, media match)', async () => {
     const res = await request(RES_PATH);
     assertStatus(res, 200);
     const link = res.headers.get('link') || '';
     assert.ok(link.includes('rel="canonical"'), `canonical on bare GET in: ${link}`);
     assert.ok(link.includes(`formats="${LINKS_PROFILE}"`), `alternate on bare GET in: ${link}`);
+    assert.equal(res.headers.get('content-profile'), `<${CONTENT_PROFILE}>`);
+  });
+});
+
+// R12 (spec 2026-07-19, DX-PROF-CONNEG R.1.2.a): an UN-negotiated response
+// still identifies its representation's profile — but only when the served
+// body IS the declared default representation (media-equality guard). Task
+// 10's per-face .meta and Task 12's live pins rely on exactly this rule.
+describe('R12: un-negotiated (bare) responses stamp the default rep profile', () => {
+  const RES_PATH4 = '/frank/mem/note.md';
+  const RDF_PATH4 = '/frank/data/thing.ttl';
+  const BARE_PATH4 = '/frank/notes/bare.md';
+  const PROFILE_A = 'https://profiles.example/frank-content';
+  const TTL = '@prefix schema: <https://schema.org/>.\n<#a> schema:name "A".';
+  let RES4, RDF4;
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true, public: true });
+    await createTestPod('frank');
+    const base = getBaseUrl();
+    RES4 = `${base}${RES_PATH4}`;
+    RDF4 = `${base}${RDF_PATH4}`;
+
+    await request('/frank/mem/', { method: 'PUT', auth: 'frank' });
+    await request(RES_PATH4, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# frank',
+      auth: 'frank',
+    });
+    await request(`${RES_PATH4}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RES4,
+        'altr:hasDefaultRepresentation': {
+          '@id': RES4, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': PROFILE_A },
+        },
+      }),
+      auth: 'frank',
+    });
+
+    await request('/frank/data/', { method: 'PUT', auth: 'frank' });
+    await request(RDF_PATH4, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/turtle' },
+      body: TTL,
+      auth: 'frank',
+    });
+    await request(`${RDF_PATH4}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RDF4,
+        'altr:hasDefaultRepresentation': {
+          '@id': RDF4, 'dct:format': 'text/turtle', 'dct:conformsTo': { '@id': PROFILE_A },
+        },
+      }),
+      auth: 'frank',
+    });
+
+    await request('/frank/notes/', { method: 'PUT', auth: 'frank' });
+    await request(BARE_PATH4, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# no meta',
+      auth: 'frank',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('R12: bare GET (no Accept-Profile) of a resource with a declared default rep carries Content-Profile + Link rel=profile', async () => {
+    const res = await request(RES_PATH4);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-profile'), `<${PROFILE_A}>`);
+    assert.ok(res.headers.get('link').includes(`<${PROFILE_A}>; rel="profile"`));
+  });
+
+  it('R12: media-converted response does NOT carry the default rep profile', async () => {
+    const res = await request(RDF_PATH4, { headers: { accept: 'application/ld+json' } });
+    assert.equal(res.status, 200);
     assert.equal(res.headers.get('content-profile'), null);
+  });
+
+  it('R12: resource with NO .meta stays byte-identical (no stamp, no rep links)', async () => {
+    const res = await request(BARE_PATH4);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-profile'), null);
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+  });
+
+  it('R12: negotiated self-outcome still stamps (chosenProfile precedence unchanged)', async () => {
+    const res = await request(RES_PATH4, { headers: { 'accept-profile': `<${PROFILE_A}>` } });
+    assert.equal(res.headers.get('content-profile'), `<${PROFILE_A}>`);
+  });
+});
+
+// Fix (review finding, spec 2026-07-19): the generic entity-face view
+// (?view=nav or an implicit browser GET of a non-html-viewable resource)
+// is a SYNTHETIC server-rendered wrapper (renderEntityView), not the
+// resource's own bytes — even when it hardcodes Content-Type: text/html and
+// the resource's .meta self-declares a text/html default representation
+// (the shape a materialized wiki face uses). It must never carry
+// Content-Profile / Link rel="profile" for that declared representation —
+// doing so is a false conformance claim about a page that is not the
+// declared representation. Advertising the representation list is still
+// honest (rel="canonical"/"alternate" stay), only the CLAIM is suppressed.
+describe('synthetic-view stamp suppression: entity-face wrapper (?view=nav) must not claim a profile', () => {
+  const RES_PATH5 = '/gwen/wiki/page.html';
+  const PROFILE_G = 'https://profiles.example/gwen-wiki';
+  const BROWSER_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+  const PAGE_BODY = '<html><body>gwen page</body></html>';
+  let RES5;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('gwen');
+    const base = getBaseUrl();
+    RES5 = `${base}${RES_PATH5}`;
+
+    await request('/gwen/wiki/', { method: 'PUT', auth: 'gwen' });
+    await request(RES_PATH5, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/html' },
+      body: PAGE_BODY,
+      auth: 'gwen',
+    });
+    // Self-declared default representation — the resource IS its own
+    // default rep, same media type (text/html) as the served bytes.
+    await request(`${RES_PATH5}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RES5,
+        'altr:hasDefaultRepresentation': {
+          '@id': RES5, 'dct:format': 'text/html', 'dct:conformsTo': { '@id': PROFILE_G },
+        },
+      }),
+      auth: 'gwen',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('direct GET (own bytes, no ?view=nav) -> Content-Profile present, unchanged from R12', async () => {
+    const res = await request(RES_PATH5);
+    assertStatus(res, 200);
+    assert.equal(res.headers.get('content-profile'), `<${PROFILE_G}>`);
+    assert.match(res.headers.get('link') || '', /rel="profile"/);
+    assert.equal(await res.text(), PAGE_BODY);
+  });
+
+  it('GET ?view=nav (synthetic entity-face wrapper) -> 200, NO Content-Profile, NO rel="profile", canonical rep link still advertised', async () => {
+    const res = await request(`${RES_PATH5}?view=nav`, { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type') || '', /text\/html/);
+    assert.equal(res.headers.get('content-profile'), null, 'synthetic view must not claim a profile');
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+    const link = res.headers.get('link') || '';
+    assert.ok(link.includes(`<${RES5}>; rel="canonical"; type="text/html"; formats="${PROFILE_G}"`),
+      `canonical entry must still be advertised (honest, distinct from claiming to BE it), got: ${link}`);
+    const body = await res.text();
+    assert.notEqual(body, PAGE_BODY, 'must actually be the synthetic wrapper, not the resource\'s own bytes');
+  });
+
+  it('GET ?view=nav with Accept-Profile matching self -> negotiated chosenProfile is ALSO suppressed on the synthetic view', async () => {
+    const res = await request(`${RES_PATH5}?view=nav`, {
+      headers: { Accept: BROWSER_ACCEPT, 'Accept-Profile': `<${PROFILE_G}>` },
+    });
+    assertStatus(res, 200);
+    assert.equal(res.headers.get('content-profile'), null);
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+  });
+});
+
+// Fix (I1, whole-branch review 2026-07-19): the mashlib HTML data-browser
+// wrapper (src/handlers/resource.js ~1455, the `shouldServeMashlib` GET
+// branch) is ALSO a synthetic server-rendered shell, not the resource's own
+// bytes — same class the entity-face fix above (7199726) closed, but that
+// commit only patched the entity-face call site and left this one open.
+// Needs BOTH --lws and mashlibCdn to reach (the fork rig runs --lws without
+// mashlib; the committed Dockerfile runs mashlib without --lws), so this
+// block stands up its own server config rather than reusing an existing one.
+describe('synthetic-view stamp suppression: mashlib data-browser wrapper (I1)', () => {
+  const LYING_PATH = '/ivy/media/lying.mp3';
+  const HONEST_PATH = '/ivy/media/honest.mp3';
+  const MASH_PROFILE = 'https://profiles.example/ivy-mash';
+  const AUDIO_PROFILE = 'https://profiles.example/ivy-audio';
+  const BROWSER_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+  let LYING, HONEST;
+
+  before(async () => {
+    await startTestServer({ lws: true, mashlibCdn: true, public: true });
+    await createTestPod('ivy');
+    const base = getBaseUrl();
+    LYING = `${base}${LYING_PATH}`;
+    HONEST = `${base}${HONEST_PATH}`;
+
+    await request('/ivy/media/', { method: 'PUT', auth: 'ivy' });
+
+    // Bare-arm fixture: an audio file whose .meta LIES about its own
+    // default representation (declares text/html — the same media type the
+    // mashlib wrapper hardcodes). Pre-fix, defaultProfileFor's media-equality
+    // guard compares the wrapper's contentType against this declared format
+    // and passes (both "text/html"), deriving a false stamp on the bare
+    // (no Accept-Profile) arm. Client-managed garbage-in, same class as M1.
+    await request(LYING_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'audio/mpeg' },
+      body: 'fake-audio-bytes',
+      auth: 'ivy',
+    });
+    await request(`${LYING_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': LYING,
+        'altr:hasDefaultRepresentation': {
+          '@id': LYING, 'dct:format': 'text/html', 'dct:conformsTo': { '@id': MASH_PROFILE },
+        },
+      }),
+      auth: 'ivy',
+    });
+
+    // Negotiated-arm fixture: an audio file with an HONEST default rep
+    // (declared format matches the stored bytes). Pre-fix, an Accept-Profile
+    // matching this profile sets chosenProfile — which getAllHeaders stamps
+    // unconditionally (no media guard applies to the explicit negotiated
+    // outcome) — falsely claiming the audio profile for the HTML wrapper.
+    await request(HONEST_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'audio/mpeg' },
+      body: 'fake-audio-bytes',
+      auth: 'ivy',
+    });
+    await request(`${HONEST_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': HONEST,
+        'altr:hasDefaultRepresentation': {
+          '@id': HONEST, 'dct:format': 'audio/mpeg', 'dct:conformsTo': { '@id': AUDIO_PROFILE },
+        },
+      }),
+      auth: 'ivy',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('bare browser GET (no Accept-Profile) of a mashlib-wrapped audio file with a lying text/html default -> wrapper 200, NO Content-Profile', async () => {
+    const res = await request(LYING_PATH, { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type') || '', /text\/html/);
+    assert.equal(res.headers.get('content-profile'), null, 'mashlib wrapper must not claim a profile');
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+    const link = res.headers.get('link') || '';
+    assert.ok(link.includes(`<${LYING}>; rel="canonical"; type="text/html"; formats="${MASH_PROFILE}"`),
+      `canonical entry must still be advertised (honest, distinct from claiming to BE it), got: ${link}`);
+  });
+
+  it('Accept-Profile matching the honest audio default (negotiated self) -> mashlib wrapper 200, chosenProfile ALSO suppressed', async () => {
+    const res = await request(HONEST_PATH, {
+      headers: { Accept: BROWSER_ACCEPT, 'Accept-Profile': `<${AUDIO_PROFILE}>` },
+    });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type') || '', /text\/html/);
+    assert.equal(res.headers.get('content-profile'), null, 'negotiated self must not stamp a synthetic view');
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+  });
+});
+
+// R15 (PROF/conneg closeout Task 5, spec §3 F5): profile selection never
+// changes bytes at a URL — a 'self' outcome serves the default
+// representation's own bytes, every alternate is a 303 to its own URL — so
+// fileEtag (predictFileEtag, ~line 288) is derived from content-type/Accept/
+// URL only and needs no profile component in VARIANT_KEYS. This block is
+// TESTS ONLY: it pins Tasks 3-4's already-shipped behavior, it does not
+// change it. Reuses the first describe block's alice/mem-a.md fixture
+// (self = CONTENT_PROFILE, redirect = LINKS_PROFILE) for the ETag-coherence
+// and 304/303/406-precedence pins, plus a fresh henry/mem/dup.md fixture
+// mirroring conneg-negotiate.test.js's R14 `dup` shape (default + an
+// alternate declaring the SAME profile) at the HTTP layer for the R14
+// duplicate-set case.
+describe('R15: profile-axis ETag coherence + 406/304/303 precedence pins (spec §3 F5)', () => {
+  const DUP_PATH = '/henry/mem/dup.md';
+  const DUP_ALT_PATH = '/henry/mem/dup.alt.md';
+  const SHARED_PROFILE = 'https://profiles.example/henry-shared';
+  let resourceUrl, dupResourceUrl;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('alice');
+    await createTestPod('henry');
+    const base = getBaseUrl();
+    resourceUrl = `${base}${RES_PATH}`;
+    const altUrl = `${base}${ALT_PATH}`;
+    dupResourceUrl = `${base}${DUP_PATH}`;
+    const dupAltUrl = `${base}${DUP_ALT_PATH}`;
+
+    // alice/mem-a.md: default = CONTENT_PROFILE (self outcome), alternate =
+    // LINKS_PROFILE (redirect outcome) — same shape as the file's first
+    // describe block.
+    await request('/alice/mem/', { method: 'PUT', auth: 'alice' });
+    await request(RES_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# hello',
+      auth: 'alice',
+    });
+    await request(`${RES_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': resourceUrl,
+        'altr:hasDefaultRepresentation': {
+          '@id': resourceUrl, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': CONTENT_PROFILE },
+        },
+        'altr:hasRepresentation': {
+          '@id': altUrl, 'dct:format': 'application/ld+json', 'dct:conformsTo': { '@id': LINKS_PROFILE },
+        },
+      }),
+      auth: 'alice',
+    });
+
+    // henry/dup.md: default + alternate DECLARING THE SAME PROFILE (R14 dup
+    // shape, mirrored at the HTTP layer — no distinguishing Accept media, so
+    // the default slot wins per negotiateProfile's pickByMedia fallback).
+    await request('/henry/mem/', { method: 'PUT', auth: 'henry' });
+    await request(DUP_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# dup',
+      auth: 'henry',
+    });
+    await request(`${DUP_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': dupResourceUrl,
+        'altr:hasDefaultRepresentation': {
+          '@id': dupResourceUrl, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': SHARED_PROFILE },
+        },
+        'altr:hasRepresentation': {
+          '@id': dupAltUrl, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': SHARED_PROFILE },
+        },
+      }),
+      auth: 'henry',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('R15: bare GET and negotiated-self GET share ETag AND bytes (same variant)', async () => {
+    const bare = await request(RES_PATH);
+    const neg = await request(RES_PATH, { headers: { 'Accept-Profile': `<${CONTENT_PROFILE}>` } });
+    assertStatus(bare, 200);
+    assertStatus(neg, 200);
+    assert.equal(neg.headers.get('etag'), bare.headers.get('etag'));
+    assert.equal(await neg.text(), await bare.text());
+  });
+
+  it('R15: 304 beats 303 — matching If-None-Match on a redirect-outcome request', async () => {
+    const first = await request(RES_PATH);
+    const res = await request(RES_PATH, {
+      headers: {
+        'Accept-Profile': `<${LINKS_PROFILE}>`,
+        'If-None-Match': first.headers.get('etag'),
+      },
+    });
+    assertStatus(res, 304);
+  });
+
+  it('R15: 406 beats 304 — unknown profile with matching If-None-Match still 406', async () => {
+    const first = await request(RES_PATH);
+    const res = await request(RES_PATH, {
+      headers: {
+        'Accept-Profile': `<${UNKNOWN_PROFILE}>`,
+        'If-None-Match': first.headers.get('etag'),
+      },
+    });
+    assertStatus(res, 406);
+  });
+
+  it('R15: R14 duplicate-set disambiguation does not perturb the self ETag', async () => {
+    // dup fixture (Task 3/4's shape, mirrored at HTTP layer): default + a
+    // same-profile alternate; no Accept → default slot wins (R14) → self.
+    const bare = await request(DUP_PATH);
+    const neg = await request(DUP_PATH, { headers: { 'Accept-Profile': `<${SHARED_PROFILE}>` } });
+    assertStatus(bare, 200);
+    assertStatus(neg, 200);
+    assert.equal(neg.headers.get('etag'), bare.headers.get('etag'));
   });
 });
