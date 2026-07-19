@@ -160,9 +160,14 @@ export function parseAcceptProfile(header) {
     const [ref, ...params] = e.split(';').map((s) => s.trim());
     const uri = ref.replace(/^</, '').replace(/>$/, '');
     const qParam = params.find((p) => p.toLowerCase().startsWith('q='));
-    const q = qParam ? parseFloat(qParam.slice(2)) : 1.0;
-    return { uri, q: Number.isFinite(q) ? q : 1.0, i };
-  }).filter((p) => p.uri);
+    const qRaw = qParam ? parseFloat(qParam.slice(2)) : 1.0;
+    // R13 (RFC 9110 robustness): clamp out-of-range weights into [0,1];
+    // non-numeric falls back to 1.0. q=0 is §12.5.1 "explicitly not
+    // acceptable" — discarded below, matching this file's media-type
+    // consumers (acceptSatisfiable/acceptsHtml).
+    const q = Number.isFinite(qRaw) ? Math.min(Math.max(qRaw, 0), 1) : 1.0;
+    return { uri, q, i };
+  }).filter((p) => p.uri && p.q !== 0);
   parsed.sort((a, b) => (b.q - a.q) || (a.i - b.i));
   return parsed.map((p) => p.uri);
 }
