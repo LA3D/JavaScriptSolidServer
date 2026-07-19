@@ -102,11 +102,11 @@ describe('Accept-Profile file GET (--lws, lwsProfileConneg ON by default)', () =
     assert.match(vary, /Accept-Profile/, `406 Vary must include Accept-Profile, got: ${vary}`);
   });
 
-  it('no Accept-Profile → conneg block skipped entirely, bare GET unchanged (200, no stamp)', async () => {
+  it('no Accept-Profile → conneg block skipped, but R12 default-rep stamp still applies (200, stamped)', async () => {
     const res = await request(RES_PATH);
     assertStatus(res, 200);
-    assert.equal(res.headers.get('content-profile'), null);
-    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+    assert.equal(res.headers.get('content-profile'), `<${CONTENT_PROFILE}>`);
+    assert.match(res.headers.get('link') || '', /rel="profile"/);
     assert.equal(await res.text(), '# hello');
   });
 });
@@ -328,12 +328,108 @@ describe('representation-list advertisement (DX-PROF-CONNEG §8.2.1 list-profile
     assert.equal(res.headers.get('content-profile'), null);
   });
 
-  it('bare GET advertises the declared reps (A1) but stamps no Content-Profile', async () => {
+  it('bare GET advertises the declared reps (A1) AND stamps Content-Profile (R12, media match)', async () => {
     const res = await request(RES_PATH);
     assertStatus(res, 200);
     const link = res.headers.get('link') || '';
     assert.ok(link.includes('rel="canonical"'), `canonical on bare GET in: ${link}`);
     assert.ok(link.includes(`formats="${LINKS_PROFILE}"`), `alternate on bare GET in: ${link}`);
+    assert.equal(res.headers.get('content-profile'), `<${CONTENT_PROFILE}>`);
+  });
+});
+
+// R12 (spec 2026-07-19, DX-PROF-CONNEG R.1.2.a): an UN-negotiated response
+// still identifies its representation's profile — but only when the served
+// body IS the declared default representation (media-equality guard). Task
+// 10's per-face .meta and Task 12's live pins rely on exactly this rule.
+describe('R12: un-negotiated (bare) responses stamp the default rep profile', () => {
+  const RES_PATH4 = '/frank/mem/note.md';
+  const RDF_PATH4 = '/frank/data/thing.ttl';
+  const BARE_PATH4 = '/frank/notes/bare.md';
+  const PROFILE_A = 'https://profiles.example/frank-content';
+  const TTL = '@prefix schema: <https://schema.org/>.\n<#a> schema:name "A".';
+  let RES4, RDF4;
+
+  before(async () => {
+    await startTestServer({ lws: true, conneg: true, public: true });
+    await createTestPod('frank');
+    const base = getBaseUrl();
+    RES4 = `${base}${RES_PATH4}`;
+    RDF4 = `${base}${RDF_PATH4}`;
+
+    await request('/frank/mem/', { method: 'PUT', auth: 'frank' });
+    await request(RES_PATH4, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# frank',
+      auth: 'frank',
+    });
+    await request(`${RES_PATH4}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RES4,
+        'altr:hasDefaultRepresentation': {
+          '@id': RES4, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': PROFILE_A },
+        },
+      }),
+      auth: 'frank',
+    });
+
+    await request('/frank/data/', { method: 'PUT', auth: 'frank' });
+    await request(RDF_PATH4, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/turtle' },
+      body: TTL,
+      auth: 'frank',
+    });
+    await request(`${RDF_PATH4}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RDF4,
+        'altr:hasDefaultRepresentation': {
+          '@id': RDF4, 'dct:format': 'text/turtle', 'dct:conformsTo': { '@id': PROFILE_A },
+        },
+      }),
+      auth: 'frank',
+    });
+
+    await request('/frank/notes/', { method: 'PUT', auth: 'frank' });
+    await request(BARE_PATH4, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# no meta',
+      auth: 'frank',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('R12: bare GET (no Accept-Profile) of a resource with a declared default rep carries Content-Profile + Link rel=profile', async () => {
+    const res = await request(RES_PATH4);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-profile'), `<${PROFILE_A}>`);
+    assert.ok(res.headers.get('link').includes(`<${PROFILE_A}>; rel="profile"`));
+  });
+
+  it('R12: media-converted response does NOT carry the default rep profile', async () => {
+    const res = await request(RDF_PATH4, { headers: { accept: 'application/ld+json' } });
+    assert.equal(res.status, 200);
     assert.equal(res.headers.get('content-profile'), null);
+  });
+
+  it('R12: resource with NO .meta stays byte-identical (no stamp, no rep links)', async () => {
+    const res = await request(BARE_PATH4);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-profile'), null);
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+  });
+
+  it('R12: negotiated self-outcome still stamps (chosenProfile precedence unchanged)', async () => {
+    const res = await request(RES_PATH4, { headers: { 'accept-profile': `<${PROFILE_A}>` } });
+    assert.equal(res.headers.get('content-profile'), `<${PROFILE_A}>`);
   });
 });
