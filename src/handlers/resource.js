@@ -1358,7 +1358,14 @@ export async function handleGet(request, reply) {
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
       chosenProfile,
-      representations: advertisedReps
+      representations: advertisedReps,
+      // Fix (review finding, spec 2026-07-19): this IS the synthetic
+      // entity-face wrapper (renderEntityView), never the resource's own
+      // bytes — a hardcoded text/html Content-Type here must never be
+      // read as a profile claim about the declared representation, even
+      // when they happen to share a media type or Accept-Profile
+      // negotiated 'self'. See headers.js's syntheticView doc.
+      syntheticView: true
     });
     headers['Cache-Control'] = RDF_CACHE_CONTROL;
     Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -2388,7 +2395,14 @@ export async function handleHead(request, reply) {
     lwsEnabled: request.lwsEnabled,
     storageRootPath: request.storageRootPath,
     chosenProfile,
-    representations: advertisedReps
+    representations: advertisedReps,
+    // Fix (review finding, spec 2026-07-19) HEAD parity: this getAllHeaders
+    // call is shared by every HEAD serve branch (mashlib, entity-face,
+    // negotiated RDF) — isEntityFaceResponse (computed above, same
+    // predicate as GET's entity-face gate) is true only when this response
+    // IS the synthetic entity-face wrapper, so every other branch is
+    // byte-identical to before. See headers.js's syntheticView doc.
+    syntheticView: isEntityFaceResponse
   });
 
   // Mirror GET's Cache-Control for RDF responses (#552 header parity).

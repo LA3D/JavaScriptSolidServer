@@ -433,3 +433,82 @@ describe('R12: un-negotiated (bare) responses stamp the default rep profile', ()
     assert.equal(res.headers.get('content-profile'), `<${PROFILE_A}>`);
   });
 });
+
+// Fix (review finding, spec 2026-07-19): the generic entity-face view
+// (?view=nav or an implicit browser GET of a non-html-viewable resource)
+// is a SYNTHETIC server-rendered wrapper (renderEntityView), not the
+// resource's own bytes — even when it hardcodes Content-Type: text/html and
+// the resource's .meta self-declares a text/html default representation
+// (the shape a materialized wiki face uses). It must never carry
+// Content-Profile / Link rel="profile" for that declared representation —
+// doing so is a false conformance claim about a page that is not the
+// declared representation. Advertising the representation list is still
+// honest (rel="canonical"/"alternate" stay), only the CLAIM is suppressed.
+describe('synthetic-view stamp suppression: entity-face wrapper (?view=nav) must not claim a profile', () => {
+  const RES_PATH5 = '/gwen/wiki/page.html';
+  const PROFILE_G = 'https://profiles.example/gwen-wiki';
+  const BROWSER_ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+  const PAGE_BODY = '<html><body>gwen page</body></html>';
+  let RES5;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('gwen');
+    const base = getBaseUrl();
+    RES5 = `${base}${RES_PATH5}`;
+
+    await request('/gwen/wiki/', { method: 'PUT', auth: 'gwen' });
+    await request(RES_PATH5, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/html' },
+      body: PAGE_BODY,
+      auth: 'gwen',
+    });
+    // Self-declared default representation — the resource IS its own
+    // default rep, same media type (text/html) as the served bytes.
+    await request(`${RES_PATH5}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': RES5,
+        'altr:hasDefaultRepresentation': {
+          '@id': RES5, 'dct:format': 'text/html', 'dct:conformsTo': { '@id': PROFILE_G },
+        },
+      }),
+      auth: 'gwen',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('direct GET (own bytes, no ?view=nav) -> Content-Profile present, unchanged from R12', async () => {
+    const res = await request(RES_PATH5);
+    assertStatus(res, 200);
+    assert.equal(res.headers.get('content-profile'), `<${PROFILE_G}>`);
+    assert.match(res.headers.get('link') || '', /rel="profile"/);
+    assert.equal(await res.text(), PAGE_BODY);
+  });
+
+  it('GET ?view=nav (synthetic entity-face wrapper) -> 200, NO Content-Profile, NO rel="profile", canonical rep link still advertised', async () => {
+    const res = await request(`${RES_PATH5}?view=nav`, { headers: { Accept: BROWSER_ACCEPT } });
+    assertStatus(res, 200);
+    assert.match(res.headers.get('content-type') || '', /text\/html/);
+    assert.equal(res.headers.get('content-profile'), null, 'synthetic view must not claim a profile');
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+    const link = res.headers.get('link') || '';
+    assert.ok(link.includes(`<${RES5}>; rel="canonical"; type="text/html"; formats="${PROFILE_G}"`),
+      `canonical entry must still be advertised (honest, distinct from claiming to BE it), got: ${link}`);
+    const body = await res.text();
+    assert.notEqual(body, PAGE_BODY, 'must actually be the synthetic wrapper, not the resource\'s own bytes');
+  });
+
+  it('GET ?view=nav with Accept-Profile matching self -> negotiated chosenProfile is ALSO suppressed on the synthetic view', async () => {
+    const res = await request(`${RES_PATH5}?view=nav`, {
+      headers: { Accept: BROWSER_ACCEPT, 'Accept-Profile': `<${PROFILE_G}>` },
+    });
+    assertStatus(res, 200);
+    assert.equal(res.headers.get('content-profile'), null);
+    assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
+  });
+});

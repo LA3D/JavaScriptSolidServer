@@ -164,9 +164,19 @@ function defaultProfileFor(representations, contentType) {
  *   request pipeline — getAllHeaders is sync and can't resolve it itself.
  *   `null` (default) keeps the pre-multi-tenant server-scope well-known
  *   target, unchanged for every caller that doesn't pass it.
+ * @param {boolean} [options.syntheticView] - true when the response body is
+ *   a server-rendered VIEW of the resource (e.g. the navigator's generic
+ *   entity face, `?view=nav`) rather than the resource's own bytes. Profile
+ *   claims (Content-Profile + Link rel="profile") bind to a declared
+ *   representation; a synthetic view is not one, even when it happens to
+ *   share the declared representation's media type or a negotiated
+ *   Accept-Profile matched 'self'. Suppresses BOTH the explicit
+ *   `chosenProfile` and the derived `defaultProfileFor` stamp — but
+ *   `representationLinks` (rel="canonical"/"alternate") still gets emitted,
+ *   since advertising what representations exist is still honest.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null, storageRootPath = null }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null, storageRootPath = null, syntheticView = false }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
@@ -185,7 +195,11 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
     const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
   }
-  const stampProfile = chosenProfile || defaultProfileFor(representations, contentType);
+  // Profile claims bind to a declared representation; a server-rendered
+  // VIEW of the resource (the navigator's entity face, ?view=nav) is not
+  // one — never stamp on it, neither the explicit negotiated outcome nor
+  // the derived default. representationLinks below still runs regardless.
+  const stampProfile = syntheticView ? null : (chosenProfile || defaultProfileFor(representations, contentType));
   if (stampProfile) {
     const profileLink = `<${stampProfile}>; rel="profile"`;
     headers['Content-Profile'] = `<${stampProfile}>`;
