@@ -512,3 +512,128 @@ describe('synthetic-view stamp suppression: entity-face wrapper (?view=nav) must
     assert.doesNotMatch(res.headers.get('link') || '', /rel="profile"/);
   });
 });
+
+// R15 (PROF/conneg closeout Task 5, spec §3 F5): profile selection never
+// changes bytes at a URL — a 'self' outcome serves the default
+// representation's own bytes, every alternate is a 303 to its own URL — so
+// fileEtag (predictFileEtag, ~line 288) is derived from content-type/Accept/
+// URL only and needs no profile component in VARIANT_KEYS. This block is
+// TESTS ONLY: it pins Tasks 3-4's already-shipped behavior, it does not
+// change it. Reuses the first describe block's alice/mem-a.md fixture
+// (self = CONTENT_PROFILE, redirect = LINKS_PROFILE) for the ETag-coherence
+// and 304/303/406-precedence pins, plus a fresh henry/mem/dup.md fixture
+// mirroring conneg-negotiate.test.js's R14 `dup` shape (default + an
+// alternate declaring the SAME profile) at the HTTP layer for the R14
+// duplicate-set case.
+describe('R15: profile-axis ETag coherence + 406/304/303 precedence pins (spec §3 F5)', () => {
+  const DUP_PATH = '/henry/mem/dup.md';
+  const DUP_ALT_PATH = '/henry/mem/dup.alt.md';
+  const SHARED_PROFILE = 'https://profiles.example/henry-shared';
+  let resourceUrl, dupResourceUrl;
+
+  before(async () => {
+    await startTestServer({ lws: true, public: true });
+    await createTestPod('alice');
+    await createTestPod('henry');
+    const base = getBaseUrl();
+    resourceUrl = `${base}${RES_PATH}`;
+    const altUrl = `${base}${ALT_PATH}`;
+    dupResourceUrl = `${base}${DUP_PATH}`;
+    const dupAltUrl = `${base}${DUP_ALT_PATH}`;
+
+    // alice/mem-a.md: default = CONTENT_PROFILE (self outcome), alternate =
+    // LINKS_PROFILE (redirect outcome) — same shape as the file's first
+    // describe block.
+    await request('/alice/mem/', { method: 'PUT', auth: 'alice' });
+    await request(RES_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# hello',
+      auth: 'alice',
+    });
+    await request(`${RES_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': resourceUrl,
+        'altr:hasDefaultRepresentation': {
+          '@id': resourceUrl, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': CONTENT_PROFILE },
+        },
+        'altr:hasRepresentation': {
+          '@id': altUrl, 'dct:format': 'application/ld+json', 'dct:conformsTo': { '@id': LINKS_PROFILE },
+        },
+      }),
+      auth: 'alice',
+    });
+
+    // henry/dup.md: default + alternate DECLARING THE SAME PROFILE (R14 dup
+    // shape, mirrored at the HTTP layer — no distinguishing Accept media, so
+    // the default slot wins per negotiateProfile's pickByMedia fallback).
+    await request('/henry/mem/', { method: 'PUT', auth: 'henry' });
+    await request(DUP_PATH, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/markdown' },
+      body: '# dup',
+      auth: 'henry',
+    });
+    await request(`${DUP_PATH}.meta`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/ld+json' },
+      body: JSON.stringify({
+        '@context': { altr: ALTR, dct: DCT },
+        '@id': dupResourceUrl,
+        'altr:hasDefaultRepresentation': {
+          '@id': dupResourceUrl, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': SHARED_PROFILE },
+        },
+        'altr:hasRepresentation': {
+          '@id': dupAltUrl, 'dct:format': 'text/markdown', 'dct:conformsTo': { '@id': SHARED_PROFILE },
+        },
+      }),
+      auth: 'henry',
+    });
+  });
+
+  after(async () => { await stopTestServer(); });
+
+  it('R15: bare GET and negotiated-self GET share ETag AND bytes (same variant)', async () => {
+    const bare = await request(RES_PATH);
+    const neg = await request(RES_PATH, { headers: { 'Accept-Profile': `<${CONTENT_PROFILE}>` } });
+    assertStatus(bare, 200);
+    assertStatus(neg, 200);
+    assert.equal(neg.headers.get('etag'), bare.headers.get('etag'));
+    assert.equal(await neg.text(), await bare.text());
+  });
+
+  it('R15: 304 beats 303 — matching If-None-Match on a redirect-outcome request', async () => {
+    const first = await request(RES_PATH);
+    const res = await request(RES_PATH, {
+      headers: {
+        'Accept-Profile': `<${LINKS_PROFILE}>`,
+        'If-None-Match': first.headers.get('etag'),
+      },
+    });
+    assertStatus(res, 304);
+  });
+
+  it('R15: 406 beats 304 — unknown profile with matching If-None-Match still 406', async () => {
+    const first = await request(RES_PATH);
+    const res = await request(RES_PATH, {
+      headers: {
+        'Accept-Profile': `<${UNKNOWN_PROFILE}>`,
+        'If-None-Match': first.headers.get('etag'),
+      },
+    });
+    assertStatus(res, 406);
+  });
+
+  it('R15: R14 duplicate-set disambiguation does not perturb the self ETag', async () => {
+    // dup fixture (Task 3/4's shape, mirrored at HTTP layer): default + a
+    // same-profile alternate; no Accept → default slot wins (R14) → self.
+    const bare = await request(DUP_PATH);
+    const neg = await request(DUP_PATH, { headers: { 'Accept-Profile': `<${SHARED_PROFILE}>` } });
+    assertStatus(bare, 200);
+    assertStatus(neg, 200);
+    assert.equal(neg.headers.get('etag'), bare.headers.get('etag'));
+  });
+});
