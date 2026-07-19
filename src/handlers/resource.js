@@ -159,7 +159,7 @@ function profileNotAcceptableProblem(reps, instance) {
     .map((r) => r.profile).filter(Boolean);
   return {
     type: 'about:blank', title: 'Not Acceptable', status: 406,
-    detail: `no representation conforms to the requested profile(s). Profiles that conform: ${conforming.length ? conforming.join(', ') : '(none declared)'}.`,
+    detail: `no representation conforms to the requested profile(s); matching is by exact profile URI (tokens and isProfileOf hierarchy are not supported). Profiles that conform: ${conforming.length ? conforming.join(', ') : '(none declared)'}.`,
     instance,
   };
 }

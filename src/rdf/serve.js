@@ -87,8 +87,8 @@ function notAcceptable(instance, targetType, why, works) {
 /** F3: a non-RDF source cannot satisfy a specific media Accept — teach, never lie. */
 export function nonRdfNotAcceptable(instance, storedType, requestedAccept, hasAlternates) {
   const route = hasAlternates
-    ? ' Its declared representations are in the Link header (rel="canonical"/"alternate"), or send Accept-Profile: <profile-uri> to negotiate one.'
-    : ' If this resource has profile-negotiated representations, send Accept-Profile: <profile-uri> to negotiate one (its linkset, Accept: application/linkset+json, lists what is declared).';
+    ? ' Its declared representations are in the Link header (rel="canonical"/"alternate"); send Accept-Profile: <profile-uri> with an exact URI from a formats= attribute to negotiate one (tokens and profile hierarchy are not supported).'
+    : ' If this resource has profile-negotiated representations, send Accept-Profile: <profile-uri> with an exact declared profile URI (its linkset, Accept: application/linkset+json, lists what is declared; tokens and profile hierarchy are not supported).';
   return { ok: false, status: 406, problem: {
     type: 'about:blank', title: 'Not Acceptable', status: 406,
     detail: `this resource is ${storedType} and has no representation matching "${requestedAccept}".${route} Formats that work directly: ${storedType}.`,

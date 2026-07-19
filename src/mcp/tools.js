@@ -465,7 +465,7 @@ async function describe_resource({ path, uri }, ctx) {
   });
   return toolJson({
     path, isContainer, body, truncated, types: declared, linkset,
-    hint: 'representations are negotiable via Accept-Profile: <conformsTo-uri>; alternates are listed as rel=alternate',
+    hint: 'representations are negotiable via Accept-Profile: <conformsTo-uri> (exact URI match; tokens and profile hierarchy are not supported); alternates are listed as rel=alternate',
   });
 }
 
