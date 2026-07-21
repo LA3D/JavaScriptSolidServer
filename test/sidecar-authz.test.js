@@ -64,6 +64,20 @@ const appendOnlyAcl = (base, container) => JSON.stringify({
   'acl:mode': [{ '@id': 'acl:Append' }, { '@id': 'acl:Write' }],
 });
 
+// A resource-level ACL granting ONLY `ownerWebId` full control over `subject` — no attacker
+// grant, so the resource is protected from the container's Append/Write default until this
+// ACL is removed. This is the "victim's own acl is owner-only" precondition Task 7a's Finding
+// 1 depends on: the attacker must be blocked from `subject` BEFORE deleting `subject.acl`, and
+// able to write it after, for the delete to demonstrate an escalation.
+const ownerOnlyAcl = (base, subject, ownerWebId) => JSON.stringify({
+  '@context': { acl: 'http://www.w3.org/ns/auth/acl#' },
+  '@id': '#owner',
+  '@type': 'acl:Authorization',
+  'acl:agent': { '@id': ownerWebId },
+  'acl:accessTo': { '@id': `${base}${subject}` },
+  'acl:mode': [{ '@id': 'acl:Read' }, { '@id': 'acl:Write' }, { '@id': 'acl:Control' }],
+});
+
 async function seedInbox(pod) {
   const container = `/${pod.podName}/inbox/`;
   await putFile(pod, `${container}seed.txt`, 'seed');
@@ -174,6 +188,92 @@ describe('sidecar privilege escalation', () => {
     const meta = JSON.parse((await storage.read(metaPath)).toString('utf8'));
     assert.equal(meta.keep, 'ME', 'prior .meta keys survive the merge');
     assert.equal(meta.describedby, shapeUrl, 'describedby is declared on the allowed update');
+  });
+
+  // Task 7a, Finding 1 (CRITICAL, reproduced by adversarial review 2026-07-21):
+  // delete_resource gated on `wac(ctx, path, WRITE)` against the SIDECAR'S OWN path — which
+  // findApplicableAcl resolves by walking up to the container default — so container-Write
+  // alone could delete a sibling's restrictive `.acl`, stripping the protection the write/
+  // create guards above were never asked to check. Reproduced end to end: attacker denied a
+  // direct write to `victim`, deletes `victim.acl`, then writes `victim` successfully.
+  test('MCP delete_resource cannot delete a sibling .acl with only container Write, and the protected resource stays protected', async (t) => {
+    const pod = await startLwsPod(t);
+    const container = await seedInbox(pod);
+    const victimPath = `${container}victim`;
+    const victimAclPath = `${victimPath}.acl`;
+    await putFile(pod, victimAclPath, ownerOnlyAcl(pod.base, victimPath, pod.webId));
+
+    // Precondition: the owner-only .acl actually blocks the attacker's direct write.
+    const blockedWrite = await callTool('write_resource', {
+      path: victimPath, content: 'pwned', contentType: 'text/plain',
+    }, attackerCtx(pod));
+    assert.equal(blockedWrite.isError, true, 'precondition: attacker must be blocked while victim.acl stands');
+
+    const delRes = await callTool('delete_resource', { path: victimAclPath }, attackerCtx(pod));
+    assert.equal(delRes.isError, true, 'delete_resource must refuse deleting a sibling .acl without Control on the subject');
+    assert.equal(await storage.exists(victimAclPath), true, 'the victim .acl must still exist after a refused delete');
+
+    const writeAfter = await callTool('write_resource', {
+      path: victimPath, content: 'pwned', contentType: 'text/plain',
+    }, attackerCtx(pod));
+    assert.equal(writeAfter.isError, true, 'attacker must still be unable to write victim after the refused delete');
+  });
+
+  // Positive control (proves the fix above does not over-tighten): a caller who genuinely
+  // holds Control on the subject must still be able to delete their own .acl.
+  test('MCP delete_resource: owner WITH Control can still delete their own .acl', async (t) => {
+    const pod = await startLwsPod(t);
+    const container = await seedInbox(pod);
+    const minePath = `${container}mine`;
+    const mineAclPath = `${minePath}.acl`;
+    await putFile(pod, minePath, 'owner content');
+    await putFile(pod, mineAclPath, ownerOnlyAcl(pod.base, minePath, pod.webId));
+
+    const owner = { ...ownerCtx(pod), lwsEnabled: true };
+    const delRes = await callTool('delete_resource', { path: mineAclPath }, owner);
+    assert.equal(delRes.isError, false, `owner must be able to delete their own .acl: ${JSON.stringify(delRes)}`);
+    assert.equal(await storage.exists(mineAclPath), false, 'the .acl must be gone after an authorized delete');
+  });
+
+  // Task 7a, Finding 2 (reproduced 2026-07-21): create_resource's `isContainer: true` branch
+  // appends a trailing slash to childPath before the AUX_SUFFIX check, and AUX_SUFFIX is
+  // `$`-anchored, so `victim.acl/` never matched — the container branch then calls
+  // storage.createContainer directly, never reaching applyLwsWrite. An Append-only agent could
+  // durably squat a directory at a sibling's `.acl`/`.meta` path.
+  test('MCP create_resource cannot plant a sibling .acl/.meta directory via isContainer:true', async (t) => {
+    const pod = await startLwsPod(t);
+    const container = await seedInbox(pod);
+
+    const aclAttempt = await callTool('create_resource', {
+      container, slug: 'victim.acl', isContainer: true,
+    }, attackerCtx(pod));
+    assert.equal(aclAttempt.isError, true, 'create_resource must refuse an isContainer .acl slug');
+    assert.equal(await storage.exists(`${container}victim.acl/`), false, 'no .acl container squat may exist');
+
+    const metaAttempt = await callTool('create_resource', {
+      container, slug: 'victim.meta', isContainer: true,
+    }, attackerCtx(pod));
+    assert.equal(metaAttempt.isError, true, 'create_resource must refuse an isContainer .meta slug');
+    assert.equal(await storage.exists(`${container}victim.meta/`), false, 'no .meta container squat may exist');
+  });
+
+  // Task 7a, Finding 2 fallout: the squat above has a real consequence beyond the squat
+  // itself — write_acl's storage.write() call ignored its boolean return value, so a write
+  // that fails (e.g. EISDIR because the .acl path is a squatted directory) still reported
+  // success to the caller. Exercised directly against write_acl's own defensive check,
+  // independent of how a directory ends up at the .acl path.
+  test('write_acl reports isError when the underlying write fails (squatted .acl path)', async (t) => {
+    const pod = await startLwsPod(t);
+    const targetPath = `/${pod.podName}/acl-fail-target`;
+    await putFile(pod, targetPath, 'owner content');
+    await storage.createContainer(`${targetPath}.acl/`);
+
+    const owner = { ...ownerCtx(pod), lwsEnabled: true };
+    const res = await callTool('write_acl', {
+      path: targetPath,
+      authorizations: [{ agents: [pod.webId], modes: ['Read', 'Write', 'Control'] }],
+    }, owner);
+    assert.equal(res.isError, true, 'write_acl must report failure when storage.write fails, not claim success');
   });
 });
 

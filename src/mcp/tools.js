@@ -117,9 +117,16 @@ async function create_resource({ container, slug, content, contentType, isContai
   // b9b38ed's class, reached through the MCP tool argument, which unlike the HTTP Slug has no
   // character constraint). Per-surface guard mirroring write_acl/write_resource; applyLwsWrite
   // refuses regardless, but stating it here keeps the property visible at this surface too.
-  if (AUX_SUFFIX.test(childPath)) {
-    const sc2 = sidecarSubject(childPath);
-    const subj = sc2 ? sc2.subject : childPath.replace(AUX_SUFFIX, '');
+  // Task 7a (2026-07-21): `isContainer` appends a trailing slash to childPath before this
+  // check, and AUX_SUFFIX is `$`-anchored, so `victim.acl/` never matched — an Append-only
+  // agent could squat a directory at a sibling's `.acl`/`.meta` path, which never reaches
+  // applyLwsWrite (the container branch below calls storage.createContainer directly) and so
+  // had no guard at all. Strip a single trailing slash before testing so the container case is
+  // seen through to its un-slashed sidecar name, same as the resource case.
+  const auxCheckPath = childPath.replace(/\/$/, '');
+  if (AUX_SUFFIX.test(auxCheckPath)) {
+    const sc2 = sidecarSubject(auxCheckPath);
+    const subj = sc2 ? sc2.subject : auxCheckPath.replace(AUX_SUFFIX, '');
     if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
       return toolError(`access denied: control ${subj} (required to create ${childPath})`);
     }
@@ -150,7 +157,28 @@ async function delete_resource({ path }, ctx) {
   if (ctx.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(path)) {
     return toolError(`cannot delete ${path}: System-Managed sidecar (read-only to clients)`);
   }
-  if (!(await wac(ctx, path, AccessMode.WRITE))) {
+  // Sidecar authz (Task 7a, 2026-07-21). DELETE previously checked WRITE against the
+  // sidecar's OWN path — findApplicableAcl resolves that by walking up to the container
+  // default, so container-Write alone could delete a sibling's restrictive `.acl`, then
+  // write the now-unprotected resource (the write/create guards above never covered
+  // delete). Mirror the HTTP policy exactly (src/auth/middleware.js): `authorizeAclAccess`
+  // requires CONTROL on the protected SUBJECT for every method including DELETE; `.meta`
+  // routes through `authorizeSidecarAccess` with `getRequiredMode('DELETE') === WRITE` on
+  // the subject. Both bind to the subject, never to the sidecar's own resolved ACL.
+  const isAcl = /\.acl$/.test(path);
+  const isMeta = ctx.lwsEnabled && /\.meta$/.test(path);
+  if (isAcl) {
+    const subj = path.replace(/\.acl$/, '');
+    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+      return toolError(`access denied: control ${subj} (required to delete ${path})`);
+    }
+  } else if (isMeta) {
+    const sc = sidecarSubject(path);
+    const subj = sc ? sc.subject : path.replace(/\.meta$/, '');
+    if (!(await wac(ctx, subj, AccessMode.WRITE))) {
+      return toolError(`access denied: write ${subj} (required to delete ${path})`);
+    }
+  } else if (!(await wac(ctx, path, AccessMode.WRITE))) {
     return toolError(`access denied: delete ${path}`);
   }
   if (!(await storage.exists(path))) {
@@ -290,9 +318,15 @@ async function write_acl({ path, authorizations }, ctx) {
     );
   }
 
-  await storage.write(aclPath, Buffer.from(serialized, 'utf8'), {
+  // Task 7a (2026-07-21): storage.write() catches its own errors and returns false rather
+  // than throwing (src/storage/filesystem.js) — this call ignored that return value, so a
+  // failed write (e.g. EISDIR when the `.acl` path is squatted by a stray directory, as a
+  // create_resource isContainer squat leaves behind) reported success while nothing was
+  // actually written. Check the return value and fail closed.
+  const wrote = await storage.write(aclPath, Buffer.from(serialized, 'utf8'), {
     contentType: 'application/ld+json'
   });
+  if (!wrote) return toolError(`write failed: ${aclPath}`);
   emitChange(buildUrl(ctx, aclPath));
   return toolText(`wrote ${aclPath} (${authorizations.length} authorization${authorizations.length === 1 ? '' : 's'})`);
 }
