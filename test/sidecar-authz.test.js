@@ -128,6 +128,53 @@ describe('sidecar privilege escalation', () => {
     const sidecarExists = await storage.exists(`${container}victim.acl`);
     assert.equal(sidecarExists, false, 'no .acl sidecar may exist after a refused POST');
   });
+
+  // put_typed_resource's describedby branch wrote its target's `.meta` with a direct
+  // storage.write, gated only by wac(ctx, metaPath, WRITE) — which falls back to the
+  // PARENT CONTAINER for a non-existent `.meta`, so container-Write alone could CREATE
+  // a `.meta` for a resource this agent doesn't Control (found in adversarial review of
+  // Task 6, not covered by any existing test). Same escalation class as the .acl cases
+  // above, on a third MCP surface. The subject (`victim`) already exists and the attacker
+  // already holds Write on it via the container's default ACL (seedInbox) — so this test
+  // isolates the `.meta`-specific CONTROL-to-create rule from the plain resource-Write
+  // check that gates the rest of the tool.
+  test('MCP put_typed_resource: container-Write cannot create a sibling .meta, but can update one that already exists', async (t) => {
+    const pod = await startLwsPod(t);
+    const container = await seedInbox(pod);
+    const victimPath = `${container}victim`;
+    const metaPath = `${victimPath}.meta`;
+    const shapeUrl = `${pod.base}${container}shapes/dummy`;
+
+    // No .meta exists yet for `victim` — attacker holds Write (container default) but not
+    // Control, so declaring a describedby (which would CREATE victim.meta) must be refused.
+    const createAttempt = await callTool('put_typed_resource', {
+      path: victimPath,
+      content: 'updated by attacker',
+      contentType: 'text/plain',
+      describedby: shapeUrl,
+    }, attackerCtx(pod));
+    assert.equal(createAttempt.isError, true, 'put_typed_resource must refuse creating a .meta without Control');
+    assert.equal(await storage.exists(metaPath), false, 'no .meta sidecar may exist after a refused create');
+    assert.equal((await storage.read(victimPath)).toString('utf8'), 'victim resource',
+      'the primary resource must be untouched by a refused describedby declaration');
+
+    // Now the owner (via direct storage write, bypassing WAC — same pattern as the rest of
+    // this suite's seeding) declares a pre-existing .meta for the same resource. The attacker
+    // still only holds Write, not Control — but updating an EXISTING .meta only requires Write
+    // on the subject (matching the choke point's "Control to create, Write to update" rule),
+    // so this call must succeed. This is the check that the fix must not over-tighten.
+    await storage.write(metaPath, Buffer.from(JSON.stringify({ '@id': `${pod.base}${victimPath}`, keep: 'ME' }), 'utf8'));
+    const updateAttempt = await callTool('put_typed_resource', {
+      path: victimPath,
+      content: 'updated by attacker',
+      contentType: 'text/plain',
+      describedby: shapeUrl,
+    }, attackerCtx(pod));
+    assert.equal(updateAttempt.isError, false, `put_typed_resource must allow updating an existing .meta with only Write: ${JSON.stringify(updateAttempt)}`);
+    const meta = JSON.parse((await storage.read(metaPath)).toString('utf8'));
+    assert.equal(meta.keep, 'ME', 'prior .meta keys survive the merge');
+    assert.equal(meta.describedby, shapeUrl, 'describedby is declared on the allowed update');
+  });
 });
 
 describe('applyLwsWrite sidecar guard', () => {

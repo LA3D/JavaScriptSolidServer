@@ -24,6 +24,7 @@ import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { wac, buildUrl, parentPath } from './wac.js';
 import { sidecarSubject } from '../utils/url.js';
+import { AUX_SUFFIX } from '../storage/filesystem.js';
 import { sanitizeTypes, sanitizeField, sanitizeReps } from './sanitize.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
@@ -59,7 +60,24 @@ async function write_resource({ path, content, contentType, types }, ctx) {
   // downstream by the write-consistency gate inside applyLwsWrite (same as
   // the HTTP write branch, which is `.meta`-only). --lws-gated to keep the
   // --lws-off path byte-identical.
-  const authPath = (ctx.lwsEnabled && path.endsWith('.meta')) ? sidecarSubject(path).subject : path;
+  // Sidecar authz (2026-07-21). The pre-existing I1 rule bound `.meta` to its SUBJECT at
+  // WRITE; `.acl` was absent from that analysis, so a container-Write agent could write any
+  // sibling's ACL — wac() falls back to the parent for non-existent targets, and
+  // findApplicableAcl walks up to the container default for existing ones. Both routes now
+  // require CONTROL on the subject, matching write_acl (tools.js:199). This is a per-surface
+  // guard (defense in depth) — applyLwsWrite's own choke-point guard (src/lws/write.js)
+  // refuses the write regardless, but stating the property here means a reader auditing this
+  // tool sees the rule without having to trace into the shared write pipeline.
+  const sc = ctx.lwsEnabled ? sidecarSubject(path) : null;
+  const isAcl = /\.acl$/.test(path);
+  const isMeta = /\.meta$/.test(path);
+  if (isAcl || (isMeta && !(await storage.exists(path)))) {
+    const subj = sc ? sc.subject : path.replace(/\.(acl|meta)$/, '');
+    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+      return toolError(`access denied: control ${subj} (required to write ${path})`);
+    }
+  }
+  const authPath = (ctx.lwsEnabled && isMeta) ? sidecarSubject(path).subject : path;
   if (!(await wac(ctx, authPath, AccessMode.WRITE))) {
     return toolError(`access denied: write ${path}`);
   }
@@ -94,6 +112,18 @@ async function create_resource({ container, slug, content, contentType, isContai
   const name = await storage.generateUniqueFilename(container, slug || null, !!isContainer,
     (!isContainer && ctx.lwsEnabled) ? extensionForRdfType(contentType || 'text/plain') : '');
   const childPath = `${container}${name}${isContainer ? '/' : ''}`;
+  // Sidecar authz (2026-07-21). A Slug/slug resolving to a sidecar must clear CONTROL on the
+  // protected subject — the container Append check above is not sufficient (this is upstream
+  // b9b38ed's class, reached through the MCP tool argument, which unlike the HTTP Slug has no
+  // character constraint). Per-surface guard mirroring write_acl/write_resource; applyLwsWrite
+  // refuses regardless, but stating it here keeps the property visible at this surface too.
+  if (AUX_SUFFIX.test(childPath)) {
+    const sc2 = sidecarSubject(childPath);
+    const subj = sc2 ? sc2.subject : childPath.replace(AUX_SUFFIX, '');
+    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+      return toolError(`access denied: control ${subj} (required to create ${childPath})`);
+    }
+  }
   if (isContainer) {
     await storage.createContainer(childPath);
     emitChange(buildUrl(ctx, childPath));
@@ -373,16 +403,31 @@ async function put_typed_resource({ path, content, contentType, types, described
   // describedby in (so admission validates against it), then roll the .meta
   // back if the write is rejected — a rejected write must leave no durable
   // side effect and must not clobber pre-existing metadata (review #1).
+  //
+  // Sidecar authz (2026-07-21): this .meta write now routes through
+  // applyLwsWrite instead of a direct storage.write. A direct write bypassed
+  // the sidecar-authz choke point (Task 6) entirely: it was gated only by
+  // `wac(ctx, metaPath, WRITE)`, which falls back to the PARENT CONTAINER for
+  // a non-existent target — so container-Write alone could CREATE a `.meta`
+  // for a sibling this agent doesn't own, on this MCP surface, even after the
+  // choke point landed. applyLwsWrite's own sidecar guard decides
+  // CONTROL-to-create vs WRITE-to-update, same policy as every other sidecar
+  // write and the same one enforcement path the choke point exists to be.
   const metaPath = path + '.meta';
   let metaSnapshot;   // undefined = not touched; null = didn't exist; Buffer = prior bytes
   if (describedby) {
-    if (!(await wac(ctx, metaPath, AccessMode.WRITE))) {
-      return toolError(`access denied: write ${metaPath} (needed to declare describedby)`);
-    }
     metaSnapshot = (await storage.exists(metaPath)) ? await storage.read(metaPath) : null;
-    await storage.write(metaPath, Buffer.from(JSON.stringify(mergeDescribedby(metaSnapshot, buildUrl(ctx, path), describedby)), 'utf8'), {
-      contentType: 'application/ld+json',
+    const metaWrite = await applyLwsWrite({
+      storage, storagePath: metaPath, resourceUrl: buildUrl(ctx, metaPath),
+      content: Buffer.from(JSON.stringify(mergeDescribedby(metaSnapshot, buildUrl(ctx, path), describedby)), 'utf8'),
+      contentType: 'application/ld+json', declaredTypes: [], lwsEnabled: ctx.lwsEnabled,
+      agentWebId: ctx.webId ?? null,
     });
+    if (!metaWrite.ok) {
+      return metaWrite.problem
+        ? toolError(metaWrite.problem.detail)
+        : admissionError(metaPath, { violations: metaWrite.violations, shapeUrl: metaWrite.shapeUrl });
+    }
   }
 
   const w = await applyLwsWrite({
