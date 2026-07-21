@@ -4,6 +4,12 @@ import { writeTypeConsistency } from './write-consistency.js';
 import { subjectTypesFromBody } from './subject-types.js';
 import { conformsToTargets } from './constraint.js';
 import { AUX_SUFFIX } from '../storage/filesystem.js';
+import { checkAccess as defaultCheckAccess } from '../wac/checker.js';
+import { AccessMode } from '../wac/parser.js';
+
+function refuse(instance, detail) {
+  return { ok: false, problem: { status: 403, title: 'Sidecar write requires authorization', detail, instance } };
+}
 
 /**
  * Shared LWS write pipeline: name/type gate → SHACL admission → storage.write
@@ -14,7 +20,43 @@ import { AUX_SUFFIX } from '../storage/filesystem.js';
  */
 export async function applyLwsWrite({
   storage, storagePath, resourceUrl, content, contentType, declaredTypes = [], lwsEnabled,
+  agentWebId = null, internal = false, checkAccessFn = defaultCheckAccess,
 }) {
+  // SIDECAR AUTHZ GUARD (2026-07-21). Every write surface funnels through here, which is why
+  // it is the right place: three separate surfaces (HTTP POST+Slug, MCP create_resource, MCP
+  // write_resource) each reached storage.write for an `.acl` with only container Append/Write.
+  // Deliberately NOT --lws-gated: an auth check that only fires under --lws is worthless, and
+  // upstream's own b9b38ed is unconditional. Fails closed — no WebID and not internal = deny.
+  if (AUX_SUFFIX.test(storagePath) && !internal) {
+    // sidecarSubject() (src/utils/url.js) only covers .meta/.lwstypes/.lwsprov
+    // (SIDECAR_SUFFIX) — .acl is deliberately excluded there because its
+    // authorization has always been resolved separately (see
+    // authorizeAclAccess in src/auth/middleware.js, which strips `.acl` by
+    // hand). AUX_SUFFIX covers all four suffixes, so resolve the subject
+    // directly here rather than calling sidecarSubject on a path it doesn't
+    // recognize (it would return null for every `.acl`).
+    const subject = storagePath.replace(AUX_SUFFIX, '');
+    const sc = subject === storagePath ? null : { subject, isContainer: subject.endsWith('/') };
+    if (!sc) return refuse(resourceUrl, 'sidecar subject could not be resolved');
+    // .acl always needs Control. .meta needs Control to CREATE (the escalation: wac() falls
+    // back to the parent container for non-existent targets) but only Write to UPDATE a
+    // subject whose ACL you already satisfy. `.lwstypes`/`.lwsprov` are refused downstream
+    // by writeTypeConsistency (405, System-Managed) and never reach a mode decision here.
+    const isMeta = /\.meta$/.test(storagePath);
+    const exists = await storage.exists(storagePath);
+    const mode = (!isMeta || !exists) ? AccessMode.CONTROL : AccessMode.WRITE;
+    if (!agentWebId) return refuse(resourceUrl, `${mode} required on ${sc.subject} (no authenticated agent)`);
+    const subjectUrl = resourceUrl.replace(/\.(acl|meta|lwstypes|lwsprov)$/, '');
+    const { allowed } = await checkAccessFn({
+      resourceUrl: subjectUrl,
+      resourcePath: sc.subject,
+      isContainer: sc.isContainer,
+      agentWebId,
+      requiredMode: mode,
+    });
+    if (!allowed) return refuse(resourceUrl, `${mode} required on ${sc.subject}`);
+  }
+
   // #2 (review 2026-07-12): the gate runs at THE choke point every write
   // surface shares (HTTP PUT/POST + all MCP write tools) — no surface can
   // store a name/type lie or an admission-skipped body at an RDF name.

@@ -70,7 +70,8 @@ async function write_resource({ path, content, contentType, types }, ctx) {
     content: Buffer.from(content, 'utf8'),
     contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [],
-    lwsEnabled: ctx.lwsEnabled
+    lwsEnabled: ctx.lwsEnabled,
+    agentWebId: ctx.webId ?? null,
   });
   if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${path}`);
@@ -105,7 +106,8 @@ async function create_resource({ container, slug, content, contentType, isContai
     content: Buffer.from(content || '', 'utf8'),
     contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [],
-    lwsEnabled: ctx.lwsEnabled
+    lwsEnabled: ctx.lwsEnabled,
+    agentWebId: ctx.webId ?? null,
   });
   if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(childPath, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${childPath}`);
@@ -387,6 +389,7 @@ async function put_typed_resource({ path, content, contentType, types, described
     storage, storagePath: path, resourceUrl: buildUrl(ctx, path),
     content: Buffer.from(content, 'utf8'), contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [], lwsEnabled: ctx.lwsEnabled,
+    agentWebId: ctx.webId ?? null,
   });
   if (!w.ok || !w.wrote) {
     if (metaSnapshot !== undefined) {                       // roll the .meta back

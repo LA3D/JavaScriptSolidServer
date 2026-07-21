@@ -27,6 +27,19 @@ import { createToken } from '../src/auth/token.js';
 // against a correctly patched server. storage.exists() is the only reliable
 // "no sidecar" oracle.
 import * as storage from '../src/storage/filesystem.js';
+import { applyLwsWrite } from '../src/lws/write.js';
+
+// Fake storage: records writes, reports nothing pre-existing.
+function fakeStorage() {
+  const writes = [];
+  return {
+    writes,
+    exists: async () => false,
+    read: async () => null,
+    write: async (p, c) => { writes.push([p, c]); return true; },
+    remove: async () => true,
+  };
+}
 
 const ATTACKER = 'http://attacker.example/profile/card#me';
 
@@ -114,5 +127,70 @@ describe('sidecar privilege escalation', () => {
       `POST Slug: victim.acl must be refused, got ${res.status}`);
     const sidecarExists = await storage.exists(`${container}victim.acl`);
     assert.equal(sidecarExists, false, 'no .acl sidecar may exist after a refused POST');
+  });
+});
+
+describe('applyLwsWrite sidecar guard', () => {
+  test('refuses an .acl write when the caller lacks Control and never touches storage', async () => {
+    const storage = fakeStorage();
+    const r = await applyLwsWrite({
+      storage,
+      storagePath: '/foo/victim.acl',
+      resourceUrl: 'http://localhost/foo/victim.acl',
+      content: Buffer.from('{}', 'utf8'),
+      contentType: 'application/ld+json',
+      lwsEnabled: true,
+      agentWebId: 'http://localhost/attacker/profile/card#me',
+      checkAccessFn: async () => ({ allowed: false }),
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.problem.status, 403);
+    assert.equal(storage.writes.length, 0, 'storage.write must not be reached');
+  });
+
+  test('fails closed when no agentWebId is supplied and internal is not set', async () => {
+    const storage = fakeStorage();
+    const r = await applyLwsWrite({
+      storage,
+      storagePath: '/foo/victim.acl',
+      resourceUrl: 'http://localhost/foo/victim.acl',
+      content: Buffer.from('{}', 'utf8'),
+      contentType: 'application/ld+json',
+      lwsEnabled: true,
+      checkAccessFn: async () => ({ allowed: true }),
+    });
+    assert.equal(r.ok, false);
+    assert.equal(storage.writes.length, 0);
+  });
+
+  test('allows an .acl write when the caller holds Control', async () => {
+    const storage = fakeStorage();
+    const r = await applyLwsWrite({
+      storage,
+      storagePath: '/foo/victim.acl',
+      resourceUrl: 'http://localhost/foo/victim.acl',
+      content: Buffer.from('{}', 'utf8'),
+      contentType: 'application/ld+json',
+      lwsEnabled: true,
+      agentWebId: 'http://localhost/owner/profile/card#me',
+      checkAccessFn: async () => ({ allowed: true }),
+    });
+    assert.equal(r.ok, true);
+    assert.equal(storage.writes.length, 1);
+  });
+
+  test('non-sidecar writes are unaffected and need no webid', async () => {
+    const storage = fakeStorage();
+    const r = await applyLwsWrite({
+      storage,
+      storagePath: '/foo/note.jsonld',
+      resourceUrl: 'http://localhost/foo/note.jsonld',
+      content: Buffer.from('{}', 'utf8'),
+      contentType: 'application/ld+json',
+      lwsEnabled: false,
+      checkAccessFn: async () => { throw new Error('must not be called'); },
+    });
+    assert.equal(r.ok, true);
+    assert.equal(storage.writes.length, 1);
   });
 });
