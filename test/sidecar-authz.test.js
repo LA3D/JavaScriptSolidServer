@@ -28,6 +28,7 @@ import { createToken } from '../src/auth/token.js';
 // "no sidecar" oracle.
 import * as storage from '../src/storage/filesystem.js';
 import { applyLwsWrite } from '../src/lws/write.js';
+import { auxSubject, canonicalPodPath, urlToPath } from '../src/utils/url.js';
 
 // Fake storage: records writes, reports nothing pre-existing.
 function fakeStorage() {
@@ -443,5 +444,164 @@ describe('applyLwsWrite sidecar guard', () => {
     });
     assert.equal(r.ok, true);
     assert.equal(storage.writes.length, 1);
+  });
+});
+
+/**
+ * Task 7a round 3 (2026-07-21) — the SUBJECT-side twin of the sidecar hole.
+ *
+ * The three rounds above bound *sidecar* writes to their subject. The non-aux
+ * `else` branches still handed the RAW tool argument to `wac()` while the
+ * storage call decoded/collapsed it (`urlToPath`), so `victim%2F`, `victim/`,
+ * `victim//`, `victim/.` and friends were AUTHORIZED as some other resource
+ * (findApplicableAcl found no `<raw>.acl` and walked up to the container
+ * default) and ACTED on the real `/inbox/victim` — never consulting the
+ * victim's own `.acl`. Attacker holds only container Append/Write.
+ *
+ * Each case asserts refusal AND that the victim is untouched: `storage.exists`
+ * plus a byte comparison. An error return after a completed write/delete would
+ * pass a naive `isError` assertion, and an HTTP status probe cannot observe the
+ * filesystem at all (see the storage.exists note at the top of this file).
+ */
+describe('MCP subject-path normalization (non-sidecar targets)', () => {
+  // Every shape that `urlToPath` collapses back onto `/inbox/victim`.
+  const TRICKS = ['%2F', '/', '//', '/.', '/./', '%2F%2E'];
+
+  async function seedVictim(t) {
+    const pod = await startLwsPod(t);
+    const c = `/${pod.podName}/inbox/`;
+    await putFile(pod, `${c}seed.txt`, 'seed');
+    await putFile(pod, `${c}victim`, VICTIM_BODY);
+    await putFile(pod, `${c}.acl`, appendOnlyAcl(pod.base, c));
+    const v = `${c}victim`;
+    await putFile(pod, `${v}.acl`, ownerOnlyAcl(pod.base, v, pod.webId));
+    return { pod, c, v };
+  }
+  const VICTIM_BODY = 'victim resource';
+  const attackerCtx = (pod) => ({
+    webId: ATTACKER, origin: pod.base, federationDepth: 0, lwsEnabled: true,
+  });
+  async function assertIntact(v, label) {
+    assert.equal(await storage.exists(v), true, `${label}: victim was deleted`);
+    assert.equal((await storage.read(v))?.toString('utf8'), VICTIM_BODY,
+      `${label}: victim bytes were overwritten`);
+  }
+
+  for (const trick of TRICKS) {
+    test(`write_resource cannot reach a protected resource via '${trick}'`, async (t) => {
+      const { pod, v } = await seedVictim(t);
+      const r = await callTool('write_resource',
+        { path: `${v}${trick}`, content: 'pwned', contentType: 'text/plain' }, attackerCtx(pod));
+      assert.equal(r.isError, true, `write_resource ${trick} was allowed`);
+      await assertIntact(v, `write_resource ${trick}`);
+    });
+
+    test(`put_typed_resource cannot reach a protected resource via '${trick}'`, async (t) => {
+      const { pod, v } = await seedVictim(t);
+      const r = await callTool('put_typed_resource',
+        { path: `${v}${trick}`, content: 'pwned', contentType: 'text/plain' }, attackerCtx(pod));
+      assert.equal(r.isError, true, `put_typed_resource ${trick} was allowed`);
+      await assertIntact(v, `put_typed_resource ${trick}`);
+    });
+
+    test(`delete_resource cannot reach a protected resource via '${trick}'`, async (t) => {
+      const { pod, v } = await seedVictim(t);
+      const r = await callTool('delete_resource', { path: `${v}${trick}` }, attackerCtx(pod));
+      assert.equal(r.isError, true, `delete_resource ${trick} was allowed`);
+      await assertIntact(v, `delete_resource ${trick}`);
+    });
+  }
+
+  // The plain forms must still be denied (baseline: the guard isn't only
+  // triggered by the encodings).
+  test('plain path is denied and the victim survives', async (t) => {
+    const { pod, v } = await seedVictim(t);
+    assert.equal((await callTool('write_resource',
+      { path: v, content: 'pwned', contentType: 'text/plain' }, attackerCtx(pod))).isError, true);
+    assert.equal((await callTool('delete_resource', { path: v }, attackerCtx(pod))).isError, true);
+    await assertIntact(v, 'plain');
+  });
+
+  // End-to-end: the attacker cannot reach the victim's bytes by any of these
+  // shapes on the read surface either (wac() now normalizes for every caller).
+  test('attacker cannot READ the victim through a normalized alias', async (t) => {
+    const { pod, v } = await seedVictim(t);
+    for (const trick of ['', ...TRICKS]) {
+      const r = await callTool('describe_resource', { path: `${v}${trick}` }, attackerCtx(pod));
+      const text = JSON.stringify(r);
+      assert.ok(!text.includes(VICTIM_BODY),
+        `describe_resource '${trick}' leaked the victim body`);
+    }
+  });
+
+  // Encoding differential kept permanently: the classifier's view of the final
+  // path component must never disagree with what urlToPath actually resolves,
+  // and must never say "not a sidecar" for a path that lands on a real one.
+  test('canonicalPodPath/auxSubject never disagree with urlToPath', () => {
+    const root = urlToPath('/');
+    const cases = [
+      'victim.acl', 'victim.acl/', 'victim.acl//', 'victim.acl%2F', 'victim.acl%2f',
+      'victim.acl%252F', 'victim.acl/./', 'victim.acl/.', 'victim.acl/..', 'victim.acl%00',
+      'victim%2Eacl', 'victim%2eacl', 'victim.acl%20', 'victim.acl.', 'victim.acl..',
+      'victim.acl%2F%2E%2E', 'victim%252Eacl', 'victim.acl%2F%2E', 'victim.acl/%2E',
+      './victim.acl', 'a/../victim.acl', 'victim.acl%2523', 'victim.acl%25',
+      'victim', 'victim/', 'victim%2F', 'victim//', 'victim/.', 'victim/./', 'victim%2F%2E',
+    ];
+    const bad = [];
+    for (const c of cases) {
+      const p = `/pod/inbox/${c}`;
+      let resolvedBase;
+      try { resolvedBase = urlToPath(p).slice(root.length).replace(/^\/+/, '').split('/').pop(); }
+      catch { continue; }                          // traversal throw: not a divergence
+      const canonical = canonicalPodPath(p);
+      // What the canonical form resolves to must be the SAME filesystem node.
+      let canonBase;
+      try { canonBase = urlToPath(canonical).slice(root.length).replace(/^\/+/, '').split('/').pop(); }
+      catch { canonBase = '<throw>'; }
+      const aux = auxSubject(p);
+      const landsOnSidecar = /\.(acl|meta|lwstypes|lwsprov)$/.test(resolvedBase);
+      if (canonBase !== resolvedBase || (landsOnSidecar && !aux)) {
+        bad.push({ c, canonBase, resolvedBase, kind: aux?.kind ?? null });
+      }
+    }
+    assert.deepEqual(bad, [], `classifier/resolver divergence: ${JSON.stringify(bad, null, 2)}`);
+  });
+});
+
+/**
+ * Task 7a round 3, second instance of the same class: `create_resource`.
+ *
+ * The tool authorizes APPEND on `container` and acts on `container + slug`.
+ * `generateUniqueFilename` strips `/`, `\` and `..` from a slug but NOT
+ * percent-escapes, so `priv%2Fpwn.txt` survived sanitation and `urlToPath`
+ * decoded it into `<container>/priv/pwn.txt` — a DESCENT into a sibling
+ * sub-container whose own restrictive `.acl` was never consulted. Verified
+ * exploitable against the pre-fix tree.
+ */
+describe('MCP create_resource slug containment', () => {
+  test('a slug must not descend into a protected sub-container', async (t) => {
+    const pod = await startLwsPod(t);
+    const c = `/${pod.podName}/inbox/`;
+    await putFile(pod, `${c}seed.txt`, 'seed');
+    await putFile(pod, `${c}priv/keep.txt`, 'keep');
+    await putFile(pod, `${c}.acl`, appendOnlyAcl(pod.base, c));
+    await putFile(pod, `${c}priv/.acl`, ownerOnlyAcl(pod.base, `${c}priv/`, pod.webId));
+    const atk = { webId: ATTACKER, origin: pod.base, federationDepth: 0, lwsEnabled: true };
+
+    for (const slug of ['priv%2Fpwn.txt', 'priv%2fpwn.txt', 'priv%2F%2E%2Fpwn.txt']) {
+      const r = await callTool('create_resource',
+        { container: c, slug, content: 'pwned', contentType: 'text/plain' }, atk);
+      assert.equal(r.isError, true, `slug '${slug}' was allowed`);
+      assert.equal(await storage.exists(`${c}priv/pwn.txt`), false,
+        `slug '${slug}' created a resource inside the protected sub-container`);
+    }
+
+    // Not over-tightened: an ordinary slug, and a child container, still work.
+    assert.notEqual((await callTool('create_resource',
+      { container: c, slug: 'normal.txt', content: 'y', contentType: 'text/plain' }, atk)).isError,
+      true, 'ordinary slug was refused');
+    assert.notEqual((await callTool('create_resource',
+      { container: c, slug: 'sub', isContainer: true }, atk)).isError,
+      true, 'ordinary child container was refused');
   });
 });

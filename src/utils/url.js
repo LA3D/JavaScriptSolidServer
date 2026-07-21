@@ -203,6 +203,64 @@ export function sidecarSubject(urlPath) {
 export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov)$/;
 
 /**
+ * THE path boundary for the MCP surface. Collapse a client-supplied path to the
+ * canonical form that names the SAME filesystem node `urlToPath` will resolve —
+ * while staying in URL space, so the result can be handed straight back to
+ * `storage.*` (which decodes exactly once) and to WAC without changing meaning.
+ *
+ * Task 7a round 3 (2026-07-21). Round 2 fixed *sidecar* classification; the
+ * non-aux branches still passed the RAW tool argument to `wac()` and the
+ * collapsed one to storage. `wac(ctx, '/inbox/victim%2F', WRITE)` asks
+ * findApplicableAcl for `/inbox/victim%2F.acl`, finds nothing, walks UP to the
+ * container default and GRANTS — then `storage.write` decodes to the real
+ * `/inbox/victim`, whose own owner-only `.acl` was never consulted. Same for
+ * `victim/`, `victim//`, `victim/.`, `victim/./`, `victim%2F%2E`, on both
+ * `write_resource`/`put_typed_resource` and `delete_resource`. HTTP was never
+ * vulnerable; this was an MCP-only divergence.
+ *
+ * Rules, mirroring `urlToPath` exactly:
+ *  - `%2F`/`%2E` (either case) become separator/dot — these are the ONLY two
+ *    escapes that change path STRUCTURE. Everything else is left encoded, so a
+ *    single later `decodeURIComponent` in the storage layer still round-trips
+ *    (a blanket decode here would double-decode `%2525` and reintroduce the
+ *    very guard/operation divergence this function exists to remove).
+ *  - `..` character sequences deleted in a loop (the `....//` bypass).
+ *  - empty and `.` segments dropped, repeated separators collapsed.
+ *  - a trailing separator is PRESERVED as the container marker; whether it
+ *    survives is decided by `resolvePath` in src/mcp/wac.js, which consults
+ *    storage — a trailing slash on a path that is a FILE is exactly the
+ *    attack, and must not be allowed to reclassify it as a container.
+ *
+ * `%252F` stays `%252F` here and decodes to a literal `%2F` in a filename —
+ * correct, since that is what storage will do too.
+ * @param {string} urlPath
+ * @returns {string} rooted path, trailing '/' iff the input named a container
+ */
+export function canonicalPodPath(urlPath) {
+  let s = String(urlPath ?? '');
+  if (s === '') return '/';
+  // Structure-bearing escapes only (see above). Case-insensitive, matching
+  // decodeURIComponent.
+  s = s.replace(/%2f/gi, '/').replace(/%2e/gi, '.');
+  let previous;
+  do {
+    previous = s;
+    s = s.replace(/\.\./g, '');
+  } while (s !== previous);
+  // Container marker: strip trailing separators and `.` segments, and remember
+  // whether anything was there. `a/./` and `a/.` are container-shaped too.
+  let t = s;
+  do {
+    previous = t;
+    t = t.replace(/\/+$/, '').replace(/\/\.$/, '');
+  } while (t !== previous);
+  const hadTrailing = t !== s;
+  const segs = s.split('/').filter(seg => seg !== '' && seg !== '.');
+  if (segs.length === 0) return '/';
+  return '/' + segs.join('/') + (hadTrailing ? '/' : '');
+}
+
+/**
  * Normalize a URL path with EXACTLY the rules `urlToPath` applies before the
  * storage layer touches disk, so that a classifier running on the result is
  * looking at the same resource the operation will act on.
