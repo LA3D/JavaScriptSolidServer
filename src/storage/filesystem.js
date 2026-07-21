@@ -1,11 +1,15 @@
 import fs from 'fs-extra';
 import path from 'path';
 import crypto from 'crypto';
-import { getDataRoot, urlToPath, isContainer } from '../utils/url.js';
+import { getDataRoot, urlToPath, isContainer, AUX_SUFFIX_RE } from '../utils/url.js';
 
 // Note: Data directory is ensured in server.js after DATA_ROOT is set
 
-export const AUX_SUFFIX = /\.(acl|meta|lwstypes|lwsprov)$/;
+// Re-export of the canonical suffix regex, which lives in utils/url.js next to
+// the path normalization it has to agree with (Task 7a round 2). Kept under the
+// original name so existing importers are untouched; there is now exactly one
+// definition, so the classifier and the storage-side skip list cannot drift.
+export const AUX_SUFFIX = AUX_SUFFIX_RE;
 
 /**
  * Check if resource exists
@@ -214,6 +218,13 @@ export async function generateUniqueFilename(containerPath, slug, isDir = false,
   const basePath = urlToPath(containerPath);
   let name = slug || (crypto.randomUUID() + (isDir ? '' : defaultExt));
 
+  // NOTE (Task 7a round 2): this sanitation is deliberately NOT percent-decoding.
+  // A slug like `victim.acl%2F` survives it and is decoded later by urlToPath —
+  // that gap is closed at the authorization layer instead, by create_resource
+  // classifying the resulting child path through auxSubject() (src/utils/url.js),
+  // which applies the same one-pass decode urlToPath does. Decoding here would
+  // silently rename the request to `victim.acl-` and CREATE it, where the
+  // security requirement is an explicit refusal.
   // Security: Remove any path traversal attempts and problematic characters
   name = name.replace(/[/\\]/g, '-');
   name = name.replace(/\.\./g, ''); // Remove .. sequences

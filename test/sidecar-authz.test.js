@@ -277,6 +277,110 @@ describe('sidecar privilege escalation', () => {
   });
 });
 
+// Task 7a round 2 (adversarial review 2026-07-21): the round-1 fix classified sidecars off the
+// RAW MCP tool argument, but urlToPath (src/utils/url.js) decodes percent-escapes and collapses
+// `/`, `.`, `..` AFTERWARDS, before the storage layer touches disk. `$`-anchored suffix tests
+// therefore never matched `victim.acl/`, `victim.acl//`, `victim.acl%2F` or `victim.acl/./` —
+// control fell through to the generic branch, wac() resolved the trailing-slash path to the
+// container default, and the original hole was wide open. The guard and the operation disagreed
+// about which path was being acted on. Classification now runs on the SAME normalized path the
+// storage layer resolves (auxSubject in src/utils/url.js), shared by all four surfaces.
+//
+// storage.exists() is the oracle throughout: it normalizes identically, so `victim.acl%2F`
+// and `victim.acl` are the same question, and an HTTP status probe cannot observe sidecar
+// existence (WAC returns 401/403 either way — see the header comment on this file).
+describe('sidecar path-normalization bypasses', () => {
+  for (const variant of ['/', '//', '%2F', '/./', '/.']) {
+    test(`MCP delete_resource refuses a sibling .acl addressed as "victim.acl${variant}"`, async (t) => {
+      const pod = await startLwsPod(t);
+      const container = await seedInbox(pod);
+      const victimPath = `${container}victim`;
+      const victimAclPath = `${victimPath}.acl`;
+      await putFile(pod, victimAclPath, ownerOnlyAcl(pod.base, victimPath, pod.webId));
+
+      // Precondition: the owner-only .acl actually blocks the attacker's direct write.
+      const blockedWrite = await callTool('write_resource', {
+        path: victimPath, content: 'pwned', contentType: 'text/plain',
+      }, attackerCtx(pod));
+      assert.equal(blockedWrite.isError, true, 'precondition: attacker must be blocked while victim.acl stands');
+
+      const delRes = await callTool('delete_resource', { path: victimAclPath + variant }, attackerCtx(pod));
+      assert.equal(delRes.isError, true,
+        `delete_resource must refuse "victim.acl${variant}" without Control on the subject`);
+      assert.equal(await storage.exists(victimAclPath), true,
+        `the victim .acl must still exist after a refused "victim.acl${variant}" delete`);
+
+      // The actual escalation: the attacker must still be unable to write the protected
+      // resource. An error return that nevertheless removed the ACL would pass the assertions
+      // above and fail here.
+      const writeAfter = await callTool('write_resource', {
+        path: victimPath, content: 'pwned', contentType: 'text/plain',
+      }, attackerCtx(pod));
+      assert.equal(writeAfter.isError, true,
+        'attacker must still be unable to write victim after the refused delete');
+    });
+  }
+
+  test('MCP delete_resource refuses a sibling .meta addressed with a trailing slash', async (t) => {
+    const pod = await startLwsPod(t);
+    const container = await seedInbox(pod);
+    const victimPath = `${container}victim`;
+    // Owner-only ACL on the subject: the attacker holds container Write but not Write on
+    // `victim`, and `.meta` DELETE binds WRITE-on-subject (getRequiredMode('DELETE')).
+    await putFile(pod, `${victimPath}.acl`, ownerOnlyAcl(pod.base, victimPath, pod.webId));
+    await putFile(pod, `${victimPath}.meta`, JSON.stringify({ '@id': `${pod.base}${victimPath}` }));
+
+    const res = await callTool('delete_resource', { path: `${victimPath}.meta/` }, attackerCtx(pod));
+    assert.equal(res.isError, true, 'delete_resource must refuse "victim.meta/" without Write on the subject');
+    assert.equal(await storage.exists(`${victimPath}.meta`), true,
+      'the victim .meta must still exist after a refused delete');
+  });
+
+  test('MCP delete_resource refuses a System-Managed .lwstypes addressed with a trailing slash', async (t) => {
+    const pod = await startLwsPod(t);
+    const container = await seedInbox(pod);
+    const typesPath = `${container}seed.txt.lwstypes`;
+    await putFile(pod, typesPath, JSON.stringify({ types: ['http://example.org/T'] }));
+
+    // Even the OWNER cannot delete a System-Managed sidecar (405-equivalent, read-only to
+    // clients) — so if the slashed form succeeds it is a pure classification failure, not a
+    // WAC outcome.
+    const owner = { ...ownerCtx(pod), lwsEnabled: true };
+    const plain = await callTool('delete_resource', { path: typesPath }, owner);
+    assert.equal(plain.isError, true, 'baseline: .lwstypes is read-only to clients');
+
+    const slashed = await callTool('delete_resource', { path: `${typesPath}/` }, owner);
+    assert.equal(slashed.isError, true, 'delete_resource must refuse ".lwstypes/" too');
+    assert.equal(await storage.exists(typesPath), true, 'the .lwstypes sidecar must still exist');
+
+    const byAttacker = await callTool('delete_resource', { path: `${typesPath}/` }, attackerCtx(pod));
+    assert.equal(byAttacker.isError, true, 'an Append/Write-only agent must not delete ".lwstypes/" either');
+    assert.equal(await storage.exists(typesPath), true, 'the .lwstypes sidecar must still exist');
+  });
+
+  test('MCP create_resource cannot squat a sibling .acl path via a percent-encoded slug', async (t) => {
+    const pod = await startLwsPod(t);
+    const container = await seedInbox(pod);
+
+    // generateUniqueFilename strips literal `/`, `\` and `..` — but a percent-escape survives
+    // it and is decoded later by urlToPath, so `victim.acl%2F` landed a DIRECTORY at the
+    // victim's `.acl` path, denying the owner the ability to ever govern that sibling.
+    for (const isContainer of [true, false]) {
+      const res = await callTool('create_resource', {
+        container, slug: 'victim.acl%2F', isContainer,
+        content: selfGrantingAcl(pod.base, `${container}victim`),
+        contentType: 'application/ld+json',
+      }, attackerCtx(pod));
+      assert.equal(res.isError, true,
+        `create_resource must refuse slug "victim.acl%2F" (isContainer=${isContainer})`);
+      assert.equal(await storage.exists(`${container}victim.acl`), false,
+        'nothing may exist at the victim .acl path after a refused create');
+      assert.equal(await storage.exists(`${container}victim.acl%2F`), false,
+        'nothing may exist at the encoded .acl path after a refused create');
+    }
+  });
+});
+
 describe('applyLwsWrite sidecar guard', () => {
   test('refuses an .acl write when the caller lacks Control and never touches storage', async () => {
     const storage = fakeStorage();

@@ -194,6 +194,79 @@ export function sidecarSubject(urlPath) {
 }
 
 /**
+ * Every auxiliary sidecar suffix, including `.acl`. Canonical home is here (not
+ * storage/filesystem.js) because url.js is the layer that owns path
+ * normalization and filesystem.js already imports from here — the reverse
+ * import would be circular. `src/storage/filesystem.js` re-exports it as
+ * `AUX_SUFFIX` for its existing callers.
+ */
+export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov)$/;
+
+/**
+ * Normalize a URL path with EXACTLY the rules `urlToPath` applies before the
+ * storage layer touches disk, so that a classifier running on the result is
+ * looking at the same resource the operation will act on.
+ *
+ * urlToPath does: decodeURIComponent (once) → delete `..` character sequences
+ * (looped, for the `....//` bypass) → path.resolve, which collapses repeated
+ * separators, drops `.` segments, and drops trailing slashes. This reproduces
+ * all of it in URL space and returns a rooted, slash-normalized path with no
+ * trailing slash (`/` for the root).
+ *
+ * Task 7a round 2 (2026-07-21): this exists because sidecar classification used
+ * to run on the RAW MCP tool argument while the operation ran on the normalized
+ * one. `$`-anchored suffix tests missed `victim.acl/`, `victim.acl//`,
+ * `victim.acl%2F` and `victim.acl/./`, so an Append-only agent could delete a
+ * sibling's restrictive `.acl` and then write the unprotected resource. The
+ * guard and the operation must never disagree about which path is in play.
+ * @param {string} urlPath
+ * @returns {string}
+ */
+export function normalizeAuxPath(urlPath) {
+  let s = String(urlPath ?? '');
+  // One decode pass, matching urlToPath — `%252F` must stay `%2F`, not become
+  // a separator, or the guard would be stricter than the operation.
+  try { s = decodeURIComponent(s); } catch { /* malformed escape: classify the raw form */ }
+  let previous;
+  do {
+    previous = s;
+    s = s.replace(/\.\./g, '');
+  } while (s !== previous);
+  const segs = s.split('/').filter(seg => seg !== '' && seg !== '.');
+  return '/' + segs.join('/');
+}
+
+/**
+ * THE sidecar classifier. Normalize first (see `normalizeAuxPath`), then decide
+ * whether the path names an auxiliary sidecar and, if so, which SUBJECT its
+ * authorization binds to.
+ *
+ * Shared by all four authorization surfaces so they cannot drift apart again:
+ * `applyLwsWrite` (src/lws/write.js — the write choke point) and the MCP
+ * `write_resource` / `create_resource` / `delete_resource` tools
+ * (src/mcp/tools.js). Each surface keeps its own POLICY (which access mode a
+ * given sidecar kind and operation require); only normalize-and-classify is
+ * centralized here.
+ *
+ * `X.acl` -> { subject:'X', isContainer:false }; a container's own bare
+ * `/foo/.acl` -> { subject:'/foo/', isContainer:true } (trailing slash
+ * preserved, so the governance up-walk still binds the container).
+ * Returns null when the normalized path is not a sidecar.
+ * @param {string} urlPath
+ * @returns {{ path: string, kind: string, subject: string, isContainer: boolean } | null}
+ */
+export function auxSubject(urlPath) {
+  const path = normalizeAuxPath(urlPath);
+  const m = path.match(AUX_SUFFIX_RE);
+  if (!m) return null;
+  const subject = path.replace(AUX_SUFFIX_RE, '');
+  // `/foo/.acl` -> `/foo/`: the replace leaves the separator, which is exactly
+  // the container marker the WAC up-walk needs. `/.acl` at the storage root
+  // leaves '/', already correct.
+  return { path, kind: m[1], subject, isContainer: subject.endsWith('/') };
+}
+
+/**
  * Extract pod name from URL path or request
  *
  * Resolves to one of four shapes, by deployment mode:

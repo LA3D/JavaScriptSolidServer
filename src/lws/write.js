@@ -4,6 +4,7 @@ import { writeTypeConsistency } from './write-consistency.js';
 import { subjectTypesFromBody } from './subject-types.js';
 import { conformsToTargets } from './constraint.js';
 import { AUX_SUFFIX } from '../storage/filesystem.js';
+import { auxSubject, AUX_SUFFIX_RE } from '../utils/url.js';
 import { checkAccess as defaultCheckAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 
@@ -27,26 +28,29 @@ export async function applyLwsWrite({
   // write_resource) each reached storage.write for an `.acl` with only container Append/Write.
   // Deliberately NOT --lws-gated: an auth check that only fires under --lws is worthless, and
   // upstream's own b9b38ed is unconditional. Fails closed — no WebID and not internal = deny.
-  if (AUX_SUFFIX.test(storagePath) && !internal) {
-    // sidecarSubject() (src/utils/url.js) only covers .meta/.lwstypes/.lwsprov
-    // (SIDECAR_SUFFIX) — .acl is deliberately excluded there because its
-    // authorization has always been resolved separately (see
-    // authorizeAclAccess in src/auth/middleware.js, which strips `.acl` by
-    // hand). AUX_SUFFIX covers all four suffixes, so resolve the subject
-    // directly here rather than calling sidecarSubject on a path it doesn't
-    // recognize (it would return null for every `.acl`).
-    const subject = storagePath.replace(AUX_SUFFIX, '');
-    const sc = subject === storagePath ? null : { subject, isContainer: subject.endsWith('/') };
-    if (!sc) return refuse(resourceUrl, 'sidecar subject could not be resolved');
+  // auxSubject() normalizes exactly as urlToPath does before classifying, so a
+  // `victim.acl/` or `victim.acl%2F` argument is seen as the sidecar the storage
+  // layer will actually resolve it to (Task 7a round 2). It covers all four
+  // suffixes including `.acl` — unlike sidecarSubject(), which deliberately
+  // omits `.acl` because HTTP resolves ACL authorization separately
+  // (authorizeAclAccess, src/auth/middleware.js).
+  const sc = internal ? null : auxSubject(storagePath);
+  if (sc) {
     // .acl always needs Control. .meta needs Control to CREATE (the escalation: wac() falls
     // back to the parent container for non-existent targets) but only Write to UPDATE a
     // subject whose ACL you already satisfy. `.lwstypes`/`.lwsprov` are refused downstream
     // by writeTypeConsistency (405, System-Managed) and never reach a mode decision here.
-    const isMeta = /\.meta$/.test(storagePath);
-    const exists = await storage.exists(storagePath);
+    const isMeta = sc.kind === 'meta';
+    const exists = await storage.exists(sc.path);
     const mode = (!isMeta || !exists) ? AccessMode.CONTROL : AccessMode.WRITE;
     if (!agentWebId) return refuse(resourceUrl, `${mode} required on ${sc.subject} (no authenticated agent)`);
-    const subjectUrl = resourceUrl.replace(/\.(acl|meta|lwstypes|lwsprov)$/, '');
+    // The subject URL is rebuilt from the NORMALIZED subject path rather than by
+    // stripping a suffix off resourceUrl — resourceUrl still carries the caller's
+    // un-normalized argument, and the URL and the path must not disagree about
+    // which resource is being authorized.
+    let subjectUrl;
+    try { subjectUrl = new URL(resourceUrl).origin + sc.subject; }
+    catch { subjectUrl = resourceUrl.replace(AUX_SUFFIX_RE, ''); }
     const { allowed } = await checkAccessFn({
       resourceUrl: subjectUrl,
       resourcePath: sc.subject,

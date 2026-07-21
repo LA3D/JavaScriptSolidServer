@@ -23,8 +23,11 @@ import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
 import { wac, buildUrl, parentPath } from './wac.js';
-import { sidecarSubject } from '../utils/url.js';
-import { AUX_SUFFIX } from '../storage/filesystem.js';
+// auxSubject: the single normalize-then-classify helper shared by every
+// authorization surface (this file's write/create/delete tools and
+// applyLwsWrite). See src/utils/url.js for why it must run before any
+// authorization decision.
+import { auxSubject } from '../utils/url.js';
 import { sanitizeTypes, sanitizeField, sanitizeReps } from './sanitize.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
@@ -68,16 +71,21 @@ async function write_resource({ path, content, contentType, types }, ctx) {
   // guard (defense in depth) — applyLwsWrite's own choke-point guard (src/lws/write.js)
   // refuses the write regardless, but stating the property here means a reader auditing this
   // tool sees the rule without having to trace into the shared write pipeline.
-  const sc = ctx.lwsEnabled ? sidecarSubject(path) : null;
-  const isAcl = /\.acl$/.test(path);
-  const isMeta = /\.meta$/.test(path);
-  if (isAcl || (isMeta && !(await storage.exists(path)))) {
-    const subj = sc ? sc.subject : path.replace(/\.(acl|meta)$/, '');
+  // Task 7a round 2 (2026-07-21): classify off auxSubject(), which normalizes the
+  // raw tool argument exactly as urlToPath will before storage resolves it. The
+  // previous `$`-anchored tests on the raw argument disagreed with the operation
+  // for `victim.acl/`, `victim.acl%2F`, `victim.acl/./` and friends. Shared with
+  // create_resource, delete_resource and applyLwsWrite so they cannot drift.
+  const sc = auxSubject(path);
+  const isAcl = sc?.kind === 'acl';
+  const isMeta = sc?.kind === 'meta';
+  if (isAcl || (isMeta && !(await storage.exists(sc.path)))) {
+    const subj = sc.subject;
     if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
       return toolError(`access denied: control ${subj} (required to write ${path})`);
     }
   }
-  const authPath = (ctx.lwsEnabled && isMeta) ? sidecarSubject(path).subject : path;
+  const authPath = (ctx.lwsEnabled && isMeta) ? sc.subject : path;
   if (!(await wac(ctx, authPath, AccessMode.WRITE))) {
     return toolError(`access denied: write ${path}`);
   }
@@ -118,15 +126,17 @@ async function create_resource({ container, slug, content, contentType, isContai
   // character constraint). Per-surface guard mirroring write_acl/write_resource; applyLwsWrite
   // refuses regardless, but stating it here keeps the property visible at this surface too.
   // Task 7a (2026-07-21): `isContainer` appends a trailing slash to childPath before this
-  // check, and AUX_SUFFIX is `$`-anchored, so `victim.acl/` never matched — an Append-only
+  // check, and the suffix test is `$`-anchored, so `victim.acl/` never matched — an Append-only
   // agent could squat a directory at a sibling's `.acl`/`.meta` path, which never reaches
   // applyLwsWrite (the container branch below calls storage.createContainer directly) and so
-  // had no guard at all. Strip a single trailing slash before testing so the container case is
-  // seen through to its un-slashed sidecar name, same as the resource case.
-  const auxCheckPath = childPath.replace(/\/$/, '');
-  if (AUX_SUFFIX.test(auxCheckPath)) {
-    const sc2 = sidecarSubject(auxCheckPath);
-    const subj = sc2 ? sc2.subject : auxCheckPath.replace(AUX_SUFFIX, '');
+  // had no guard at all. Round 2: a literal trailing slash was only half of it —
+  // generateUniqueFilename strips `/`, `\` and `..` but NOT percent-escapes, so a slug of
+  // `victim.acl%2F` survived sanitation and was decoded into the same squat by urlToPath.
+  // auxSubject() applies the full urlToPath normalization before classifying, so both shapes
+  // (and `//`, `/.`, `/./`) resolve to the sidecar they will actually become.
+  const sc2 = auxSubject(childPath);
+  if (sc2) {
+    const subj = sc2.subject;
     if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
       return toolError(`access denied: control ${subj} (required to create ${childPath})`);
     }
@@ -154,7 +164,13 @@ async function create_resource({ container, slug, content, contentType, isContai
 
 async function delete_resource({ path }, ctx) {
   if (!path) return toolError('path required');
-  if (ctx.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(path)) {
+  // Task 7a round 2 (2026-07-21): classify ONCE, off the normalized path the storage
+  // layer will resolve. Every branch below reads from `sc`, so the guard and the
+  // operation can no longer disagree about which resource is being deleted —
+  // `victim.acl/`, `victim.acl//`, `victim.acl%2F`, `victim.acl/./` and `victim.acl/.`
+  // all classify as the sidecar they remove.
+  const sc = auxSubject(path);
+  if (ctx.lwsEnabled && (sc?.kind === 'lwstypes' || sc?.kind === 'lwsprov')) {
     return toolError(`cannot delete ${path}: System-Managed sidecar (read-only to clients)`);
   }
   // Sidecar authz (Task 7a, 2026-07-21). DELETE previously checked WRITE against the
@@ -165,16 +181,15 @@ async function delete_resource({ path }, ctx) {
   // requires CONTROL on the protected SUBJECT for every method including DELETE; `.meta`
   // routes through `authorizeSidecarAccess` with `getRequiredMode('DELETE') === WRITE` on
   // the subject. Both bind to the subject, never to the sidecar's own resolved ACL.
-  const isAcl = /\.acl$/.test(path);
-  const isMeta = ctx.lwsEnabled && /\.meta$/.test(path);
+  const isAcl = sc?.kind === 'acl';
+  const isMeta = ctx.lwsEnabled && sc?.kind === 'meta';
   if (isAcl) {
-    const subj = path.replace(/\.acl$/, '');
+    const subj = sc.subject;
     if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
       return toolError(`access denied: control ${subj} (required to delete ${path})`);
     }
   } else if (isMeta) {
-    const sc = sidecarSubject(path);
-    const subj = sc ? sc.subject : path.replace(/\.meta$/, '');
+    const subj = sc.subject;
     if (!(await wac(ctx, subj, AccessMode.WRITE))) {
       return toolError(`access denied: write ${subj} (required to delete ${path})`);
     }
