@@ -1620,13 +1620,16 @@ export function createServer(options = {}) {
   // fresh pod is already stamped and this is a no-op for it.
   if (lwsEnabled) {
     fastify.addHook('onReady', async () => {
-      const protocol = options.ssl ? 'https' : 'http';
-      const host = options.host === '0.0.0.0' ? 'localhost' : (options.host || 'localhost');
-      const port = options.port || defaults.port;
-      const baseUrl = idpIssuer?.replace(/\/$/, '') || `${protocol}://${host}:${port}`;
-      const { backfillGovernance } = await import('./lws/governance-backfill.js');
-      await backfillGovernance(storage, { idpEnabled, singleUser, singleUserName, baseUrl }, fastify.log)
-        .catch((err) => fastify.log.warn({ err }, '[lws-pod] governance backfill failed — boot continues'));
+      try {
+        const protocol = options.ssl ? 'https' : 'http';
+        const host = options.host === '0.0.0.0' ? 'localhost' : (options.host || 'localhost');
+        const port = options.port || defaults.port;
+        const baseUrl = idpIssuer?.replace(/\/$/, '') || `${protocol}://${host}:${port}`;
+        const { backfillGovernance } = await import('./lws/governance-backfill.js');
+        await backfillGovernance(storage, { idpEnabled, singleUser, singleUserName, baseUrl }, fastify.log);
+      } catch (err) {
+        fastify.log.warn({ err }, '[lws-pod] governance backfill failed — boot continues');
+      }
     });
   }
 

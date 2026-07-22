@@ -80,6 +80,35 @@ describe('governance backfill (boot self-heal)', () => {
     await fs.emptyDir('./data');
   });
 
+  it('heals a legacy mixed-case named pod (case-sensitive-FS regression)', async () => {
+    // Username-index keys are lowercased at account creation (idp/accounts.js)
+    // but the pod DIRECTORY is created from the raw name (handlers/container.js).
+    // The roster must key off account.podName, not the lowercased username.
+    await fs.emptyDir('./data');
+    const a = await boot({ lws: true, idp: true });
+    const res = await fetch(`${a.base}/.pods`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'MixedCase', email: 'mixedcase@example.org', password: 'test-pass-1234' }),
+    });
+    assert.equal(res.status, 201);
+    const { webId } = await res.json();
+    await a.s.close();
+
+    // Simulate the pre-a8e0c47 tree: no marker (but another declared type
+    // that must survive), no owner record.
+    await storage.write(typeStorePath('/MixedCase/'), Buffer.from(JSON.stringify(['https://example.org/Custom'])));
+    await fs.remove('./data/MixedCase/.lwsowner');
+
+    const b = await boot({ lws: true, idp: true });
+    await b.s.close();                                   // onReady ran during listen
+
+    const types = await readDeclaredTypes(storage, '/MixedCase/');
+    assert.ok(types.includes(LWS_STORAGE), 'marker healed');
+    assert.ok(types.includes('https://example.org/Custom'), 'merge, not overwrite');
+    assert.deepEqual(await readOwners(storage, '/MixedCase/'), [webId], 'owner recorded');
+    await fs.emptyDir('./data');
+  });
+
   it('never overwrites an operator-edited .lwsowner', async () => {
     await fs.emptyDir('./data');
     const a = await boot({ lws: true, idp: true });

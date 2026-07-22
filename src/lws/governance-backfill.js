@@ -24,7 +24,14 @@ async function assembleRoster(storage, { idpEnabled, singleUser, singleUserName,
     const accounts = await import('../idp/accounts.js');
     for (const username of await accounts.listUsernames()) {
       const account = await accounts.findByUsername(username);
-      if (account) roster.push({ root: `/${username}/`, webId: account.webId ?? null });
+      // Root must come from the account's stored (raw-case) podName, not the
+      // username-index KEY — that key is lowercased at account creation
+      // (accounts.js createAccount/findByUsername) while the pod DIRECTORY
+      // is created from the raw name (handlers/container.js). A pod named
+      // `Alice` indexes under `alice` but lives at `/Alice/`; on a
+      // case-sensitive filesystem `/alice/` doesn't exist and the pod would
+      // be silently skipped — exactly the failure this module exists to fix.
+      if (account) roster.push({ root: `/${account.podName ?? username}/`, webId: account.webId ?? null });
     }
   }
   if (singleUser && singleUserName) {
