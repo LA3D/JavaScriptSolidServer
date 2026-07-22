@@ -98,6 +98,7 @@ program
   .option('--lws-profile-conneg', 'Enable content negotiation by profile (default on when --lws)')
   .option('--no-lws-profile-conneg', 'Disable content negotiation by profile')
   .option('--lws-config <path>', 'Pod resource declaring LWS service endpoints as data ({ profileIndex, void }, requires --lws)')
+  .option('--lws-provider <uri>', 'Deployment operator URI (schema:provider) advertised on the ServerIndex/root storage description (requires --lws)')
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -244,6 +245,7 @@ program
         lwsTypeIndex: config.lwsTypeIndex,
         lwsProfileConneg: config.lwsProfileConneg,
         lwsConfig: config.lwsConfig,
+        lwsProvider: config.lwsProvider,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,

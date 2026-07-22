@@ -38,6 +38,7 @@ import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
+import { readOwners } from './lws/type-metadata.js';
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
 import { formatCapabilityReport } from './lws/capability-report.js';
 import { storageRootFor } from './lws/storage-resolver.js';
@@ -109,6 +110,10 @@ export function createServer(options = {}) {
   const connegEnabled = options.conneg ?? false;
   // Linked Web Storage surface is OFF by default
   const lwsEnabled = options.lws ?? false;
+  // Deployment operator (governance round 2026-07-22): a URI, possibly on
+  // another pod deployment — config-only on purpose (ownership travels with
+  // data, operatorship does not). Surfaced, never persisted into tenant data.
+  const lwsProviderUri = options.lwsProvider ?? null;
   // Type Index/Search services are ON by default whenever --lws is on;
   // --no-lws-type-index is a per-deployment safety valve to disable just
   // the type-aggregation surface without disabling the rest of --lws.
@@ -1214,7 +1219,7 @@ export function createServer(options = {}) {
       const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       const roots = await listVisibleStorageRoots(storage, { origin, webId });
       const body = buildServerIndex(origin, roots.map((root) => ({ root })),
-        { typeIndexEnabled, mcpEnabled, anonRateLimitMax });
+        { typeIndexEnabled, mcpEnabled, anonRateLimitMax, provider: lwsProviderUri });
       return sendJsonWithEtag(request, reply, body);
     });
     // Block writes — this is a read-only well-known resource.
@@ -1259,10 +1264,11 @@ export function createServer(options = {}) {
       // podConfig this route used before storages were per-tenant.
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor(root), origin, request.lwsEnabled);
+      const owners = await readOwners(storage, root);
       const body = buildStorageDescriptionFor(`${origin}${root}`, {
         typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
-        uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
+        uriSpacePrefixes, mcpEnabled, anonRateLimitMax, owners,
       });
       return sendJsonWithEtag(request, reply, body);
     });
@@ -1291,10 +1297,11 @@ export function createServer(options = {}) {
       reply.type(storageDescriptionContentType(request.headers.accept));
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor('/'), origin, request.lwsEnabled);
+      const owners = await readOwners(storage, '/');
       const body = buildStorageDescriptionFor(`${origin}/`, {
         typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
-        uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
+        uriSpacePrefixes, mcpEnabled, anonRateLimitMax, owners, provider: lwsProviderUri,
       });
       return sendJsonWithEtag(request, reply, body);
     });
@@ -1849,7 +1856,7 @@ export function createServer(options = {}) {
   // "no --lws-config given" (the `else` branch in the module) from "given",
   // not "given but unresolvable".
   fastify.log.info('\n' + formatCapabilityReport(
-    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled },
+    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled, lwsProvider: lwsProviderUri },
     { configResolved: true }
   ));
 
