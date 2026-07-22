@@ -31,6 +31,14 @@ describe('governance surfacing (description + ServerIndex + provider)', () => {
     assert.equal(desc.provider, undefined);
   });
 
+  it('storage-root GET carries Link rel=solid:owner; a member does not', async () => {
+    const rootRes = await fetch(`${base}/govsurf/`);
+    assert.match(rootRes.headers.get('link') ?? '', /rel="http:\/\/www\.w3\.org\/ns\/solid\/terms#owner"/);
+    await fetch(`${base}/govsurf/note.md`, { method: 'PUT', headers: { Authorization: `Bearer ${(await import('./helpers.js')).getPodToken('govsurf')}`, 'Content-Type': 'text/markdown' }, body: '# n' });
+    const memberRes = await fetch(`${base}/govsurf/note.md`);
+    assert.doesNotMatch(memberRes.headers.get('link') ?? '', /solid\/terms#owner/);
+  });
+
   it('without --lws-provider no provider key appears', async () => {
     await stopTestServer();
     await startTestServer({ lws: true });

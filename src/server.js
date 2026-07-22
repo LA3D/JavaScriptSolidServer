@@ -481,6 +481,12 @@ export function createServer(options = {}) {
   // the Link points at the OWNING storage's description, not the origin
   // well-known.
   fastify.decorateRequest('storageRootPath', null);
+  // Governance round: the storage's solid:owner URIs, resolved ONLY when the
+  // request targets the storage root itself (the one response Solid's
+  // advertising MUST applies to) — every other request pays nothing. Rides
+  // the A6-resolved root; READ-gating is inherited (the root response only
+  // exists after the WAC hook passed).
+  fastify.decorateRequest('storageOwners', null);
   // Task 7 (spec 2026-07-15): the navigator root/storage view
   // (src/handlers/resource.js) builds its own storage description — it
   // needs these two flags on `request` for parity, mirroring
@@ -519,6 +525,11 @@ export function createServer(options = {}) {
     request.storageRootPath = lwsEnabled
       ? await storageRootFor(storage, request.url.split('?')[0])
       : null;
+
+    request.storageOwners = null;
+    if (request.storageRootPath && request.url.split('?')[0] === request.storageRootPath) {
+      request.storageOwners = await readOwners(storage, request.storageRootPath);
+    }
 
     // Extract pod name from subdomain if enabled
     if (subdomainsEnabled && baseDomain) {

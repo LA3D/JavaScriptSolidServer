@@ -626,7 +626,8 @@ export async function handleGet(request, reply) {
                 resourceUrl,
                 connegEnabled,
                 lwsEnabled: request.lwsEnabled,
-                storageRootPath: request.storageRootPath
+                storageRootPath: request.storageRootPath,
+                storageOwners: request.storageOwners,
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -654,7 +655,8 @@ export async function handleGet(request, reply) {
                 resourceUrl,
                 connegEnabled,
                 lwsEnabled: request.lwsEnabled,
-                storageRootPath: request.storageRootPath
+                storageRootPath: request.storageRootPath,
+                storageOwners: request.storageOwners,
               });
               headers['Cache-Control'] = RDF_CACHE_CONTROL;
 
@@ -676,7 +678,8 @@ export async function handleGet(request, reply) {
         resourceUrl,
         connegEnabled,
         lwsEnabled: request.lwsEnabled,
-        storageRootPath: request.storageRootPath
+        storageRootPath: request.storageRootPath,
+        storageOwners: request.storageOwners,
       });
 
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -839,7 +842,8 @@ export async function handleGet(request, reply) {
           connegEnabled,
           mashlibEnabled: request.mashlibEnabled,
           lwsEnabled: request.lwsEnabled,
-          storageRootPath: request.storageRootPath
+          storageRootPath: request.storageRootPath,
+          storageOwners: request.storageOwners,
         });
         indexHeaders['Cache-Control'] = RDF_CACHE_CONTROL;
         Object.entries(indexHeaders).forEach(([k, v]) => reply.header(k, v));
@@ -904,7 +908,8 @@ export async function handleGet(request, reply) {
           connegEnabled,
           mashlibEnabled: request.mashlibEnabled,
           lwsEnabled: request.lwsEnabled,
-          storageRootPath: request.storageRootPath
+          storageRootPath: request.storageRootPath,
+          storageOwners: request.storageOwners,
         });
         rootHeaders['Cache-Control'] = RDF_CACHE_CONTROL;
         Object.entries(rootHeaders).forEach(([k, v]) => reply.header(k, v));
@@ -917,7 +922,7 @@ export async function handleGet(request, reply) {
       // predictive '-html' pattern ~line 223) — reused directly here
       // rather than recomputed, so the header and the 304 comparison can
       // never drift apart.
-      const html = renderContainerView({ url: resourceUrl, items, conformsTo: navConformsTo, storageRootPath: request.storageRootPath });
+      const html = renderContainerView({ url: resourceUrl, items, conformsTo: navConformsTo, storageRootPath: request.storageRootPath, storageOwners: request.storageOwners });
       const headers = getAllHeaders({
         isContainer: true,
         etag: listingEtag,
@@ -927,7 +932,8 @@ export async function handleGet(request, reply) {
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
         lwsEnabled: request.lwsEnabled,
-        storageRootPath: request.storageRootPath
+        storageRootPath: request.storageRootPath,
+        storageOwners: request.storageOwners,
       });
       headers['Cache-Control'] = RDF_CACHE_CONTROL;
       Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -962,7 +968,8 @@ export async function handleGet(request, reply) {
         connegEnabled,
         mashlibEnabled: request.mashlibEnabled,
         lwsEnabled: request.lwsEnabled,
-        storageRootPath: request.storageRootPath
+        storageRootPath: request.storageRootPath,
+        storageOwners: request.storageOwners,
       });
       headers['X-Frame-Options'] = 'DENY';
       headers['Content-Security-Policy'] = "frame-ancestors 'none'";
@@ -1053,6 +1060,7 @@ export async function handleGet(request, reply) {
         mashlibEnabled: request.mashlibEnabled,
         lwsEnabled: request.lwsEnabled,
         storageRootPath: request.storageRootPath,
+        storageOwners: request.storageOwners,
         chosenProfile,
         representations: advertisedReps
       });
@@ -1085,6 +1093,7 @@ export async function handleGet(request, reply) {
         mashlibEnabled: request.mashlibEnabled,
         lwsEnabled: request.lwsEnabled,
         storageRootPath: request.storageRootPath,
+        storageOwners: request.storageOwners,
         chosenProfile,
         representations: advertisedReps
       });
@@ -1113,6 +1122,7 @@ export async function handleGet(request, reply) {
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
             storageRootPath: request.storageRootPath,
+            storageOwners: request.storageOwners,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1145,6 +1155,7 @@ export async function handleGet(request, reply) {
           mashlibEnabled: request.mashlibEnabled,
           lwsEnabled: request.lwsEnabled,
           storageRootPath: request.storageRootPath,
+          storageOwners: request.storageOwners,
           chosenProfile,
           representations: advertisedReps
         });
@@ -1173,6 +1184,7 @@ export async function handleGet(request, reply) {
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
+      storageOwners: request.storageOwners,
       chosenProfile,
       representations: advertisedReps
     });
@@ -1346,6 +1358,7 @@ export async function handleGet(request, reply) {
       mediaType: storedContentType || '',
       excerpt,
       storageRootPath: request.storageRootPath,
+      storageOwners: request.storageOwners,
     });
     const headers = getAllHeaders({
       isContainer: false,
@@ -1357,6 +1370,7 @@ export async function handleGet(request, reply) {
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
+      storageOwners: request.storageOwners,
       chosenProfile,
       representations: advertisedReps,
       // Fix (review finding, spec 2026-07-19): this IS the synthetic
@@ -1462,6 +1476,7 @@ export async function handleGet(request, reply) {
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
+      storageOwners: request.storageOwners,
       chosenProfile,
       representations: advertisedReps,
       // Fix (I1, whole-branch review 2026-07-19): the mashlib wrapper is a
@@ -1498,6 +1513,7 @@ export async function handleGet(request, reply) {
         connegEnabled,
         lwsEnabled: request.lwsEnabled,
         storageRootPath: request.storageRootPath,
+        storageOwners: request.storageOwners,
         chosenProfile,
         representations: advertisedReps
       });
@@ -1545,6 +1561,7 @@ export async function handleGet(request, reply) {
       mashlibEnabled: request.mashlibEnabled,
       lwsEnabled: request.lwsEnabled,
       storageRootPath: request.storageRootPath,
+      storageOwners: request.storageOwners,
       chosenProfile,
       representations: advertisedReps
     });
@@ -1604,6 +1621,7 @@ export async function handleGet(request, reply) {
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
             storageRootPath: request.storageRootPath,
+            storageOwners: request.storageOwners,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1652,6 +1670,7 @@ export async function handleGet(request, reply) {
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
             storageRootPath: request.storageRootPath,
+            storageOwners: request.storageOwners,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1686,6 +1705,7 @@ export async function handleGet(request, reply) {
             mashlibEnabled: request.mashlibEnabled,
             lwsEnabled: request.lwsEnabled,
             storageRootPath: request.storageRootPath,
+            storageOwners: request.storageOwners,
             chosenProfile,
             representations: advertisedReps
           });
@@ -1717,6 +1737,7 @@ export async function handleGet(request, reply) {
           mashlibEnabled: request.mashlibEnabled,
           lwsEnabled: request.lwsEnabled,
           storageRootPath: request.storageRootPath,
+          storageOwners: request.storageOwners,
           chosenProfile,
           representations: advertisedReps
         });
@@ -1773,6 +1794,7 @@ export async function handleGet(request, reply) {
     mashlibEnabled: request.mashlibEnabled,
     lwsEnabled: request.lwsEnabled,
     storageRootPath: request.storageRootPath,
+    storageOwners: request.storageOwners,
     chosenProfile,
     representations: advertisedReps
   });
@@ -2400,6 +2422,7 @@ export async function handleHead(request, reply) {
     mashlibEnabled: request.mashlibEnabled,
     lwsEnabled: request.lwsEnabled,
     storageRootPath: request.storageRootPath,
+    storageOwners: request.storageOwners,
     chosenProfile,
     representations: advertisedReps,
     // Fix (review finding, spec 2026-07-19) HEAD parity: this getAllHeaders
@@ -2748,7 +2771,8 @@ export async function handleOptions(request, reply) {
     resourceUrl,
     connegEnabled,
     lwsEnabled: request.lwsEnabled,
-    storageRootPath: request.storageRootPath
+    storageRootPath: request.storageRootPath,
+    storageOwners: request.storageOwners,
   });
 
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
@@ -2866,7 +2890,7 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
   }
 
   const origin = request.headers.origin;
-  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled, storageRootPath: request.storageRootPath });
+  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled, storageRootPath: request.storageRootPath, storageOwners: request.storageOwners });
   // Append the describedby Link when admission resolved a governing shape —
   // mirrors handlePut's success-path shape advertisement.
   if (w.shapeUrl) {
@@ -3252,7 +3276,7 @@ export async function handlePatch(request, reply) {
   // this is byte-identical to the prior call when request.lwsEnabled is
   // false/undefined (the --lws-off case) — only the --lws-ON output gains
   // the headers it was already missing.
-  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled, storageRootPath: request.storageRootPath });
+  const headers = getAllHeaders({ isContainer: false, origin, resourceUrl, lwsEnabled: request.lwsEnabled, storageRootPath: request.storageRootPath, storageOwners: request.storageOwners });
   Object.entries(headers).forEach(([k, v]) => reply.header(k, v));
 
   // Emit change notification for WebSocket subscribers
