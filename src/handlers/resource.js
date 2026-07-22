@@ -2667,8 +2667,11 @@ export async function handleDelete(request, reply) {
 
   // DELETE bypasses applyLwsWrite (no body to gate through writeTypeConsistency)
   // so mirror the System-Managed sidecar rejection here — a client must not be
-  // able to delete a server-derived .lwstypes/.lwsprov sidecar either.
-  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(storagePath)) {
+  // able to delete a server-derived .lwstypes/.lwsprov/.lwsowner sidecar either.
+  // Case-insensitive (F1 inheritance): a case-insensitive filesystem aliases
+  // `victim.LWSOWNER` onto `victim.lwsowner`, so a case-sensitive guard here
+  // would let a DELETE of the uppercase form remove the real inode.
+  if (request.lwsEnabled && /\.(lwstypes|lwsprov|lwsowner)$/i.test(storagePath)) {
     reply.header('Allow', 'GET, HEAD');
     return reply.code(405).type('application/problem+json').send(JSON.stringify({
       type: 'about:blank', title: 'Method Not Allowed', status: 405,
@@ -2894,9 +2897,9 @@ export async function handlePatch(request, reply) {
 
   // PATCH bypasses applyLwsWrite (never routes through writeTypeConsistency)
   // so mirror the System-Managed sidecar rejection here — a client must not be
-  // able to PATCH a server-derived .lwstypes/.lwsprov sidecar either. Mirrors
-  // the handleDelete guard above.
-  if (request.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(storagePath)) {
+  // able to PATCH a server-derived .lwstypes/.lwsprov/.lwsowner sidecar either.
+  // Mirrors the handleDelete guard above (case-insensitive, same F1 reason).
+  if (request.lwsEnabled && /\.(lwstypes|lwsprov|lwsowner)$/i.test(storagePath)) {
     reply.header('Allow', 'GET, HEAD');
     return reply.code(405).type('application/problem+json').send(JSON.stringify({
       type: 'about:blank', title: 'Method Not Allowed', status: 405,

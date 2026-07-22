@@ -116,7 +116,7 @@ export async function authorize(request, reply, options = {}) {
   // handleDelete for DELETE and handlePatch for PATCH (PATCH never routes
   // through applyLwsWrite, so it needs its own guard same as DELETE). So no
   // write path is READ-gated any more.
-  if (request.lwsEnabled && (method === 'GET' || method === 'HEAD') && /\.(lwstypes|lwsprov)$/.test(urlPath)) {
+  if (request.lwsEnabled && (method === 'GET' || method === 'HEAD') && /\.(lwstypes|lwsprov|lwsowner)$/i.test(urlPath)) {
     return authorizeSidecarAccess(request, urlPath, webId, authError);
   }
 

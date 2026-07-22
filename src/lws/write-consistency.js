@@ -51,13 +51,19 @@ export function writeTypeConsistency({ urlPath, submittedType, lwsEnabled }) {
   if (!lwsEnabled) return { ok: true };
 
   // System-Managed sidecars (.lwstypes = derived type index, .lwsprov = earned
-  // conformsTo provenance) are written ONLY by the server (storage.write direct,
-  // src/lws/write.js). A client PUT/POST/PATCH here would overwrite server-derived
-  // data — and was only READ-gated (src/auth/middleware.js :107 was method-
-  // agnostic). Refuse at the choke point every write surface shares, so MCP
-  // write tools can't bypass it (the bug class review #2/#10 closed). READ of
-  // these sidecars stays allowed (authorizeSidecarAccess).
-  if (/\.(lwstypes|lwsprov)$/.test(urlPath)) {
+  // conformsTo provenance, .lwsowner = pod owner set) are written ONLY by the
+  // server (storage.write direct, src/lws/write.js). A client PUT/POST/PATCH
+  // here would overwrite server-derived data — and was only READ-gated
+  // (src/auth/middleware.js :107 was method-agnostic). Refuse at the choke
+  // point every write surface shares, so MCP write tools can't bypass it (the
+  // bug class review #2/#10 closed). READ of these sidecars stays allowed
+  // (authorizeSidecarAccess). Case-insensitive (governance round F1
+  // inheritance, 2026-07-22): a case-insensitive filesystem aliases
+  // `victim.LWSOWNER` onto `victim.lwsowner`, and the CONTROL check upstream
+  // in applyLwsWrite (auxSubject, already case-insensitive) would already let
+  // an owner's uppercase PUT through to here — this gate must not then admit
+  // it as an ordinary write.
+  if (/\.(lwstypes|lwsprov|lwsowner)$/i.test(urlPath)) {
     return { ok: false, problem: {
       type: 'about:blank', title: 'Method Not Allowed', status: 405,
       detail: 'This is a System-Managed sidecar (server-derived type/provenance metadata); it is read-only to clients — GET/HEAD it, do not write it.',

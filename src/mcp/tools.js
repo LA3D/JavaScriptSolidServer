@@ -209,7 +209,7 @@ async function delete_resource({ path }, ctx) {
   // `victim.acl/`, `victim.acl//`, `victim.acl%2F`, `victim.acl/./` and `victim.acl/.`
   // all classify as the sidecar they remove.
   const sc = auxSubject(path);
-  if (ctx.lwsEnabled && (sc?.kind === 'lwstypes' || sc?.kind === 'lwsprov')) {
+  if (ctx.lwsEnabled && (sc?.kind === 'lwstypes' || sc?.kind === 'lwsprov' || sc?.kind === 'lwsowner')) {
     return toolError(`cannot delete ${path}: System-Managed sidecar (read-only to clients)`);
   }
   // Sidecar authz (Task 7a, 2026-07-21). DELETE previously checked WRITE against the

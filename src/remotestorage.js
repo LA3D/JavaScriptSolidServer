@@ -112,10 +112,10 @@ export async function remoteStoragePlugin (fastify, options = {}) {
 
     const isRead = method === 'GET' || method === 'HEAD'
 
-    // `.lwstypes`/`.lwsprov` are server-derived and read-only to clients: a client write is
-    // refused outright (mirrors writeTypeConsistency's 405 on the LWS write surfaces). Reads
-    // still bind READ on the subject below.
-    if ((sc.kind === 'lwstypes' || sc.kind === 'lwsprov') && !isRead) {
+    // `.lwstypes`/`.lwsprov`/`.lwsowner` are server-derived and read-only to clients: a client
+    // write is refused outright (mirrors writeTypeConsistency's 405 on the LWS write surfaces).
+    // Reads still bind READ on the subject below.
+    if ((sc.kind === 'lwstypes' || sc.kind === 'lwsprov' || sc.kind === 'lwsowner') && !isRead) {
       return { authorized: false, status: 403, error: 'System-managed resource is read-only' }
     }
 
@@ -217,11 +217,11 @@ export async function remoteStoragePlugin (fastify, options = {}) {
       for (const entry of entries) {
         // Skip dotfiles (ACLs, metadata, etc.)
         if (entry.name.startsWith('.')) continue
-        // Skip mid-name aux sidecars (`x.acl`, `x.meta`, `x.lwstypes`, `x.lwsprov`) — reserved
-        // names, never remoteStorage content. Listing them exposed a sibling's ACL/metadata
-        // existence + size to any container-lister without CONTROL/READ on the subject
-        // (adversarial review 2026-07-22, F4). Case-insensitive to match auxSubject.
-        if (/\.(acl|meta|lwstypes|lwsprov)$/i.test(entry.name)) continue
+        // Skip mid-name aux sidecars (`x.acl`, `x.meta`, `x.lwstypes`, `x.lwsprov`, `x.lwsowner`)
+        // — reserved names, never remoteStorage content. Listing them exposed a sibling's
+        // ACL/metadata existence + size to any container-lister without CONTROL/READ on the
+        // subject (adversarial review 2026-07-22, F4). Case-insensitive to match auxSubject.
+        if (/\.(acl|meta|lwstypes|lwsprov|lwsowner)$/i.test(entry.name)) continue
 
         const childPath = storagePath.endsWith('/') ? storagePath + entry.name : storagePath + '/' + entry.name
         const childStat = await storage.stat(entry.isDirectory ? childPath + '/' : childPath)

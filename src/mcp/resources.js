@@ -248,7 +248,7 @@ async function readByResource(path, ctx, uri) {
   if (path.endsWith('/')) return readContainerView(path, ctx, uri);
   if (path.endsWith('.acl')) return readAclView(path, ctx, uri);
   if (path.endsWith('.meta')) return readMetaView(path, ctx, uri);
-  if (ctx.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(path)) return readSidecarView(path, ctx, uri);
+  if (ctx.lwsEnabled && /\.(lwstypes|lwsprov|lwsowner)$/i.test(path)) return readSidecarView(path, ctx, uri);
   return readBody(path, ctx, uri);
 }
 

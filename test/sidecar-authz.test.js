@@ -575,7 +575,7 @@ describe('MCP subject-path normalization (non-sidecar targets)', () => {
       try { canonBase = urlToPath(canonical).slice(root.length).replace(/^\/+/, '').split('/').pop(); }
       catch { canonBase = '<throw>'; }
       const aux = auxSubject(p);
-      const landsOnSidecar = /\.(acl|meta|lwstypes|lwsprov)$/.test(resolvedBase);
+      const landsOnSidecar = /\.(acl|meta|lwstypes|lwsprov|lwsowner)$/.test(resolvedBase);
       if (canonBase !== resolvedBase || (landsOnSidecar && !aux)) {
         bad.push({ c, canonBase, resolvedBase, kind: aux?.kind ?? null });
       }

@@ -30,7 +30,7 @@ import * as storage from '../src/storage/filesystem.js';
 import { auxSubject } from '../src/utils/url.js';
 
 const ATTACKER = 'http://attacker.example/profile/card#me';
-const AUX_SUFFIXES = ['acl', 'meta', 'lwstypes', 'lwsprov'];
+const AUX_SUFFIXES = ['acl', 'meta', 'lwstypes', 'lwsprov', 'lwsowner'];
 
 // An ACL body granting the attacker Control+Read over the sibling it names — the payload a
 // PUT-escalation would plant.
@@ -219,6 +219,7 @@ describe('sidecar classifier is case-insensitive (SEC-1 follow-up F1)', () => {
     ['/private/victim.META', 'meta', '/private/victim'],
     ['/private/victim.LwsTypes', 'lwstypes', '/private/victim'],
     ['/private/victim.LWSPROV', 'lwsprov', '/private/victim'],
+    ['/private/victim.LwsOwner', 'lwsowner', '/private/victim'],
   ]) {
     test(`auxSubject("${input}") classifies as a .${kind} sidecar`, () => {
       const sc = auxSubject(input);
@@ -256,11 +257,12 @@ describe('sidecar classifier is case-insensitive (SEC-1 follow-up F1)', () => {
 // this closes the residual metadata leak by hiding aux sidecars from listings (they are reserved
 // names, never remoteStorage content — matching the main surface, which hides them too).
 describe('remoteStorage listings hide aux sidecars (SEC-1 follow-up F4)', () => {
-  test('a container listing omits mid-name .acl/.meta/.lwstypes/.lwsprov siblings', async (t) => {
+  test('a container listing omits mid-name .acl/.meta/.lwstypes/.lwsprov/.lwsowner siblings', async (t) => {
     const pod = await startLwsPod(t);
     await putFile(pod, '/docs/readme.txt', 'hello');
     await putFile(pod, '/docs/readme.txt.acl', selfGrantingAcl(`${pod.base}/docs/readme.txt`));
     await putFile(pod, '/docs/readme.txt.meta', JSON.stringify({ '@id': `${pod.base}/docs/readme.txt` }));
+    await putFile(pod, '/docs/readme.txt.lwsowner', JSON.stringify(['https://example.org/#owner']));
     const owner = bearer(pod.token);
 
     const res = await request(rsUrl('/docs/'), { headers: owner });
@@ -268,7 +270,7 @@ describe('remoteStorage listings hide aux sidecars (SEC-1 follow-up F4)', () => 
     const listing = await res.json();
     const items = Object.keys(listing.items || {});
     assert.ok(items.includes('readme.txt'), 'the ordinary file is listed');
-    assert.ok(!items.some(k => /\.(acl|meta|lwstypes|lwsprov)$/i.test(k)),
+    assert.ok(!items.some(k => /\.(acl|meta|lwstypes|lwsprov|lwsowner)$/i.test(k)),
       `no aux sidecar may appear in a remoteStorage listing, got ${JSON.stringify(items)}`);
   });
 });

@@ -167,11 +167,12 @@ export function getResourceName(urlPath) {
 
 /**
  * The sidecar suffixes whose authorization binds to the SUBJECT they describe,
- * not to the sidecar's own path: `.lwstypes`/`.lwsprov` (System-Managed
- * type/provenance) and `.meta` (client-managed governance). `foo.jsonld.meta`
- * describes `foo.jsonld`; a container's bare `/foo/.meta` describes `/foo/`.
+ * not to the sidecar's own path: `.lwstypes`/`.lwsprov`/`.lwsowner`
+ * (System-Managed type/provenance/owner) and `.meta` (client-managed
+ * governance). `foo.jsonld.meta` describes `foo.jsonld`; a container's bare
+ * `/foo/.meta` describes `/foo/`.
  */
-export const SIDECAR_SUFFIX = /\.(lwstypes|lwsprov|meta)$/;
+export const SIDECAR_SUFFIX = /\.(lwstypes|lwsprov|lwsowner|meta)$/;
 
 /**
  * Resolve the SUBJECT a sidecar path describes, so both surfaces bind the
@@ -200,7 +201,7 @@ export function sidecarSubject(urlPath) {
  * import would be circular. `src/storage/filesystem.js` re-exports it as
  * `AUX_SUFFIX` for its existing callers.
  */
-export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov)$/;
+export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov|lwsowner)$/;
 
 /**
  * Case-INSENSITIVE sidecar-suffix matcher, used ONLY by the authorization
@@ -211,7 +212,7 @@ export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov)$/;
  * the type-capture / provenance skips in storage/write (which operate on the
  * exact on-disk name) are unchanged.
  */
-export const AUX_SUFFIX_CI_RE = /\.(acl|meta|lwstypes|lwsprov)$/i;
+export const AUX_SUFFIX_CI_RE = /\.(acl|meta|lwstypes|lwsprov|lwsowner)$/i;
 
 /**
  * THE path boundary for the MCP surface. Collapse a client-supplied path to the
