@@ -162,6 +162,17 @@ export async function handlePost(request, reply) {
       content, contentType: postContentType,
       declaredTypes: isCreatingContainer ? [] : declared,
       lwsEnabled: request.lwsEnabled,
+      agentWebId: request.webId ?? null,
+      // --public mode has no WAC to enforce (same rationale as the S1 listing
+      // filter above and resource.js's authorizeAclAccess-free 699 branch):
+      // authorize() short-circuits to authorized:true/webId:null for every
+      // method under `--public`, including .acl/.meta, before it ever reaches
+      // the suffix-specific branches — so a public deployment never had a
+      // Control/Write gate on sidecars to begin with. Gating them here for
+      // the first time would be new-to-Task-6 breakage of an intentional,
+      // pre-existing bypass, not a security fix (no privilege tiers exist to
+      // escalate between when the whole pod is world-writable by config).
+      internal: !!request.config?.public,
     });
     if (!w.ok) {
       if (w.problem) {

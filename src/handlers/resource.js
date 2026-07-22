@@ -2601,6 +2601,11 @@ export async function handlePut(request, reply) {
       ? RDF_TYPES.JSON_LD : (request.headers['content-type'] || ''),
     declaredTypes: declared,
     lwsEnabled: request.lwsEnabled,
+    agentWebId: request.webId ?? null,
+    // --public mode never had a sidecar WAC gate (authorize() short-circuits
+    // before the .acl/.meta branches) — see container.js:160 for the full
+    // rationale. Mirrored at all 3 sidecar-guard call sites in this file.
+    internal: !!request.config?.public,
   });
   if (!w.ok) {
     if (w.problem) {
@@ -2840,6 +2845,8 @@ async function patchTurtleFamilyResource(request, reply, { storagePath, resource
     contentType: storedType,
     declaredTypes: [],
     lwsEnabled: request.lwsEnabled,
+    agentWebId: request.webId ?? null,
+    internal: !!request.config?.public,
   });
   if (!w.ok) {
     if (w.problem) {
@@ -3216,6 +3223,8 @@ export async function handlePatch(request, reply) {
       contentType: RDF_TYPES.JSON_LD,
       declaredTypes: [],
       lwsEnabled: request.lwsEnabled,
+      agentWebId: request.webId ?? null,
+      internal: !!request.config?.public,
     });
     if (!w.ok) {
       if (w.problem) {

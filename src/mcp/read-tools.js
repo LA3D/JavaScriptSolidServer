@@ -11,7 +11,7 @@
 // applied — the agent dereferences them itself with read_resource).
 import * as storage from '../storage/filesystem.js';
 import { AccessMode } from '../wac/parser.js';
-import { wac, buildUrl, parentPath } from './wac.js';
+import { wac, buildUrl, parentPath, resolvePath } from './wac.js';
 import { sanitizeTypes, sanitizeField, sanitizeDeep, sanitizeReps } from './sanitize.js';
 import { describedbyTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
@@ -258,7 +258,11 @@ export async function read_resource({ uri }, ctx) {
     throw e;
   }
   const c = out.contents[0];
-  const path = uriToPath(ctx.origin, uri);
+  // Task 7a round 3: the body above came from readResource, which normalizes at
+  // its own boundary — derive the links block from the SAME normalized path, so
+  // `localLinks`/`getContentType` describe the resource that was actually read
+  // rather than an alias of it.
+  const path = await resolvePath(uriToPath(ctx.origin, uri));
   const links = await localLinks(path, ctx);
   // The true stored content type (e.g. text/markdown), not c.mimeType — that's
   // the untrusted-content fence's envelope type (text/plain) when the body is

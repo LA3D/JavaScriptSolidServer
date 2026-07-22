@@ -8,7 +8,7 @@
 // the HTTP layer, so the no-oracle property is inherited, not reimplemented.
 import { uriToPath, isLocalUri } from './uri.js';
 import { sidecarSubject } from '../utils/url.js';
-import { wac, buildUrl } from './wac.js';
+import { wac, buildUrl, resolvePath } from './wac.js';
 import { ResourceError } from './errors.js';
 import { RPC_ERRORS } from './protocol.js';
 import { AccessMode, parseAcl } from '../wac/parser.js';
@@ -268,8 +268,16 @@ export async function readResource(uri, ctx) {
     throw new ResourceError(RPC_ERRORS.INVALID_PARAMS,
       `not a local resource: ${uri}. Use the read_resource tool for another pod.`);
   }
-  const path = uriToPath(ctx.origin, uri);
+  let path = uriToPath(ctx.origin, uri);
   if (path === null) throw new ResourceError(RPC_ERRORS.INVALID_PARAMS, `bad resource URI: ${uri}`);
+  // Task 7a round 3: normalize at THIS boundary, the single entry point every
+  // read view funnels through. readByResource dispatches on the path's suffix
+  // (`/`, `.acl`, `.meta`, `.lwstypes`) and each view derives its WAC subject by
+  // stripping that suffix — all off the raw string, while readBounded/storage
+  // decoded it. `X.acl%2F` dispatched to readBody (no suffix match) yet read the
+  // real `X.acl`. wac() normalizes internally too, so the denial was already
+  // correct; this makes the DISPATCH agree as well.
+  path = await resolvePath(path);
   const fixed = FIXED_SUFFIX[path];
   if (fixed) return fixed(ctx, uri);
   const perStorage = PER_STORAGE_LWS_STORAGE.exec(path);

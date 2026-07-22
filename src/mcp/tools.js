@@ -22,8 +22,12 @@ import { generateLinkset } from '../lws/linkset.js';
 import { readDeclaredTypes } from '../lws/type-metadata.js';
 import { describedbyTargets, conformsToTargets } from '../lws/constraint.js';
 import { readAuthorizedRepresentations } from '../lws/representations.js';
-import { wac, buildUrl, parentPath } from './wac.js';
-import { sidecarSubject } from '../utils/url.js';
+import { wac, buildUrl, parentPath, resolvePath } from './wac.js';
+// auxSubject: the single normalize-then-classify helper shared by every
+// authorization surface (this file's write/create/delete tools and
+// applyLwsWrite). See src/utils/url.js for why it must run before any
+// authorization decision.
+import { auxSubject, canonicalPodPath } from '../utils/url.js';
 import { sanitizeTypes, sanitizeField, sanitizeReps } from './sanitize.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 import { read_resource, list_resources } from './read-tools.js';
@@ -47,6 +51,14 @@ const FULL_AGENT_CLASS = {
 
 async function write_resource({ path, content, contentType, types }, ctx) {
   if (!path) return toolError('path required');
+  // Task 7a round 3 (2026-07-21): normalize ONCE, here, and use the result for
+  // BOTH the authorization checks below and every storage call. See resolvePath
+  // (src/mcp/wac.js) for why the raw argument cannot be trusted: `victim%2F`,
+  // `victim/`, `victim/.` all authorized as a container (satisfied from the
+  // parent default) while storage decoded them back to the protected
+  // `/inbox/victim`. The `endsWith('/')` guard below caught only the literal
+  // slash. Nothing downstream of this line sees the raw argument.
+  path = await resolvePath(path);
   if (path.endsWith('/')) return toolError('cannot PUT a container; use create_resource');
   if (content == null) return toolError('content required');
   // I1 (sidecar-authz parity, 2026-07-14): a `.meta` write must bind the
@@ -59,7 +71,29 @@ async function write_resource({ path, content, contentType, types }, ctx) {
   // downstream by the write-consistency gate inside applyLwsWrite (same as
   // the HTTP write branch, which is `.meta`-only). --lws-gated to keep the
   // --lws-off path byte-identical.
-  const authPath = (ctx.lwsEnabled && path.endsWith('.meta')) ? sidecarSubject(path).subject : path;
+  // Sidecar authz (2026-07-21). The pre-existing I1 rule bound `.meta` to its SUBJECT at
+  // WRITE; `.acl` was absent from that analysis, so a container-Write agent could write any
+  // sibling's ACL — wac() falls back to the parent for non-existent targets, and
+  // findApplicableAcl walks up to the container default for existing ones. Both routes now
+  // require CONTROL on the subject, matching write_acl (tools.js:199). This is a per-surface
+  // guard (defense in depth) — applyLwsWrite's own choke-point guard (src/lws/write.js)
+  // refuses the write regardless, but stating the property here means a reader auditing this
+  // tool sees the rule without having to trace into the shared write pipeline.
+  // Task 7a round 2 (2026-07-21): classify off auxSubject(), which normalizes the
+  // raw tool argument exactly as urlToPath will before storage resolves it. The
+  // previous `$`-anchored tests on the raw argument disagreed with the operation
+  // for `victim.acl/`, `victim.acl%2F`, `victim.acl/./` and friends. Shared with
+  // create_resource, delete_resource and applyLwsWrite so they cannot drift.
+  const sc = auxSubject(path);
+  const isAcl = sc?.kind === 'acl';
+  const isMeta = sc?.kind === 'meta';
+  if (isAcl || (isMeta && !(await storage.exists(sc.path)))) {
+    const subj = sc.subject;
+    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+      return toolError(`access denied: control ${subj} (required to write ${path})`);
+    }
+  }
+  const authPath = (ctx.lwsEnabled && isMeta) ? sc.subject : path;
   if (!(await wac(ctx, authPath, AccessMode.WRITE))) {
     return toolError(`access denied: write ${path}`);
   }
@@ -70,7 +104,8 @@ async function write_resource({ path, content, contentType, types }, ctx) {
     content: Buffer.from(content, 'utf8'),
     contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [],
-    lwsEnabled: ctx.lwsEnabled
+    lwsEnabled: ctx.lwsEnabled,
+    agentWebId: ctx.webId ?? null,
   });
   if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(path, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${path}`);
@@ -82,6 +117,10 @@ async function create_resource({ container, slug, content, contentType, isContai
   if (!container || !container.endsWith('/')) {
     return toolError('container path required (must end in /)');
   }
+  // Task 7a round 3: normalize the container itself, so the APPEND check and
+  // the childPath built from it name the same node.
+  container = await resolvePath(container);
+  if (!container.endsWith('/')) container += '/';
   if (!(await wac(ctx, container, AccessMode.APPEND))) {
     return toolError(`access denied: append ${container}`);
   }
@@ -92,7 +131,41 @@ async function create_resource({ container, slug, content, contentType, isContai
   // same as the HTTP POST-to-container path — see src/handlers/container.js.
   const name = await storage.generateUniqueFilename(container, slug || null, !!isContainer,
     (!isContainer && ctx.lwsEnabled) ? extensionForRdfType(contentType || 'text/plain') : '');
-  const childPath = `${container}${name}${isContainer ? '/' : ''}`;
+  let childPath = `${container}${name}${isContainer ? '/' : ''}`;
+  // Task 7a round 3: the slug variant of the same class. generateUniqueFilename
+  // strips `/`, `\` and `..` but NOT percent-escapes, so a slug of `a%2Fb`
+  // survived sanitation and urlToPath decoded it into `<container>/a/b` — a
+  // DESCENT into a sibling sub-container whose own (possibly restrictive) ACL
+  // was never consulted, since the only check was APPEND on `container`.
+  // Normalize, then refuse anything whose parent is no longer the container the
+  // caller was authorized against. Refusal (not re-authorization) is the right
+  // answer: a slug is a filename hint, never a path, so an escaping slug is
+  // always an attack and denying it cannot over-tighten a legitimate create.
+  childPath = canonicalPodPath(childPath) + (isContainer && !childPath.endsWith('/') ? '/' : '');
+  if (parentPath(childPath) !== container) {
+    return toolError(`slug must not escape its container: ${slug}`);
+  }
+  // Sidecar authz (2026-07-21). A Slug/slug resolving to a sidecar must clear CONTROL on the
+  // protected subject — the container Append check above is not sufficient (this is upstream
+  // b9b38ed's class, reached through the MCP tool argument, which unlike the HTTP Slug has no
+  // character constraint). Per-surface guard mirroring write_acl/write_resource; applyLwsWrite
+  // refuses regardless, but stating it here keeps the property visible at this surface too.
+  // Task 7a (2026-07-21): `isContainer` appends a trailing slash to childPath before this
+  // check, and the suffix test is `$`-anchored, so `victim.acl/` never matched — an Append-only
+  // agent could squat a directory at a sibling's `.acl`/`.meta` path, which never reaches
+  // applyLwsWrite (the container branch below calls storage.createContainer directly) and so
+  // had no guard at all. Round 2: a literal trailing slash was only half of it —
+  // generateUniqueFilename strips `/`, `\` and `..` but NOT percent-escapes, so a slug of
+  // `victim.acl%2F` survived sanitation and was decoded into the same squat by urlToPath.
+  // auxSubject() applies the full urlToPath normalization before classifying, so both shapes
+  // (and `//`, `/.`, `/./`) resolve to the sidecar they will actually become.
+  const sc2 = auxSubject(childPath);
+  if (sc2) {
+    const subj = sc2.subject;
+    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+      return toolError(`access denied: control ${subj} (required to create ${childPath})`);
+    }
+  }
   if (isContainer) {
     await storage.createContainer(childPath);
     emitChange(buildUrl(ctx, childPath));
@@ -105,7 +178,8 @@ async function create_resource({ container, slug, content, contentType, isContai
     content: Buffer.from(content || '', 'utf8'),
     contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [],
-    lwsEnabled: ctx.lwsEnabled
+    lwsEnabled: ctx.lwsEnabled,
+    agentWebId: ctx.webId ?? null,
   });
   if (!w.ok) return w.problem ? toolError(w.problem.detail) : admissionError(childPath, { violations: w.violations, shapeUrl: w.shapeUrl });
   if (!w.wrote) return toolError(`write failed: ${childPath}`);
@@ -115,10 +189,43 @@ async function create_resource({ container, slug, content, contentType, isContai
 
 async function delete_resource({ path }, ctx) {
   if (!path) return toolError('path required');
-  if (ctx.lwsEnabled && /\.(lwstypes|lwsprov)$/.test(path)) {
+  // Task 7a round 3 (2026-07-21): normalize ONCE, before any guard or storage
+  // call. DELETE cannot simply reject a trailing slash (deleting an empty
+  // container is legal), so resolvePath resolves container-ness from storage:
+  // `/inbox/victim/` where `victim` is a FILE collapses to `/inbox/victim`, and
+  // the non-aux WRITE check below then consults the victim's own `.acl` instead
+  // of walking up to the container default. `storage.remove` gets the same path.
+  path = await resolvePath(path);
+  // Task 7a round 2 (2026-07-21): classify ONCE, off the normalized path the storage
+  // layer will resolve. Every branch below reads from `sc`, so the guard and the
+  // operation can no longer disagree about which resource is being deleted —
+  // `victim.acl/`, `victim.acl//`, `victim.acl%2F`, `victim.acl/./` and `victim.acl/.`
+  // all classify as the sidecar they remove.
+  const sc = auxSubject(path);
+  if (ctx.lwsEnabled && (sc?.kind === 'lwstypes' || sc?.kind === 'lwsprov')) {
     return toolError(`cannot delete ${path}: System-Managed sidecar (read-only to clients)`);
   }
-  if (!(await wac(ctx, path, AccessMode.WRITE))) {
+  // Sidecar authz (Task 7a, 2026-07-21). DELETE previously checked WRITE against the
+  // sidecar's OWN path — findApplicableAcl resolves that by walking up to the container
+  // default, so container-Write alone could delete a sibling's restrictive `.acl`, then
+  // write the now-unprotected resource (the write/create guards above never covered
+  // delete). Mirror the HTTP policy exactly (src/auth/middleware.js): `authorizeAclAccess`
+  // requires CONTROL on the protected SUBJECT for every method including DELETE; `.meta`
+  // routes through `authorizeSidecarAccess` with `getRequiredMode('DELETE') === WRITE` on
+  // the subject. Both bind to the subject, never to the sidecar's own resolved ACL.
+  const isAcl = sc?.kind === 'acl';
+  const isMeta = ctx.lwsEnabled && sc?.kind === 'meta';
+  if (isAcl) {
+    const subj = sc.subject;
+    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+      return toolError(`access denied: control ${subj} (required to delete ${path})`);
+    }
+  } else if (isMeta) {
+    const subj = sc.subject;
+    if (!(await wac(ctx, subj, AccessMode.WRITE))) {
+      return toolError(`access denied: write ${subj} (required to delete ${path})`);
+    }
+  } else if (!(await wac(ctx, path, AccessMode.WRITE))) {
     return toolError(`access denied: delete ${path}`);
   }
   if (!(await storage.exists(path))) {
@@ -193,6 +300,12 @@ async function write_acl({ path, authorizations }, ctx) {
   if (!Array.isArray(authorizations)) {
     return toolError('authorizations must be an array');
   }
+  // Task 7a round 3: normalize before the CONTROL check, because everything
+  // downstream (aclUrlFor, the isContainer decision, targetRef's basename, and
+  // the lockout check's targetUrl) is derived from `path`. A raw `victim%2F`
+  // would have been Control-checked as a container while `aclUrlFor` produced
+  // `/inbox/victim%2F.acl` — a different node than the one authorized.
+  path = await resolvePath(path);
   // Writing the ACL document requires Control on the resource.
   if (!(await wac(ctx, path, AccessMode.CONTROL))) {
     return toolError(`access denied: control ${path}`);
@@ -258,9 +371,15 @@ async function write_acl({ path, authorizations }, ctx) {
     );
   }
 
-  await storage.write(aclPath, Buffer.from(serialized, 'utf8'), {
+  // Task 7a (2026-07-21): storage.write() catches its own errors and returns false rather
+  // than throwing (src/storage/filesystem.js) — this call ignored that return value, so a
+  // failed write (e.g. EISDIR when the `.acl` path is squatted by a stray directory, as a
+  // create_resource isContainer squat leaves behind) reported success while nothing was
+  // actually written. Check the return value and fail closed.
+  const wrote = await storage.write(aclPath, Buffer.from(serialized, 'utf8'), {
     contentType: 'application/ld+json'
   });
+  if (!wrote) return toolError(`write failed: ${aclPath}`);
   emitChange(buildUrl(ctx, aclPath));
   return toolText(`wrote ${aclPath} (${authorizations.length} authorization${authorizations.length === 1 ? '' : 's'})`);
 }
@@ -363,6 +482,10 @@ const DESCRIBEDBY = 'http://www.w3.org/2007/05/powder-s#describedby';
 // LWS-general (no profile assumptions).
 async function put_typed_resource({ path, content, contentType, types, describedby }, ctx) {
   if (!path) return toolError('path required');
+  // Task 7a round 3: same single normalize-at-the-boundary as write_resource —
+  // this tool has the same body-write shape and had the same %2F/`/.` hole. The
+  // derived `${path}.meta` inherits the normalized base for free.
+  path = await resolvePath(path);
   if (path.endsWith('/')) return toolError('cannot PUT a container; use create_resource');
   if (content == null) return toolError('content required');
   if (!(await wac(ctx, path, AccessMode.WRITE))) return toolError(`access denied: write ${path}`);
@@ -371,22 +494,38 @@ async function put_typed_resource({ path, content, contentType, types, described
   // describedby in (so admission validates against it), then roll the .meta
   // back if the write is rejected — a rejected write must leave no durable
   // side effect and must not clobber pre-existing metadata (review #1).
+  //
+  // Sidecar authz (2026-07-21): this .meta write now routes through
+  // applyLwsWrite instead of a direct storage.write. A direct write bypassed
+  // the sidecar-authz choke point (Task 6) entirely: it was gated only by
+  // `wac(ctx, metaPath, WRITE)`, which falls back to the PARENT CONTAINER for
+  // a non-existent target — so container-Write alone could CREATE a `.meta`
+  // for a sibling this agent doesn't own, on this MCP surface, even after the
+  // choke point landed. applyLwsWrite's own sidecar guard decides
+  // CONTROL-to-create vs WRITE-to-update, same policy as every other sidecar
+  // write and the same one enforcement path the choke point exists to be.
   const metaPath = path + '.meta';
   let metaSnapshot;   // undefined = not touched; null = didn't exist; Buffer = prior bytes
   if (describedby) {
-    if (!(await wac(ctx, metaPath, AccessMode.WRITE))) {
-      return toolError(`access denied: write ${metaPath} (needed to declare describedby)`);
-    }
     metaSnapshot = (await storage.exists(metaPath)) ? await storage.read(metaPath) : null;
-    await storage.write(metaPath, Buffer.from(JSON.stringify(mergeDescribedby(metaSnapshot, buildUrl(ctx, path), describedby)), 'utf8'), {
-      contentType: 'application/ld+json',
+    const metaWrite = await applyLwsWrite({
+      storage, storagePath: metaPath, resourceUrl: buildUrl(ctx, metaPath),
+      content: Buffer.from(JSON.stringify(mergeDescribedby(metaSnapshot, buildUrl(ctx, path), describedby)), 'utf8'),
+      contentType: 'application/ld+json', declaredTypes: [], lwsEnabled: ctx.lwsEnabled,
+      agentWebId: ctx.webId ?? null,
     });
+    if (!metaWrite.ok) {
+      return metaWrite.problem
+        ? toolError(metaWrite.problem.detail)
+        : admissionError(metaPath, { violations: metaWrite.violations, shapeUrl: metaWrite.shapeUrl });
+    }
   }
 
   const w = await applyLwsWrite({
     storage, storagePath: path, resourceUrl: buildUrl(ctx, path),
     content: Buffer.from(content, 'utf8'), contentType: contentType || 'text/plain',
     declaredTypes: Array.isArray(types) ? types : [], lwsEnabled: ctx.lwsEnabled,
+    agentWebId: ctx.webId ?? null,
   });
   if (!w.ok || !w.wrote) {
     if (metaSnapshot !== undefined) {                       // roll the .meta back
@@ -427,6 +566,11 @@ async function describe_resource({ path, uri }, ctx) {
     if (path === null) return toolError(`bad resource uri: ${uri}`);
   }
   if (!path) return toolError('path or uri required');
+  // Task 7a round 3: read side of the same class. wac() normalizes internally
+  // so the DENIAL is already correct, but readBounded/readDeclaredTypes and the
+  // derived `${path}.meta` act on this variable — normalize so an ALLOWED read
+  // also returns the resource that was authorized, not an alias of it.
+  path = await resolvePath(path);
   // Same single wording for both branches as resources.js's requireRead/
   // requireExists (probe #7 A8) — the order (WAC before exists) already kept
   // existence non-oracular; unifying the string closes the last thing that
