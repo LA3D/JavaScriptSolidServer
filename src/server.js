@@ -39,6 +39,7 @@ import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
+import { formatCapabilityReport } from './lws/capability-report.js';
 import { storageRootFor } from './lws/storage-resolver.js';
 import { listVisibleStorageRoots } from './lws/storage-index.js';
 import { sendJsonWithEtag } from './utils/conditional.js';
@@ -1836,6 +1837,20 @@ export function createServer(options = {}) {
     const baseUrl = `${protocol}://localhost:${port}`;
     startFileWatcher(dataRoot, baseUrl);
   }
+
+  // Boot-time capability report (Task 11, guardrails round 2026-07-21): loud,
+  // never-fatal visibility into what's actually on, vs. a healthy container
+  // with LWS services silently off. configResolved is hardcoded true here —
+  // makePodConfigResolver (above) returns a per-storage ASYNC resolver, not a
+  // cheap sync boolean, and this call site is synchronous (createServer does
+  // not return a Promise). Follow-up: thread a real per-storage resolution
+  // check through once one exists; until then this line only distinguishes
+  // "no --lws-config given" (the `else` branch in the module) from "given",
+  // not "given but unresolvable".
+  fastify.log.info('\n' + formatCapabilityReport(
+    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled },
+    { configResolved: true }
+  ));
 
   return fastify;
 }
