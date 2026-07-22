@@ -203,6 +203,17 @@ export function sidecarSubject(urlPath) {
 export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov)$/;
 
 /**
+ * Case-INSENSITIVE sidecar-suffix matcher, used ONLY by the authorization
+ * classifier `auxSubject`. WAC and the storage layer key off the literal
+ * lowercase suffix, but a case-insensitive volume aliases `victim.ACL` onto
+ * `victim.acl` — so the classifier must recognize any case to bind the CONTROL
+ * check (adversarial review 2026-07-22, F1). Kept separate from AUX_SUFFIX_RE so
+ * the type-capture / provenance skips in storage/write (which operate on the
+ * exact on-disk name) are unchanged.
+ */
+export const AUX_SUFFIX_CI_RE = /\.(acl|meta|lwstypes|lwsprov)$/i;
+
+/**
  * THE path boundary for the MCP surface. Collapse a client-supplied path to the
  * canonical form that names the SAME filesystem node `urlToPath` will resolve —
  * while staying in URL space, so the result can be handed straight back to
@@ -315,13 +326,22 @@ export function normalizeAuxPath(urlPath) {
  */
 export function auxSubject(urlPath) {
   const path = normalizeAuxPath(urlPath);
-  const m = path.match(AUX_SUFFIX_RE);
+  // Match case-INSENSITIVELY: WAC and the storage layer look up the literal
+  // lowercase `.acl`/`.meta`/..., but on a case-insensitive volume (the macOS
+  // `make up` rig bind-mounts ./data) `victim.ACL` is the SAME inode as
+  // `victim.acl`. A case-sensitive test would classify `victim.ACL` as a
+  // non-sidecar, skip the CONTROL check, and let the write land on the ACL WAC
+  // reads — the SEC-1 escalation via case (adversarial review 2026-07-22).
+  // Fail-safe on a case-sensitive FS too: an uppercase suffix there is a
+  // distinct file, but classifying-and-authorizing it never under-protects.
+  const m = path.match(AUX_SUFFIX_CI_RE);
   if (!m) return null;
-  const subject = path.replace(AUX_SUFFIX_RE, '');
+  const subject = path.replace(AUX_SUFFIX_CI_RE, '');
   // `/foo/.acl` -> `/foo/`: the replace leaves the separator, which is exactly
   // the container marker the WAC up-walk needs. `/.acl` at the storage root
-  // leaves '/', already correct.
-  return { path, kind: m[1], subject, isContainer: subject.endsWith('/') };
+  // leaves '/', already correct. kind is normalized to lowercase so every
+  // policy site (`sc.kind === 'meta'`) matches regardless of the input case.
+  return { path, kind: m[1].toLowerCase(), subject, isContainer: subject.endsWith('/') };
 }
 
 /**

@@ -10,8 +10,10 @@
  */
 
 import * as storage from './storage/filesystem.js'
-import { getContentType } from './utils/url.js'
+import { getContentType, auxSubject } from './utils/url.js'
 import { getWebIdFromRequestAsync } from './auth/token.js'
+import { checkAccess } from './wac/checker.js'
+import { AccessMode } from './wac/parser.js'
 import { checkIfMatch, checkIfNoneMatchForGet, checkIfNoneMatchForWrite } from './utils/conditional.js'
 
 /**
@@ -79,6 +81,77 @@ export async function remoteStoragePlugin (fastify, options = {}) {
     return { authorized: true, webId }
   }
 
+  /**
+   * Sidecar authorization guard (SEC-1, 2026-07-22).
+   *
+   * remoteStorage reaches the SAME `./data` tree the Solid/WAC layer reads ACLs from, but
+   * `checkAuth` above authorizes ANY authenticated WebID (ownerWebId is null — "single-user")
+   * and never consults WAC. `hasDotfile` blocks only leading-dot segments, so a mid-name aux
+   * suffix — `victim.acl` / `victim.meta` / `victim.lwstypes` / `victim.lwsprov` — sailed
+   * through and PUT/DELETE/GET wrote/removed/read the sidecar directly. An authenticated
+   * non-owner could therefore plant a self-granting `victim.acl`, strip a sibling's restrictive
+   * one, or read any sidecar's contents — full escalation to Control of the subject.
+   *
+   * This is the 9th surface of the sidecar-authz class the 2026-07-21 round closed on HTTP + the
+   * 4 MCP tools. It binds the sidecar op to the SUBJECT's ACL exactly as authorizeAclAccess /
+   * authorizeSidecarAccess do on the main HTTP surface (src/auth/middleware.js). It authorizes
+   * rather than blanket-blocks, so the owner (or any agent an ACL grants Control) keeps sidecar
+   * management, while fail-closed-by-default (no applicable ACL → deny) matches a blocked pod.
+   *
+   * Classification runs off `auxSubject()` — the shared normalize-then-classify helper — so the
+   * guard sees the node the storage layer will actually resolve, closing the percent-escape /
+   * trailing-slash bypasses Task 7a round 2 found on the MCP surface.
+   *
+   * @returns {Promise<{authorized: boolean, status?: number, error?: string}>} authorized:true
+   *   when the path is not a sidecar (the caller's checkAuth result stands) or the subject-mode
+   *   WAC check passes.
+   */
+  async function checkSidecarAuth (request, storagePath, method, webId) {
+    const sc = auxSubject(storagePath)
+    if (!sc) return { authorized: true }
+
+    const isRead = method === 'GET' || method === 'HEAD'
+
+    // `.lwstypes`/`.lwsprov` are server-derived and read-only to clients: a client write is
+    // refused outright (mirrors writeTypeConsistency's 405 on the LWS write surfaces). Reads
+    // still bind READ on the subject below.
+    if ((sc.kind === 'lwstypes' || sc.kind === 'lwsprov') && !isRead) {
+      return { authorized: false, status: 403, error: 'System-managed resource is read-only' }
+    }
+
+    // Required mode on the SUBJECT (never the sidecar's own path — findApplicableAcl walks that
+    // up to the container default, which is the escalation):
+    //   .acl        → CONTROL for every method (authorizeAclAccess: all ACL ops require Control)
+    //   read (any)  → READ on the subject
+    //   .meta PUT   → CONTROL to CREATE, WRITE to UPDATE (the choke-point rule: WAC falls back to
+    //                 the parent container for a non-existent target, so create must need Control)
+    //   .meta DELETE→ WRITE on the subject
+    let mode
+    if (sc.kind === 'acl') {
+      mode = AccessMode.CONTROL
+    } else if (isRead) {
+      mode = AccessMode.READ
+    } else if (method === 'DELETE') {
+      mode = AccessMode.WRITE
+    } else {
+      mode = (await storage.exists(sc.path)) ? AccessMode.WRITE : AccessMode.CONTROL
+    }
+
+    const host = request.headers.host || request.hostname
+    const subjectUrl = `${request.protocol}://${host}${sc.subject}`
+    const { allowed } = await checkAccess({
+      resourceUrl: subjectUrl,
+      resourcePath: sc.subject,
+      isContainer: sc.isContainer,
+      agentWebId: webId,
+      requiredMode: mode
+    })
+    if (allowed) return { authorized: true }
+    // Reads 404 (never leak sidecar existence to a caller without access — matches the dotfile
+    // handling above); writes/deletes 403.
+    return { authorized: false, status: isRead ? 404 : 403, error: isRead ? 'Not found' : 'Forbidden' }
+  }
+
   // GET /storage/:user/* — read file or folder
   fastify.get('/storage/:user/*', async (request, reply) => {
     if (!checkUsername(request, reply)) return
@@ -90,11 +163,16 @@ export async function remoteStoragePlugin (fastify, options = {}) {
       return reply.code(404).send({ error: 'Not found' })
     }
 
-    const { authorized, error, status } = await checkAuth(request, 'GET')
+    const { authorized, webId, error, status } = await checkAuth(request, 'GET')
     if (!authorized) {
       const code = status || 401
       if (code === 401) reply.header('WWW-Authenticate', 'Bearer')
       return reply.code(code).send({ error })
+    }
+
+    const sc = await checkSidecarAuth(request, storagePath, 'GET', webId)
+    if (!sc.authorized) {
+      return reply.code(sc.status).send({ error: sc.error })
     }
 
     const info = await storage.stat(storagePath)
@@ -139,6 +217,11 @@ export async function remoteStoragePlugin (fastify, options = {}) {
       for (const entry of entries) {
         // Skip dotfiles (ACLs, metadata, etc.)
         if (entry.name.startsWith('.')) continue
+        // Skip mid-name aux sidecars (`x.acl`, `x.meta`, `x.lwstypes`, `x.lwsprov`) — reserved
+        // names, never remoteStorage content. Listing them exposed a sibling's ACL/metadata
+        // existence + size to any container-lister without CONTROL/READ on the subject
+        // (adversarial review 2026-07-22, F4). Case-insensitive to match auxSubject.
+        if (/\.(acl|meta|lwstypes|lwsprov)$/i.test(entry.name)) continue
 
         const childPath = storagePath.endsWith('/') ? storagePath + entry.name : storagePath + '/' + entry.name
         const childStat = await storage.stat(entry.isDirectory ? childPath + '/' : childPath)
@@ -190,11 +273,16 @@ export async function remoteStoragePlugin (fastify, options = {}) {
       return reply.code(404).send()
     }
 
-    const { authorized, error, status } = await checkAuth(request, 'HEAD')
+    const { authorized, webId, error, status } = await checkAuth(request, 'HEAD')
     if (!authorized) {
       const code = status || 401
       if (code === 401) reply.header('WWW-Authenticate', 'Bearer')
       return reply.code(code).send()
+    }
+
+    const sc = await checkSidecarAuth(request, storagePath, 'HEAD', webId)
+    if (!sc.authorized) {
+      return reply.code(sc.status).send()
     }
 
     const info = await storage.stat(storagePath)
@@ -235,11 +323,16 @@ export async function remoteStoragePlugin (fastify, options = {}) {
       return reply.code(403).send({ error: 'Cannot write to dotfiles' })
     }
 
-    const { authorized, error, status } = await checkAuth(request, 'PUT')
+    const { authorized, webId, error, status } = await checkAuth(request, 'PUT')
     if (!authorized) {
       const code = status || 401
       if (code === 401) reply.header('WWW-Authenticate', 'Bearer')
       return reply.code(code).send({ error })
+    }
+
+    const sc = await checkSidecarAuth(request, storagePath, 'PUT', webId)
+    if (!sc.authorized) {
+      return reply.code(sc.status).send({ error: sc.error })
     }
 
     // Directories end with / — can't PUT to a directory
@@ -290,11 +383,16 @@ export async function remoteStoragePlugin (fastify, options = {}) {
       return reply.code(403).send({ error: 'Cannot delete dotfiles' })
     }
 
-    const { authorized, error, status } = await checkAuth(request, 'DELETE')
+    const { authorized, webId, error, status } = await checkAuth(request, 'DELETE')
     if (!authorized) {
       const code = status || 401
       if (code === 401) reply.header('WWW-Authenticate', 'Bearer')
       return reply.code(code).send({ error })
+    }
+
+    const sc = await checkSidecarAuth(request, storagePath, 'DELETE', webId)
+    if (!sc.authorized) {
+      return reply.code(sc.status).send({ error: sc.error })
     }
 
     const existing = await storage.stat(storagePath)
