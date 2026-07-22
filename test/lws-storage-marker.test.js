@@ -16,4 +16,9 @@ describe('storage-root marker (lws:Storage in .lwstypes)', () => {
     const types = await readDeclaredTypes(storage, `/${pod.podName}/`);
     assert.ok(types.includes(LWS_STORAGE), `expected lws:Storage in ${JSON.stringify(types)}`);
   });
+
+  it('a freshly provisioned pod root records its owner (.lwsowner)', async () => {
+    const { readOwners } = await import('../src/lws/type-metadata.js');
+    assert.deepEqual(await readOwners(storage, `/${pod.podName}/`), [pod.webId]);
+  });
 });
