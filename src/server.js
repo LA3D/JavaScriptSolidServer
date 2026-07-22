@@ -68,6 +68,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * @param {string} options.apNostrPubkey - Nostr pubkey for identity linking
  * @param {boolean} options.webidTls - Enable WebID-TLS client certificate auth (default false)
  * @param {boolean} options.pay - Enable HTTP 402 paid /pay/* routes (default false)
+ * @param {Array} options.plugins - App plugins to load (#206): [{ module, prefix, config, id }].
+ *   Each module's activate(api) runs at startup; prefix is WAC-exempted via appPaths.
+ *   See src/plugins.js for the api surface.
  * @param {number} options.payCost - Cost per request in satoshis (default 1)
  * @param {string} options.payMempoolUrl - Mempool API base URL (default testnet4)
  * @param {string} options.payAddress - Pod's MRC20 address for receiving token transfers
@@ -186,6 +189,24 @@ export function createServer(options = {}) {
   // Tunnel proxy is OFF by default
   const tunnelEnabled = options.tunnel ?? false;
   const tunnelPath = options.tunnelPath ?? '/.tunnel';
+  // Application mount points (plugin seam, #206): URL prefixes owned by
+  // registered apps (e.g. a game mounted at /tideholm). Requests below an
+  // app path skip the WAC hook — the app owns authentication and
+  // authorization under its prefix, like /storage/ and /db/ already do.
+  const appPaths = Array.isArray(options.appPaths)
+    ? options.appPaths
+        .filter((p) => typeof p === 'string')
+        .map((p) => p.trim().replace(/\/+$/, '')) // '/myapp/' matches like '/myapp'
+        .filter((p) => p.startsWith('/') && p.length > 1)
+    : [];
+  // App plugins (#206): loaded at startup, each entry's prefix joins
+  // appPaths. The WAC hook reads the array per request, so pushes made
+  // during plugin activation are honored.
+  const pluginEntries = Array.isArray(options.plugins) ? options.plugins : [];
+  // Parameterized reservations from api.reservePath (#602): compiled
+  // matchers for path shapes like /:user/did.json that literal appPaths
+  // prefixes cannot express. Same per-request read as appPaths.
+  const appPathPatterns = [];
   // ActivityPub federation is OFF by default
   const activitypubEnabled = options.activitypub ?? false;
   const apUsername = options.apUsername ?? 'me';
@@ -586,6 +607,29 @@ export function createServer(options = {}) {
     });
   }
 
+  // Load app plugins (#206). Deferred into a register scope so the dynamic
+  // imports and async activation run during fastify's startup; a failing
+  // plugin fails listen() rather than leaving a half-configured server.
+  if (pluginEntries.length) {
+    fastify.register(async (instance) => {
+      const { loadPlugins } = await import('./plugins.js');
+      await loadPlugins(instance, pluginEntries, {
+        appPaths,
+        appPathPatterns,
+        root: options.root || process.env.DATA_ROOT || './data',
+        log: fastify.log,
+        // api.serverInfo inputs (#601). ?? keeps an explicit port 0 —
+        // "resolved at listen" — instead of masking it with the default.
+        origin: {
+          ssl: !!options.ssl,
+          host: options.host,
+          port: options.port ?? defaults.port,
+          baseUrl: idpIssuer?.replace(/\/$/, '') || null,
+        },
+      });
+    });
+  }
+
   // Register Nostr relay if enabled
   if (nostrEnabled) {
     fastify.register(async (instance) => {
@@ -721,6 +765,14 @@ export function createServer(options = {}) {
       return;
     }
     if (terminalEnabled && urlNoQuery === '/.terminal') {
+      return;
+    }
+
+    // App plugins own their prefix (#206) — a plugin mounted at a dot path
+    // (e.g. the webrtc plugin at /.webrtc, matching core's historical URL)
+    // must stay reachable, exactly as the WAC hook already defers to
+    // appPaths. Read per request: plugin activation pushes entries.
+    if (appPaths.some(p => urlNoQuery === p || urlNoQuery.startsWith(p + '/'))) {
       return;
     }
 
@@ -958,6 +1010,8 @@ export function createServer(options = {}) {
         (webrtcEnabled && (request.url === webrtcPath || request.url.startsWith(webrtcPath + '?'))) ||
         (terminalEnabled && (request.url === '/.terminal' || request.url.startsWith('/.terminal?'))) ||
         (tunnelEnabled && (request.url === tunnelPath || request.url.startsWith(tunnelPath + '?') || request.url.startsWith('/tunnel/'))) ||
+        appPaths.some(p => request.url === p || request.url.startsWith(p + '/') || request.url.startsWith(p + '?')) ||
+        appPathPatterns.some(m => m.methods.has(request.method) && m.re.test(request.url)) ||
         mashlibPaths.some(p => request.url === p || request.url.startsWith(p + '.'))) {
       return;
     }
@@ -1382,8 +1436,11 @@ export function createServer(options = {}) {
   // Server-root landing page: seed /index.html and a public-read /.acl
   // on first start (skip-if-exists, so operator-provided files are
   // preserved). See #433 / #276. Skipped in read-only deployments so
-  // startup never mutates DATA_ROOT.
-  if (!options.readOnly) {
+  // startup never mutates DATA_ROOT, and in --public mode: WAC is
+  // bypassed there so the seeded .acl files would never be consulted,
+  // and public mode's serve-a-directory use case (servejss) must not
+  // write into the served tree.
+  if (!options.readOnly && !options.public) {
     fastify.addHook('onReady', async () => {
       // A missing or unreadable package.json (some production bundles
       // omit it) shouldn't block seeding; fall back to "unknown".

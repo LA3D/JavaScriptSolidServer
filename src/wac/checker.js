@@ -18,7 +18,24 @@ import { readLedger, getBalance, debit } from '../webledger.js';
  * @param {string} options.requiredMode - Required access mode (from AccessMode)
  * @param {Map|null} [options.aclCache] - Optional per-query cache (keyed by ACL storage path)
  *   memoizing parsed `.acl` reads within a single call set. Never a cross-request cache.
- * @returns {Promise<{allowed: boolean, wacAllow: string}>}
+ * @param {boolean} [options.noDebit=false] - When true, evaluate a
+ *   PaymentCondition without charging the ledger. A positive-cost paid grant
+ *   is treated as not-satisfied (returns paymentRequired) rather than debited.
+ *   Used by secondary/guard checks (e.g. the POST sidecar Control gate in
+ *   handlePost) so a single request cannot debit twice or charge silently;
+ *   the authoritative debit stays in the primary authorize() hook.
+ * @returns {Promise<{
+ *   allowed: boolean,
+ *   wacAllow: string,
+ *   paymentRequired?: object|null,
+ *   paid?: number,
+ *   balance?: number,
+ *   currency?: string
+ * }>}
+ *   `paymentRequired` carries the unmet PaymentCondition (present when a paid
+ *   grant is denied, including every `noDebit` denial). `paid`/`balance`/
+ *   `currency` are set only when a debit actually occurred. The no-ACL deny
+ *   path returns just `{allowed, wacAllow}`.
  */
 export async function checkAccess({
   resourceUrl,
@@ -26,7 +43,8 @@ export async function checkAccess({
   isContainer,
   agentWebId,
   requiredMode,
-  aclCache = null
+  aclCache = null,
+  noDebit = false
 }) {
   // Find applicable ACL
   const aclResult = await findApplicableAcl(resourceUrl, resourcePath, isContainer, aclCache);
@@ -46,7 +64,8 @@ export async function checkAccess({
     resourceUrl,  // Use actual resource URL, not the ACL container URL
     agentWebId,
     requiredMode,
-    isDefault
+    isDefault,
+    noDebit
   );
 
   // Calculate WAC-Allow header
@@ -137,7 +156,7 @@ function getParentPath(path) {
 // Supported condition types
 const SUPPORTED_CONDITIONS = ['PaymentCondition', 'https://webacl.org/ns#PaymentCondition'];
 
-async function checkAuthorizations(authorizations, targetUrl, agentWebId, requiredMode, isDefault) {
+async function checkAuthorizations(authorizations, targetUrl, agentWebId, requiredMode, isDefault, noDebit = false) {
   for (const auth of authorizations) {
     // For default ACLs, check if auth has default rules and matches target
     // For direct ACLs, check if accessTo matches target
@@ -191,6 +210,11 @@ async function checkAuthorizations(authorizations, targetUrl, agentWebId, requir
             // Paid access: check balance and deduct
             const balance = getBalance(ledger, agentWebId, currency);
             if (cost > 0 && balance >= cost) {
+              // Guard checks must not charge: a paid grant is left unsatisfied
+              // here so billing happens once, in the primary authorize() path.
+              if (noDebit) {
+                return { allowed: false, paymentRequired: paymentCondition };
+              }
               const result = debit(ledger, agentWebId, cost, currency);
               const { writeLedger } = await import('../webledger.js');
               await writeLedger(ledger);

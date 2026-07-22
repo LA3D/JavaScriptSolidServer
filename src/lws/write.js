@@ -57,6 +57,12 @@ export async function applyLwsWrite({
       isContainer: sc.isContainer,
       agentWebId,
       requiredMode: mode,
+      // Secondary/guard check: this choke-point sidecar gate is a precondition
+      // layered on the real write, which is authorized separately. noDebit keeps
+      // a payment-conditioned Control grant from being charged here (a double
+      // debit) — the authoritative debit stays on the primary path. Inert until
+      // a PaymentCondition + ledger exist, but correct by construction.
+      noDebit: true,
     });
     if (!allowed) return refuse(resourceUrl, `${mode} required on ${sc.subject}`);
   }
