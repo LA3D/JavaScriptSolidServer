@@ -20,6 +20,7 @@ import { filterReadableEntries } from '../lws/authorized-listing.js';
 import { buildStorageDescriptionFor, buildServerIndex, resolveStorageDescriptionInputs } from '../lws/storage-description.js';
 import { storageRootFor } from '../lws/storage-resolver.js';
 import { listVisibleStorageRoots } from '../lws/storage-index.js';
+import { readOwners } from '../lws/type-metadata.js';
 import { LWS_CONTEXT_OBJECT, LWS_VOCAB, withInlineContext } from '../lws/context.js';
 import { readBounded, sanitizeForTrust } from './read.js';
 
@@ -80,7 +81,7 @@ async function readSkills(ctx, uri) {
 async function readServerIndex(ctx, uri) {
   const roots = await listVisibleStorageRoots(storage, { origin: ctx.origin, webId: ctx.webId });
   const idx = buildServerIndex(ctx.origin, roots.map((root) => ({ root })),
-    { typeIndexEnabled: ctx.typeIndexEnabled, mcpEnabled: true, anonRateLimitMax: ctx.anonRateLimitMax });
+    { typeIndexEnabled: ctx.typeIndexEnabled, mcpEnabled: true, anonRateLimitMax: ctx.anonRateLimitMax, provider: ctx.lwsProvider ?? null });
   return jsonContents(uri, withInlineContext(idx), 'application/lws+json');
 }
 
@@ -104,6 +105,11 @@ async function readPerStorageDescription(ctx, uri, root) {
   const podConfig = ctx.podConfigFor ? ctx.podConfigFor(root) : { get: async () => ({}) };
   const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
     await resolveStorageDescriptionInputs(podConfig, ctx.origin, ctx.lwsEnabled);
+  // Governance (2026-07-22): owner mirrors the HTTP route's readOwners(storage,
+  // root) call — same READ gate (requireRead above), same source (.lwsowner),
+  // so the two surfaces can't drift (never provider here — per-tenant
+  // descriptions never carry provider, HTTP rule mirrored exactly).
+  const owners = await readOwners(storage, root);
   const sd = buildStorageDescriptionFor(`${ctx.origin}${root}`, {
     typeIndexEnabled: ctx.typeIndexEnabled,
     profileIndexPath, voidPath,
@@ -111,6 +117,7 @@ async function readPerStorageDescription(ctx, uri, root) {
     referentResolutionEnabled, uriSpacePrefixes,
     mcpEnabled: true,
     anonRateLimitMax: ctx.anonRateLimitMax,
+    owners,
   });
   return jsonContents(uri, withInlineContext(sd), 'application/lws+json');
 }

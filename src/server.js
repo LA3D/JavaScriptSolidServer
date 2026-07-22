@@ -699,7 +699,7 @@ export function createServer(options = {}) {
     // storage-description resource is per-storage now (Task A7), so it needs
     // the SAME per-root resolver the HTTP /:pod/lws-storage route uses
     // (request.podConfigFor), not one server-wide config instance.
-    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfigResolver, anonRateLimitMax, federationPrivate });
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfigResolver, anonRateLimitMax, federationPrivate, lwsProvider: lwsProviderUri });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
