@@ -160,7 +160,7 @@ Server: pub http://localhost:4443/alice/public/data.json  (on change)
 | `--ap-display-name <name>` | ActivityPub display name | (username) |
 | `--ap-summary <text>` | ActivityPub bio/summary | - |
 | `--ap-nostr-pubkey <hex>` | Nostr pubkey for identity linking | - |
-| `--public` | Allow unauthenticated access (skip WAC) | false |
+| `--public` | Allow unauthenticated access (skip WAC); never writes into the served directory (no landing-page seed) | false |
 | `--read-only` | Disable PUT/DELETE/PATCH methods | false |
 | `--live-reload` | Auto-refresh browser on file changes | false |
 | `--pay` | Enable HTTP 402 paid access for /pay/* | false |
@@ -349,6 +349,152 @@ When `--invite-only` is enabled:
 - Depleted invites are automatically removed
 
 Invite codes are stored in `.server/invites.json` in your data directory.
+
+## Application Mount Points (appPaths)
+
+Programmatic compositions can mount whole applications beside the pod
+(the plugin-zero pattern from
+[#206](https://github.com/JavaScriptSolidServer/JavaScriptSolidServer/issues/206)):
+
+```js
+import { createServer } from 'javascript-solid-server/src/server.js';
+
+const fastify = createServer({ appPaths: ['/myapp'] });
+// Register both forms: fastify wildcards don't match the bare prefix.
+fastify.all('/myapp', myAppHandler);
+fastify.all('/myapp/*', myAppHandler); // the app owns auth below its prefix
+await fastify.listen({ port: 4443 });
+```
+
+Requests at or below an app path skip the WAC authorization hook — the
+application authenticates and authorizes its own traffic, exactly like the
+built-in `/storage/` and `/db/` routes. Everything outside the declared
+prefixes keeps full WAC enforcement. Entries must start with `/` and be
+longer than `/`; anything else is ignored.
+
+Because the WAC hook is also what populates `request.webId`, requests under
+an app path never carry it — don't rely on `request.webId` in app handlers.
+Resolve identity with the public accessor
+([#584](https://github.com/JavaScriptSolidServer/JavaScriptSolidServer/issues/584)):
+
+```js
+import { getAgent } from 'javascript-solid-server/auth.js';
+
+const agent = await getAgent(request); // WebID or did:nostr DID, null if anonymous
+```
+
+See [#582](https://github.com/JavaScriptSolidServer/JavaScriptSolidServer/issues/582)
+for the design discussion and
+[melvincarvalho/tideholm](https://github.com/melvincarvalho/tideholm/tree/gh-pages/jss-plugin)
+for a complete example (a multiplayer game where pod WebIDs are the player
+accounts).
+
+## App Plugins (plugins)
+
+The plugin loader
+([#206](https://github.com/JavaScriptSolidServer/JavaScriptSolidServer/issues/206))
+does the appPaths wiring for you: declare the apps in config and the server
+imports, mounts, and tears them down itself.
+
+```js
+const fastify = createServer({
+  root: './data',
+  idp: true,
+  plugins: [
+    { module: 'tideholm/jss-plugin/tideholm-jss.js', prefix: '/tideholm',
+      config: { bots: 8 } },
+    { module: './my-app/plugin.js', prefix: '/myapp' },
+  ],
+});
+```
+
+Each entry:
+
+- `module` — import specifier: a package path (resolved from JSS's module
+  graph) or a file path (`./…` or absolute, resolved from the process cwd).
+  The module exports `activate(api)`, called during startup.
+- `prefix` — the app's mount point. Added to `appPaths` automatically, so
+  the app owns authentication below it (see the section above). Must start
+  with `/`; invalid prefixes fail startup.
+- `config` — passed to the plugin verbatim as `api.config`.
+- `id` — optional stable identifier that names the plugin's private data
+  dir. Defaults to a name derived from `module`: the file's basename, or —
+  for a generic basename like `plugin.js`/`index.js` — its parent directory
+  (`relay/plugin.js` → `relay`), so the conventional `<name>/plugin.js`
+  layout yields distinct ids with none set. Set it explicitly only if two
+  specifiers still reduce to the same name.
+
+`activate(api)` receives: `api.fastify` (register routes here),
+`api.prefix`, `api.config`, `api.log`, `api.auth.getAgent(request)`
+(identity, as above), `api.storage.pluginDir()` (a private server-side
+directory under the data root, never served over HTTP),
+`api.serverInfo()` → `{ baseUrl, protocol, host, port, listening }` (the
+server's own origin, for minting absolute URLs and loopback calls — call
+it lazily, e.g. per request: with `port: 0` the real port exists only once
+the server is listening, and an explicit `idpIssuer` wins as `baseUrl`),
+`api.plugins` → `[{ id, prefix, module }]` for every loaded entry (a
+read-only, frozen boot-time snapshot, so a plugin can enumerate its
+co-loaded siblings instead of being handed a copy of the operator's
+plugins array — it includes the plugin itself, so consumers filter),
+and `api.ws.route(path, (socket, request) => {})` for WebSocket endpoints —
+routed through the same upgrade path as the built-in realtime features, so
+plugins never attach their own `'upgrade'` listener. Return
+`{ deactivate }` to run teardown (state saves, timers) on server close.
+
+A plugin whose protocol **pins absolute paths** outside its prefix can
+claim them with `api.reservePath(path)`:
+
+```js
+api.reservePath('/xrpc', { methods: ['GET', 'POST'] });  // fixed root — subtree, methods opted in
+api.reservePath('/:user/did.json');                      // pinned document — exact shape, read-only
+```
+
+Both kinds are **read-only by default** (`GET`/`HEAD`/`OPTIONS`; widen with
+`{ methods: [...] }`) — a reserved path is WAC-exempt and the LDP write
+wildcards sit beneath it, so exempting a write method the plugin hasn't
+implemented would let that write fall through to storage unauthenticated.
+Literal reservations claim their whole subtree; parameterized reservations
+(`:name` matches one segment) match only the exact path shape, since they
+exist for pinned documents inside the pod's WAC-governed namespace. Claims
+are cross-plugin: a second plugin reserving the same path fails the boot
+naming both claimants. Registering routes on the reserved paths remains the
+plugin's job via `api.fastify`.
+
+To mount an **existing node-style app** — a `(req, res)` handler, a reverse
+proxy, or a framework adapter — use `api.mountApp(handler, { prefix })`:
+
+```js
+export async function activate(api) {
+  const app = createMyNodeApp();
+  await api.mountApp((req, res) => app.handle(req, res));
+}
+```
+
+`mountApp` bundles the four things a wrapped-app plugin needs and would
+otherwise rediscover: the appPaths WAC exemption, a **scoped pass-through
+content parser** (so the wrapped app receives an unconsumed body stream
+instead of one Fastify already drained — the failure that hangs any
+body-reading app), `reply.hijack()` so Fastify releases the response, and
+registration on both the bare prefix and its subtree. It defaults to the
+entry's `prefix`; pass `{ prefix }` to mount a second app elsewhere (that
+prefix is WAC-exempted too).
+
+A plugin that fails to import or activate fails `listen()` loudly rather
+than booting a server silently missing an app.
+
+The simple module + prefix case also works straight from the CLI, no
+config file needed ([#594](https://github.com/JavaScriptSolidServer/JavaScriptSolidServer/issues/594)):
+
+```bash
+jss start --root ./data --public \
+  --plugin './chat/plugin.js@/chat' \
+  --plugin '@scope/pkg/plugin.js@/app'
+```
+
+`--plugin` is repeatable; the prefix separator is the last `@` followed by
+`/`, so scoped package names parse unambiguously. CLI entries **append** to
+any `plugins` array from the config file (they don't replace it). Per-plugin
+`config` objects and explicit `id`s remain config-file-only.
 
 ## Storage Quotas
 
