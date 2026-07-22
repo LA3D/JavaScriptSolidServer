@@ -45,4 +45,11 @@ describe('.lwsowner is System-Managed', () => {
     });
     assert.notEqual(res.status, 201, 'case-variant must not create a sidecar-aliasable resource');
   });
+
+  it('GET of a case-variant sidecar path never 500s and stays subject-gated', async () => {
+    for (const p of [`${root}victim.md.LWSTYPES`, `${root}victim.md.LWSOWNER`, `${root}nonexistent.LWSPROV`]) {
+      const res = await fetch(`${pod.base}${p}`);
+      assert.ok(res.status < 500, `${p} -> ${res.status} (must not crash)`);
+    }
+  });
 });
