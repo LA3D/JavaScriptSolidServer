@@ -50,6 +50,42 @@ export async function readDeclaredTypes(storage, storagePath) {
   catch { return []; }
 }
 
+// Merge one type into `.lwstypes` without clobbering what's there —
+// captureDeclaredTypes overwrites by design (provisioning), but the boot
+// backfill (governance round 2026-07-22) touches roots that may already
+// carry client-declared types. Returns true only when it wrote.
+export async function ensureDeclaredType(storage, storagePath, typeUri) {
+  const existing = await readDeclaredTypes(storage, storagePath);
+  if (existing.includes(typeUri)) return false;
+  await storage.write(typeStorePath(storagePath), Buffer.from(JSON.stringify([...existing, typeUri])));
+  return true;
+}
+
+// Per-storage owner record (governance round 2026-07-22): solid:owner URIs
+// for a storage root, System-Managed like `.lwstypes`. In-storage (not
+// config) because ownership travels with the data on re-homing; the
+// deployment operator (schema:provider) is config precisely because it
+// does not. Design: docs/superpowers/specs/2026-07-22-* in lws-pod.
+export function ownerStorePath(storagePath) {
+  return storagePath + '.lwsowner';
+}
+
+export async function readOwners(storage, storagePath) {
+  const p = ownerStorePath(storagePath);
+  if (!(await storage.exists(p))) return [];
+  const buf = await storage.read(p);
+  if (!buf) return [];
+  try { const arr = JSON.parse(buf.toString('utf8')); return Array.isArray(arr) ? arr.filter((o) => isAbsoluteUri(o)) : []; }
+  catch { return []; }
+}
+
+export async function writeOwners(storage, storagePath, ownerUris) {
+  const clean = [];
+  for (const o of (ownerUris || [])) if (isAbsoluteUri(o) && !clean.includes(o)) clean.push(o);
+  if (!clean.length) return;                                  // ≥1 owner or no record
+  await storage.write(ownerStorePath(storagePath), Buffer.from(JSON.stringify(clean)));
+}
+
 // Earned conformsTo provenance (System-Managed): which profile a member's
 // CONTAINER declared at the moment the member was admitted. Distinct from
 // the client-managed `.meta` dct:conformsTo (declared binding intent) — a
