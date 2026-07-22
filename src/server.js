@@ -1615,6 +1615,21 @@ export function createServer(options = {}) {
     });
   }
 
+  // Governance backfill (2026-07-22): heal pre-marker pods at boot — loud,
+  // never fatal, idempotent. Registered after single-user provisioning so a
+  // fresh pod is already stamped and this is a no-op for it.
+  if (lwsEnabled) {
+    fastify.addHook('onReady', async () => {
+      const protocol = options.ssl ? 'https' : 'http';
+      const host = options.host === '0.0.0.0' ? 'localhost' : (options.host || 'localhost');
+      const port = options.port || defaults.port;
+      const baseUrl = idpIssuer?.replace(/\/$/, '') || `${protocol}://${host}:${port}`;
+      const { backfillGovernance } = await import('./lws/governance-backfill.js');
+      await backfillGovernance(storage, { idpEnabled, singleUser, singleUserName, baseUrl }, fastify.log)
+        .catch((err) => fastify.log.warn({ err }, '[lws-pod] governance backfill failed — boot continues'));
+    });
+  }
+
   /**
    * Seed an IDP account for the single-user pod owner if one doesn't
    * already exist. Password sources, in priority order:
