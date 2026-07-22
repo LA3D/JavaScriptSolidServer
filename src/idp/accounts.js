@@ -462,3 +462,12 @@ export async function getAccountForProvider(id) {
     },
   };
 }
+
+/**
+ * All registered usernames (from the username index). Governance-backfill
+ * roster source — usernames are pod names in path mode.
+ */
+export async function listUsernames() {
+  const index = await loadIndex(getUsernameIndexPath());
+  return Object.keys(index);
+}

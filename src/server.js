@@ -38,6 +38,7 @@ import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
+import { readOwners } from './lws/type-metadata.js';
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
 import { formatCapabilityReport } from './lws/capability-report.js';
 import { storageRootFor } from './lws/storage-resolver.js';
@@ -109,6 +110,10 @@ export function createServer(options = {}) {
   const connegEnabled = options.conneg ?? false;
   // Linked Web Storage surface is OFF by default
   const lwsEnabled = options.lws ?? false;
+  // Deployment operator (governance round 2026-07-22): a URI, possibly on
+  // another pod deployment — config-only on purpose (ownership travels with
+  // data, operatorship does not). Surfaced, never persisted into tenant data.
+  const lwsProviderUri = options.lwsProvider ?? null;
   // Type Index/Search services are ON by default whenever --lws is on;
   // --no-lws-type-index is a per-deployment safety valve to disable just
   // the type-aggregation surface without disabling the rest of --lws.
@@ -476,6 +481,12 @@ export function createServer(options = {}) {
   // the Link points at the OWNING storage's description, not the origin
   // well-known.
   fastify.decorateRequest('storageRootPath', null);
+  // Governance round: the storage's solid:owner URIs, resolved ONLY when the
+  // request targets the storage root itself (the one response Solid's
+  // advertising MUST applies to) — every other request pays nothing. Rides
+  // the A6-resolved root; READ-gating is inherited (the root response only
+  // exists after the WAC hook passed).
+  fastify.decorateRequest('storageOwners', null);
   // Task 7 (spec 2026-07-15): the navigator root/storage view
   // (src/handlers/resource.js) builds its own storage description — it
   // needs these two flags on `request` for parity, mirroring
@@ -514,6 +525,11 @@ export function createServer(options = {}) {
     request.storageRootPath = lwsEnabled
       ? await storageRootFor(storage, request.url.split('?')[0])
       : null;
+
+    request.storageOwners = null;
+    if (request.storageRootPath && request.url.split('?')[0] === request.storageRootPath) {
+      request.storageOwners = await readOwners(storage, request.storageRootPath);
+    }
 
     // Extract pod name from subdomain if enabled
     if (subdomainsEnabled && baseDomain) {
@@ -694,7 +710,7 @@ export function createServer(options = {}) {
     // storage-description resource is per-storage now (Task A7), so it needs
     // the SAME per-root resolver the HTTP /:pod/lws-storage route uses
     // (request.podConfigFor), not one server-wide config instance.
-    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfigResolver, anonRateLimitMax, federationPrivate });
+    fastify.register(mcpPlugin, { routeOptions: mcpRateLimit, credentialPolicy: mcpCredentialPolicy, podConfigResolver, anonRateLimitMax, federationPrivate, lwsProvider: lwsProviderUri });
   }
 
   // (rate-limit plugin registration moved up — see the block before the
@@ -1214,7 +1230,7 @@ export function createServer(options = {}) {
       const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       const roots = await listVisibleStorageRoots(storage, { origin, webId });
       const body = buildServerIndex(origin, roots.map((root) => ({ root })),
-        { typeIndexEnabled, mcpEnabled, anonRateLimitMax });
+        { typeIndexEnabled, mcpEnabled, anonRateLimitMax, provider: lwsProviderUri });
       return sendJsonWithEtag(request, reply, body);
     });
     // Block writes — this is a read-only well-known resource.
@@ -1259,10 +1275,11 @@ export function createServer(options = {}) {
       // podConfig this route used before storages were per-tenant.
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor(root), origin, request.lwsEnabled);
+      const owners = await readOwners(storage, root);
       const body = buildStorageDescriptionFor(`${origin}${root}`, {
         typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
-        uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
+        uriSpacePrefixes, mcpEnabled, anonRateLimitMax, owners,
       });
       return sendJsonWithEtag(request, reply, body);
     });
@@ -1291,10 +1308,11 @@ export function createServer(options = {}) {
       reply.type(storageDescriptionContentType(request.headers.accept));
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
         await resolveStorageDescriptionInputs(request.podConfigFor('/'), origin, request.lwsEnabled);
+      const owners = await readOwners(storage, '/');
       const body = buildStorageDescriptionFor(`${origin}/`, {
         typeIndexEnabled,
         profileIndexPath, voidPath, profileConnegEnabled, referentResolutionEnabled,
-        uriSpacePrefixes, mcpEnabled, anonRateLimitMax,
+        uriSpacePrefixes, mcpEnabled, anonRateLimitMax, owners, provider: lwsProviderUri,
       });
       return sendJsonWithEtag(request, reply, body);
     });
@@ -1597,6 +1615,24 @@ export function createServer(options = {}) {
     });
   }
 
+  // Governance backfill (2026-07-22): heal pre-marker pods at boot — loud,
+  // never fatal, idempotent. Registered after single-user provisioning so a
+  // fresh pod is already stamped and this is a no-op for it.
+  if (lwsEnabled) {
+    fastify.addHook('onReady', async () => {
+      try {
+        const protocol = options.ssl ? 'https' : 'http';
+        const host = options.host === '0.0.0.0' ? 'localhost' : (options.host || 'localhost');
+        const port = options.port || defaults.port;
+        const baseUrl = idpIssuer?.replace(/\/$/, '') || `${protocol}://${host}:${port}`;
+        const { backfillGovernance } = await import('./lws/governance-backfill.js');
+        await backfillGovernance(storage, { idpEnabled, singleUser, singleUserName, baseUrl }, fastify.log);
+      } catch (err) {
+        fastify.log.warn({ err }, '[lws-pod] governance backfill failed — boot continues');
+      }
+    });
+  }
+
   /**
    * Seed an IDP account for the single-user pod owner if one doesn't
    * already exist. Password sources, in priority order:
@@ -1725,8 +1761,9 @@ export function createServer(options = {}) {
     await storage.createContainer('/settings/');
     await storage.createContainer('/profile/');
 
-    const { captureDeclaredTypes, LWS_STORAGE } = await import('./lws/type-metadata.js');
+    const { captureDeclaredTypes, writeOwners, LWS_STORAGE } = await import('./lws/type-metadata.js');
     await captureDeclaredTypes(storage, '/', [LWS_STORAGE]);       // root-pod is its own storage
+    await writeOwners(storage, '/', [webId]);                      // solid:owner record (governance round)
 
     // Generate the owner key in memory up-front (when --provision-keys
     // is set) so its VM can be injected into the WebID profile that
@@ -1848,7 +1885,7 @@ export function createServer(options = {}) {
   // "no --lws-config given" (the `else` branch in the module) from "given",
   // not "given but unresolvable".
   fastify.log.info('\n' + formatCapabilityReport(
-    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled },
+    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled, lwsProvider: lwsProviderUri },
     { configResolved: true }
   ));
 

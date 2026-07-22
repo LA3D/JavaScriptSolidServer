@@ -17,6 +17,7 @@ export function formatCapabilityReport(config, { configResolved } = {}) {
     } else {
       L.push('  lws-config           (none) → profileIndex/void/uriSpaces services OFF');
     }
+    if (config.lwsProvider) L.push(`  provider             ${config.lwsProvider}`);
   }
   L.push(`  mcp                  ${on(config.mcp)}`);
   return L.join('\n');

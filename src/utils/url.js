@@ -167,11 +167,23 @@ export function getResourceName(urlPath) {
 
 /**
  * The sidecar suffixes whose authorization binds to the SUBJECT they describe,
- * not to the sidecar's own path: `.lwstypes`/`.lwsprov` (System-Managed
- * type/provenance) and `.meta` (client-managed governance). `foo.jsonld.meta`
- * describes `foo.jsonld`; a container's bare `/foo/.meta` describes `/foo/`.
+ * not to the sidecar's own path: `.lwstypes`/`.lwsprov`/`.lwsowner`
+ * (System-Managed type/provenance/owner) and `.meta` (client-managed
+ * governance). `foo.jsonld.meta` describes `foo.jsonld`; a container's bare
+ * `/foo/.meta` describes `/foo/`.
+ *
+ * Case-INSENSITIVE (F1, 2026-07-22 — same rationale as `AUX_SUFFIX_CI_RE`
+ * below): both consumers are on the authz path — the MCP/HTTP READ dispatch
+ * regexes that route into `sidecarSubject` (this fn's own caller) are already
+ * `/i`, and `sidecarSubject` must recognize the same cases they do or the
+ * destructure it feeds throws (an unauthenticated `GET x.LWSTYPES` 500'd
+ * before this fix). The other consumer, `middleware.js`'s `storagePath`
+ * re-strip, is fail-safe either way: on a case-insensitive volume `x.LWSTYPES`
+ * IS `x.lwstypes` (same inode); on a case-sensitive FS gating the literal
+ * uppercase name on its own would-be subject is over-protection, not
+ * under-protection.
  */
-export const SIDECAR_SUFFIX = /\.(lwstypes|lwsprov|meta)$/;
+export const SIDECAR_SUFFIX = /\.(lwstypes|lwsprov|lwsowner|meta)$/i;
 
 /**
  * Resolve the SUBJECT a sidecar path describes, so both surfaces bind the
@@ -200,7 +212,7 @@ export function sidecarSubject(urlPath) {
  * import would be circular. `src/storage/filesystem.js` re-exports it as
  * `AUX_SUFFIX` for its existing callers.
  */
-export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov)$/;
+export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov|lwsowner)$/;
 
 /**
  * Case-INSENSITIVE sidecar-suffix matcher, used ONLY by the authorization
@@ -211,7 +223,7 @@ export const AUX_SUFFIX_RE = /\.(acl|meta|lwstypes|lwsprov)$/;
  * the type-capture / provenance skips in storage/write (which operate on the
  * exact on-disk name) are unchanged.
  */
-export const AUX_SUFFIX_CI_RE = /\.(acl|meta|lwstypes|lwsprov)$/i;
+export const AUX_SUFFIX_CI_RE = /\.(acl|meta|lwstypes|lwsprov|lwsowner)$/i;
 
 /**
  * THE path boundary for the MCP surface. Collapse a client-supplied path to the
@@ -432,7 +444,9 @@ export function getContentType(filePath) {
     '.lwstypes': 'application/json',
     // LWS earned-conformsTo provenance sidecar (Task 2, 2026-07-13) — same
     // stance as .lwstypes: plain JSON, no @context, so not ld+json.
-    '.lwsprov': 'application/json'
+    '.lwsprov': 'application/json',
+    // LWS owner sidecar (governance round, 2026-07-22) — same stance.
+    '.lwsowner': 'application/json'
   };
 
   // Solid convention dotfiles (.acl, .meta) are RDF resources. path.extname
@@ -443,7 +457,7 @@ export function getContentType(filePath) {
   // older Solid tooling) via handleGet's conneg branch.
   const base = path.basename(filePath);
   if (base === '.acl' || base === '.meta') return 'application/ld+json';
-  if (base === '.lwstypes' || base === '.lwsprov') return 'application/json';
+  if (base === '.lwstypes' || base === '.lwsprov' || base === '.lwsowner') return 'application/json';
 
   // Overrides first, then the comprehensive mime-types database (as CSS and
   // NSS do), then octet-stream. This is what makes audio/video/etc. resolve

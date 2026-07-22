@@ -223,6 +223,10 @@ export async function mcpPlugin(fastify, options = {}) {
   // --lws-federation-private the same way as credentialPolicy/podConfig.
   // Off by default; readRemote (read-tools.js) is the only consumer.
   const federationPrivate = options.federationPrivate ?? false;
+  // Governance round (2026-07-22): threaded from server.js's lwsProviderUri
+  // the same way as anonRateLimitMax, so the ServerIndex mirror can't drift
+  // from the HTTP route on the provider field.
+  const lwsProvider = options.lwsProvider ?? null;
   fastify.post('/mcp', routeOptions, async (request, reply) => {
     const body = request.body;
     if (!body || typeof body !== 'object') {
@@ -266,7 +270,8 @@ export async function mcpPlugin(fastify, options = {}) {
       // OWNING storage's {profileIndex, void, uriSpaces} from this per the
       // addressed resource's root, rather than one config baked in here.
       podConfigFor,
-      anonRateLimitMax
+      anonRateLimitMax,
+      lwsProvider
     };
 
     // Streaming tool? Hand off to SSE handler.

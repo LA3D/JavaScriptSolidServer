@@ -10,10 +10,11 @@ const LDP = 'http://www.w3.org/ns/ldp#';
 // NARROWER than storage's AUX_SUFFIX: `.acl`/`.meta` are client-managed
 // per-resource auxiliaries that DO appear as members with their own mediaTypes
 // (DT7, pinned by lws-items-mediatype.test.js) and are WAC-filtered per member
-// by S1. `.lwstypes`/`.lwsprov` are server-derived, public-read by container
-// inheritance, and were the actual leak vector — a private resource's name
-// escaping into an anonymous listing via its sidecar (2026-07-13).
-const SYS_SIDECAR = /\.(lwstypes|lwsprov)$/;
+// by S1. `.lwstypes`/`.lwsprov`/`.lwsowner` are server-derived, public-read by
+// container inheritance, and were the actual leak vector — a private
+// resource's name escaping into an anonymous listing via its sidecar
+// (2026-07-13).
+const SYS_SIDECAR = /\.(lwstypes|lwsprov|lwsowner)$/;
 
 // Dotfiles allowed to appear in ldp:contains. Anything else starting with '.'
 // is server-internal state and must not leak into container listings — even

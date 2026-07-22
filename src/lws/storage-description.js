@@ -114,10 +114,10 @@ function mcpServiceEntry(origin, anonRateLimitMax) {
  * MCP is one gateway per pod, not per storage.
  * @param {string} idUrl  the description's own `id` (trailing slash)
  * @param {string} sdEndpoint  this description's own serviceEndpoint
- * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null, owners?:string[], provider?:string|null}} flags
  * @returns {object}
  */
-function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, uriSpacePrefixes = [], mcpEnabled = false, anonRateLimitMax = null } = {}) {
+function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, profileIndexPath = null, voidPath = null, profileConnegEnabled = false, referentResolutionEnabled = false, uriSpacePrefixes = [], mcpEnabled = false, anonRateLimitMax = null, owners = [], provider = null } = {}) {
   const origin = new URL(idUrl).origin;
   const services = [{ type: 'StorageDescription', serviceEndpoint: sdEndpoint }];
   if (typeIndexEnabled) {
@@ -199,6 +199,12 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, prof
     if (uriSpacePrefixes.length) cap.uriSpace = uriSpacePrefixes;
     capability.push(cap);
   }
+  // Governance (2026-07-22): owner = solid:owner (the storage's .lwsowner
+  // record, READ-gated by the serving route); provider = schema:provider
+  // (deployment operator, config-only — root-pod description + ServerIndex,
+  // never per-tenant). LWS Discovery: "Additional properties MAY be present."
+  if (owners.length) doc.owner = owners;
+  if (provider) doc.provider = provider;
   if (capability.length > 0) doc.capability = capability;
   return doc;
 }
@@ -217,7 +223,7 @@ function assembleDescription(idUrl, sdEndpoint, { typeIndexEnabled = false, prof
  * podConfig) — a mixed-mode deployment naming different targets in each is
  * not reconciled here.
  * @param {string} storageRootUrl  absolute, trailing slash, e.g. 'http://h/alice/'
- * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @param {{typeIndexEnabled?:boolean, profileIndexPath?:string|null, voidPath?:string|null, profileConnegEnabled?:boolean, referentResolutionEnabled?:boolean, uriSpacePrefixes?:string[], mcpEnabled?:boolean, anonRateLimitMax?:number|null, owners?:string[], provider?:string|null}} flags
  * @returns {object}
  */
 export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
@@ -233,10 +239,10 @@ export function buildStorageDescriptionFor(storageRootUrl, flags = {}) {
  * a storage itself.
  * @param {string} origin  `${proto}://${host}` (no trailing slash)
  * @param {Array<{root:string}>} storages  e.g. [{ root: '/alice/' }]
- * @param {{typeIndexEnabled?:boolean, mcpEnabled?:boolean, anonRateLimitMax?:number|null}} flags
+ * @param {{typeIndexEnabled?:boolean, mcpEnabled?:boolean, anonRateLimitMax?:number|null, provider?:string|null}} flags
  * @returns {object}
  */
-export function buildServerIndex(origin, storages = [], { typeIndexEnabled = false, mcpEnabled = false, anonRateLimitMax = null } = {}) {
+export function buildServerIndex(origin, storages = [], { typeIndexEnabled = false, mcpEnabled = false, anonRateLimitMax = null, provider = null } = {}) {
   const idx = {
     '@context': LWS_CONTEXT,
     id: `${origin}/`,
@@ -246,6 +252,7 @@ export function buildServerIndex(origin, storages = [], { typeIndexEnabled = fal
       storageDescription: `${origin}${s.root}lws-storage`,
     })),
   };
+  if (provider) idx.provider = provider;
   // Extension surface (ServerIndex is itself a JSS extension): the
   // cross-storage aggregates live here, NOT in per-storage descriptions —
   // each storage advertises only its own scoped services (R7).

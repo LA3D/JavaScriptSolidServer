@@ -164,6 +164,10 @@ function defaultProfileFor(representations, contentType) {
  *   request pipeline — getAllHeaders is sync and can't resolve it itself.
  *   `null` (default) keeps the pre-multi-tenant server-scope well-known
  *   target, unchanged for every caller that doesn't pass it.
+ * @param {string[]|null} [options.storageOwners] - solid:owner URIs for the
+ *   storage, resolved (server.js onRequest) ONLY when `resourceUrl` IS the
+ *   storage root — `null`/empty everywhere else, so members never get the
+ *   Link even when passed the same field.
  * @param {boolean} [options.syntheticView] - true when the response body is
  *   a server-rendered VIEW of the resource (e.g. the navigator's generic
  *   entity face, `?view=nav`) rather than the resource's own bytes. Profile
@@ -176,7 +180,7 @@ function defaultProfileFor(representations, contentType) {
  *   since advertising what representations exist is still honest.
  * @returns {object}
  */
-export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null, storageRootPath = null, syntheticView = false }) {
+export function getAllHeaders({ isContainer = false, etag = null, contentType = null, origin = null, resourceUrl = null, wacAllow = null, connegEnabled = false, mashlibEnabled = false, lwsEnabled = false, updatesVia = null, chosenProfile = null, representations = null, storageRootPath = null, storageOwners = null, syntheticView = false }) {
   const headers = {
     ...getResponseHeaders({ isContainer, etag, contentType, resourceUrl, wacAllow, connegEnabled, mashlibEnabled, lwsEnabled, updatesVia }),
     ...getCorsHeaders(origin)
@@ -192,6 +196,12 @@ export function getAllHeaders({ isContainer = false, etag = null, contentType = 
     ];
     const parent = parentContainerUrl(resourceUrl);
     if (parent) parts.unshift(`<${parent}>; rel="up"`);
+    // Solid Protocol: when a server advertises the owner of a storage it MUST
+    // use this Link relation on the root container. Only ever non-null on the
+    // storage root itself (server.js onRequest), so members never carry it.
+    if (storageOwners?.length) {
+      parts.push(...storageOwners.map((o) => `<${o}>; rel="http://www.w3.org/ns/solid/terms#owner"`));
+    }
     const extra = parts.join(', ');
     headers['Link'] = headers['Link'] ? `${headers['Link']}, ${extra}` : extra;
   }
