@@ -89,7 +89,11 @@ async function write_resource({ path, content, contentType, types }, ctx) {
   const isMeta = sc?.kind === 'meta';
   if (isAcl || (isMeta && !(await storage.exists(sc.path)))) {
     const subj = sc.subject;
-    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+    // Secondary guard: the sidecar-subject Control precondition. The real write
+    // is authorized separately (the WRITE check below + the applyLwsWrite
+    // choke-point), so noDebit keeps a payment-conditioned Control grant from
+    // being charged twice.
+    if (!(await wac(ctx, subj, AccessMode.CONTROL, { noDebit: true }))) {
       return toolError(`access denied: control ${subj} (required to write ${path})`);
     }
   }
@@ -162,7 +166,10 @@ async function create_resource({ container, slug, content, contentType, isContai
   const sc2 = auxSubject(childPath);
   if (sc2) {
     const subj = sc2.subject;
-    if (!(await wac(ctx, subj, AccessMode.CONTROL))) {
+    // Secondary guard: the sidecar-subject Control precondition. The create is
+    // authorized separately (the APPEND check on the container + the
+    // applyLwsWrite choke-point), so noDebit prevents a double debit.
+    if (!(await wac(ctx, subj, AccessMode.CONTROL, { noDebit: true }))) {
       return toolError(`access denied: control ${subj} (required to create ${childPath})`);
     }
   }

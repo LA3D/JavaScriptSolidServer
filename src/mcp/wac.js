@@ -53,7 +53,7 @@ export async function resolvePath(p) {
   return (s && !s.isDirectory) ? c.replace(/\/+$/, '') : c;
 }
 
-export async function wac(ctx, path, mode) {
+export async function wac(ctx, path, mode, { noDebit = false } = {}) {
   // Normalize BEFORE deciding anything — the guard and the operation must
   // never disagree about which path is in play (Task 7a round 3).
   path = await resolvePath(path);
@@ -73,6 +73,7 @@ export async function wac(ctx, path, mode) {
     isContainer: checkIsContainer,
     agentWebId: ctx.webId,
     requiredMode: mode,
+    noDebit,
   });
   return allowed;
 }

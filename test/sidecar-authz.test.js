@@ -447,6 +447,22 @@ describe('applyLwsWrite sidecar guard', () => {
   });
 });
 
+test('choke-point guard passes noDebit so a guard check never charges the ledger', async () => {
+  const storage = fakeStorage();
+  let sawNoDebit = null;
+  await applyLwsWrite({
+    storage,
+    storagePath: '/foo/victim.acl',
+    resourceUrl: 'http://localhost/foo/victim.acl',
+    content: Buffer.from('{}', 'utf8'),
+    contentType: 'application/ld+json',
+    lwsEnabled: true,
+    agentWebId: 'http://localhost/a#me',
+    checkAccessFn: async (args) => { sawNoDebit = args.noDebit; return { allowed: true }; },
+  });
+  assert.equal(sawNoDebit, true, 'guard checks must pass noDebit: true');
+});
+
 /**
  * Task 7a round 3 (2026-07-21) — the SUBJECT-side twin of the sidecar hole.
  *
