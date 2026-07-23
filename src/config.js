@@ -43,6 +43,9 @@ export const defaults = {
   // opt-in path, read lazily + mtime-cached (src/lws/pod-config.js). Replaces
   // the old --lws-profile-index/--lws-void per-service flags.
   lwsConfig: null,
+  // Deployment operator URI (schema:provider) — config-only (--lws-provider /
+  // JSS_LWS_PROVIDER), never persisted into tenant data (governance round).
+  lwsProvider: null,
   notifications: false,
 
   // Identity Provider
@@ -189,6 +192,7 @@ const envMap = {
   JSS_LWS_TYPE_INDEX: 'lwsTypeIndex',
   JSS_LWS_PROFILE_CONNEG: 'lwsProfileConneg',
   JSS_LWS_CONFIG: 'lwsConfig',
+  JSS_LWS_PROVIDER: 'lwsProvider',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',

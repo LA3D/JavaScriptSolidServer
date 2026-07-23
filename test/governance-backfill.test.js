@@ -126,6 +126,52 @@ describe('governance backfill (boot self-heal)', () => {
     await fs.emptyDir('./data');
   });
 
+  it('F-4: --lws off over a stripped legacy tree performs NO healing (hook never registers)', async () => {
+    await fs.emptyDir('./data');
+    const a = await boot({ lws: true, idp: true });
+    const res = await fetch(`${a.base}/.pods`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'unhealed', email: 'unhealed@example.org', password: 'test-pass-1234' }),
+    });
+    assert.equal(res.status, 201);
+    await a.s.close();
+
+    // Strip the marker + owner record, same as the other legacy-tree tests.
+    await fs.remove('./data/unhealed/.lwstypes');
+    await fs.remove('./data/unhealed/.lwsowner');
+
+    // Reboot WITHOUT --lws — the backfill hook is registered only when
+    // lwsEnabled is true (src/server.js, right after the singleUser
+    // provisioning block), so this boot must leave the stripped sidecars
+    // untouched: no marker, no owner record.
+    const b = await boot({ lws: false, idp: true });
+    await b.s.close();
+
+    assert.equal(await storage.read(typeStorePath('/unhealed/')), null, 'no .lwstypes healed');
+    assert.equal(await storage.read(ownerStorePath('/unhealed/')), null, 'no .lwsowner healed');
+    await fs.emptyDir('./data');
+  });
+
+  it('F-4: a corrupt roster (invalid JSON _username_index.json) never blocks boot', async () => {
+    await fs.emptyDir('./data');
+    const a = await boot({ lws: true, idp: true });
+    await a.s.close();
+
+    // Corrupt the IDP username index that roster assembly reads.
+    await fs.ensureDir('./data/.idp/accounts');
+    await fs.writeFile('./data/.idp/accounts/_username_index.json', '{ not valid json');
+
+    // Boot must still come up: listen succeeds and a fetch of / responds,
+    // even though governance-backfill's roster assembly will fail on the
+    // corrupt index — that failure is caught (onReady try/catch, warn-only)
+    // and must not break boot.
+    const b = await boot({ lws: true, idp: true });
+    const rootRes = await fetch(`${b.base}/`);
+    assert.ok(rootRes.status < 500, `root fetch should not 5xx, got ${rootRes.status}`);
+    await b.s.close();
+    await fs.emptyDir('./data');
+  });
+
   it('single-user root pod heals through the profile-card roster branch', async () => {
     await fs.emptyDir('./data');
     const a = await boot({ lws: true, singleUser: true });   // root pod at /

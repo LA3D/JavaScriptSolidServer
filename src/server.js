@@ -39,6 +39,7 @@ import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
 import { readOwners } from './lws/type-metadata.js';
+import { isAbsoluteUri } from './lws/type-index.js';
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
 import { formatCapabilityReport } from './lws/capability-report.js';
 import { storageRootFor } from './lws/storage-resolver.js';
@@ -113,7 +114,14 @@ export function createServer(options = {}) {
   // Deployment operator (governance round 2026-07-22): a URI, possibly on
   // another pod deployment — config-only on purpose (ownership travels with
   // data, operatorship does not). Surfaced, never persisted into tenant data.
-  const lwsProviderUri = options.lwsProvider ?? null;
+  // F-3 (final-review fix): validated as an absolute URI before it's
+  // surfaced — a malformed --lws-provider/JSS_LWS_PROVIDER value must never
+  // be fatal (warn loud, drop to null; the rest of boot proceeds).
+  let lwsProviderUri = options.lwsProvider ?? null;
+  if (lwsProviderUri && !isAbsoluteUri(lwsProviderUri)) {
+    console.warn(`[lws-pod] --lws-provider / JSS_LWS_PROVIDER is not an absolute URI: ${JSON.stringify(lwsProviderUri)} — ignoring (schema:provider will be omitted)`);
+    lwsProviderUri = null;
+  }
   // Type Index/Search services are ON by default whenever --lws is on;
   // --no-lws-type-index is a per-deployment safety valve to disable just
   // the type-aggregation surface without disabling the rest of --lws.
@@ -526,8 +534,17 @@ export function createServer(options = {}) {
       ? await storageRootFor(storage, request.url.split('?')[0])
       : null;
 
+    // solid:owner is READ-gated by inheritance (spec §4): it may only ride
+    // a response that itself exists after WAC passed. That argument holds
+    // for GET/HEAD, which go through authorize()'s normal WAC check — but
+    // NOT for OPTIONS, which authorize() always allows unconditionally
+    // (CORS preflight, src/auth/middleware.js) and so never sees WAC at
+    // all. Method-gate resolution here, at the one place owners are read,
+    // rather than chasing every call site that threads request.storageOwners
+    // through (final-review F-1, 2026-07-23): an anonymous OPTIONS on a
+    // private storage must not leak its owner.
     request.storageOwners = null;
-    if (request.storageRootPath && request.url.split('?')[0] === request.storageRootPath) {
+    if ((request.method === 'GET' || request.method === 'HEAD') && request.storageRootPath && request.url.split('?')[0] === request.storageRootPath) {
       request.storageOwners = await readOwners(storage, request.storageRootPath);
     }
 

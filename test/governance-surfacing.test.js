@@ -39,6 +39,19 @@ describe('governance surfacing (description + ServerIndex + provider)', () => {
     assert.doesNotMatch(memberRes.headers.get('link') ?? '', /solid\/terms#owner/);
   });
 
+  it('F-1: anonymous OPTIONS on the storage root carries NO solid:owner Link (OPTIONS bypasses WAC)', async () => {
+    const res = await fetch(`${base}/govsurf/`, { method: 'OPTIONS' });
+    assert.equal(res.status, 204);
+    assert.doesNotMatch(res.headers.get('link') ?? '', /solid\/terms#owner/);
+  });
+
+  it('F-1: GET and HEAD on the storage root still carry the solid:owner Link', async () => {
+    const getRes = await fetch(`${base}/govsurf/`);
+    assert.match(getRes.headers.get('link') ?? '', /rel="http:\/\/www\.w3\.org\/ns\/solid\/terms#owner"/);
+    const headRes = await fetch(`${base}/govsurf/`, { method: 'HEAD' });
+    assert.match(headRes.headers.get('link') ?? '', /rel="http:\/\/www\.w3\.org\/ns\/solid\/terms#owner"/);
+  });
+
   it('without --lws-provider no provider key appears', async () => {
     await stopTestServer();
     await startTestServer({ lws: true });
