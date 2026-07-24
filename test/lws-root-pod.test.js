@@ -170,6 +170,19 @@ describe('R6 private root-pod (no description leak; roster omits /)', () => {
     assert.equal(r.status, 401);
   });
 
+  // R18 (item-5 ledger finding, 2026-07-24): this route used to
+  // `reply.code(401).send()` directly, bypassing handleUnauthorized, so it
+  // answered a bare 401 with NO WWW-Authenticate at all — violating the LWS
+  // Authorization MUST that a 401 carry a challenge. No AS is configured on
+  // this rig, so the expected header is the legacy one, byte-identical to
+  // what every other 401 on this deployment emits; with `--lws-as` on it
+  // becomes the conforming as_uri/realm form (test/as-challenge.test.js h-k).
+  test('R18: anon GET /lws-storage -> 401 carries WWW-Authenticate (legacy shape, no AS configured)', async () => {
+    const r = await fetch(`${baseUrl}/lws-storage`, { headers: { Accept: 'application/lws+json' } });
+    assert.equal(r.status, 401);
+    assert.equal(r.headers.get('www-authenticate'), 'DPoP realm="Solid", Bearer realm="Solid"');
+  });
+
   test('anon ServerIndex roster omits / for a private root pod', async () => {
     const idx = await fetch(`${baseUrl}/.well-known/lws-storage`, { headers: { Accept: 'application/lws+json' } });
     assert.equal(idx.status, 200);          // the index itself never leaks existence — it just lists nothing

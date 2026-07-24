@@ -10,7 +10,7 @@ import { handleGet, handleHead, handlePut, handleDelete, handleOptions, handlePa
 import { handlePost, handleCreatePod, createPodStructure } from './handlers/container.js';
 import * as storage from './storage/filesystem.js';
 import { getCorsHeaders } from './ldp/headers.js';
-import { authorize, handleUnauthorized } from './auth/middleware.js';
+import { authorize, handleUnauthorized, stashAsChallenge } from './auth/middleware.js';
 import { getWebIdFromRequestAsync } from './auth/token.js';
 import { notificationsPlugin } from './notifications/index.js';
 import { startFileWatcher } from './notifications/events.js';
@@ -1317,6 +1317,24 @@ export function createServer(options = {}) {
       fastify[m](lwsStoragePath, methodNotAllowed);
     }
 
+    // R18 (LWS Authorization, 2026-07-24): deny a generated-document route
+    // through the SAME choke point every other 401 uses. Authorization.html
+    // requires a conforming `WWW-Authenticate` challenge on *a* 401, not
+    // just on one served by the LDP handler — and these reserved routes are
+    // exempted from the blanket authorize() preHandler (see C3 below), so
+    // nothing had stashed the challenge or stamped the header for them:
+    // they answered a bare 401 with no WWW-Authenticate at all. Stash +
+    // handleUnauthorized here rather than re-emitting the header inline;
+    // hand-applying cross-cutting invariants to this route family is
+    // exactly what left them silent (same shape as round 1's R3/R4 ETag
+    // gap). Status is unchanged (401, isAuthenticated=false) — an
+    // authenticated-but-denied requester keeps today's 401 rather than
+    // silently becoming a 403.
+    const denyStorageRoot = async (request, reply, rootPath, webId) => {
+      await stashAsChallenge(request, rootPath, webId);
+      return handleUnauthorized(request, reply, false, 'user="", public=""');
+    };
+
     // Per-storage description — the actual `Storage` document a pre-multi-
     // tenant client expected at the well-known path now lives here, one per
     // tenant. `:pod` is only ever a storage root's first segment (path
@@ -1342,7 +1360,7 @@ export function createServer(options = {}) {
         resourceUrl: `${origin}${root}`, resourcePath: root, isContainer: true,
         agentWebId: webId, requiredMode: AccessMode.READ,
       });
-      if (!allowed) return reply.code(401).send();
+      if (!allowed) return denyStorageRoot(request, reply, root, webId);
       reply.header('Cache-Control', 'public, max-age=3600');
       reply.type(storageDescriptionContentType(request.headers.accept));
       // Same shared helper the well-known route used pre-multi-tenant and
@@ -1381,7 +1399,7 @@ export function createServer(options = {}) {
         resourceUrl: `${origin}/`, resourcePath: '/', isContainer: true,
         agentWebId: webId, requiredMode: AccessMode.READ,
       });
-      if (!allowed) return reply.code(401).send();
+      if (!allowed) return denyStorageRoot(request, reply, '/', webId);
       reply.header('Cache-Control', 'public, max-age=3600');
       reply.type(storageDescriptionContentType(request.headers.accept));
       const { profileIndexPath, voidPath, referentResolutionEnabled, uriSpacePrefixes } =
@@ -1499,7 +1517,7 @@ export function createServer(options = {}) {
             resourceUrl: `${origin}${root}`, resourcePath: root, isContainer: true,
             agentWebId: webId, requiredMode: AccessMode.READ,
           });
-          if (!allowed) { reply.code(401).send(); return null; }
+          if (!allowed) { await denyStorageRoot(request, reply, root, webId); return null; }
           return root;
         };
         // Same typeQueryRateLimit-timing gap as the origin routes above —

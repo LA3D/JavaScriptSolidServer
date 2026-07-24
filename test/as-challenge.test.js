@@ -54,11 +54,14 @@ async function getAvailablePort() {
   });
 }
 
-async function createPod(baseUrl, name) {
+async function createPod(baseUrl, name, visibility) {
   const res = await fetch(`${baseUrl}/.pods`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, email: `${name}@example.com`, password: `${name}-pw-123` }),
+    body: JSON.stringify({
+      name, email: `${name}@example.com`, password: `${name}-pw-123`,
+      ...(visibility ? { visibility } : {}),
+    }),
   });
   assert.equal(res.status, 201, `pod creation (${name}) should succeed: ${await res.text()}`);
 
@@ -106,7 +109,7 @@ async function garbageAtJwt() {
 
 describe('WWW-Authenticate Bearer as_uri/realm challenge (--lws --lws-as on)', () => {
   let server, baseUrl, port;
-  let alice, bob;
+  let alice, bob, priv;
   const DATA_DIR = './test-data-as-challenge';
 
   before(async () => {
@@ -130,6 +133,7 @@ describe('WWW-Authenticate Bearer as_uri/realm challenge (--lws --lws-as on)', (
 
     alice = await createPod(baseUrl, 'aschalalice');
     bob = await createPod(baseUrl, 'aschalbob');
+    priv = await createPod(baseUrl, 'aschalpriv', 'private');
   });
 
   after(async () => {
@@ -184,6 +188,61 @@ describe('WWW-Authenticate Bearer as_uri/realm challenge (--lws --lws-as on)', (
     // missing member here is authorized (public read) and reaches the real
     // 404 handler instead of being denied by WAC first.
     const res = await fetch(`${alice.uri}public/no-such-resource-${Date.now()}`);
+    assert.equal(res.status, 404);
+    assert.equal(res.headers.get('www-authenticate'), null);
+  });
+
+  // ---- R18 (item-5 ledger finding, 2026-07-24): the GENERATED-DOCUMENT
+  // routes must carry the challenge too. Authorization.html: "A storage
+  // server generating a 401 (Unauthorized) response MUST send a
+  // WWW-Authenticate header field containing at least one conforming
+  // challenge." — "a 401", not "a 401 from the LDP handler". These four
+  // routes gate on READ-of-the-storage-root and used to `reply.code(401)
+  // .send()` directly, bypassing handleUnauthorized (the choke point that
+  // stamps the challenge), so they answered a bare 401 with NO
+  // WWW-Authenticate header at all. Same route family round 1 had to
+  // hand-patch for ETags (R3/R4): they sit outside the common handler
+  // chain, so every cross-cutting response invariant needs re-applying.
+  const expectChallenge = (header, storageRoot) => {
+    assert.ok(header, 'expected a WWW-Authenticate header on this 401');
+    const m = header.match(/Bearer as_uri="([^"]+)", realm="([^"]+)"/);
+    assert.ok(m, `expected a conforming Bearer challenge, got: ${header}`);
+    assert.equal(m[1], baseUrl);
+    assert.equal(m[2], storageRoot);
+  };
+
+  it('(h) R18: anon GET /:pod/lws-storage on a private pod -> 401 carries the challenge', async () => {
+    const res = await fetch(`${baseUrl}/aschalpriv/lws-storage`, { headers: { Accept: 'application/lws+json' } });
+    assert.equal(res.status, 401);
+    expectChallenge(res.headers.get('www-authenticate'), priv.uri);
+  });
+
+  it('(i) R18: anon GET /:pod/types/index on a private pod -> 401 carries the challenge', async () => {
+    const res = await fetch(`${baseUrl}/aschalpriv/types/index`);
+    assert.equal(res.status, 401);
+    expectChallenge(res.headers.get('www-authenticate'), priv.uri);
+  });
+
+  it('(j) R18: anon GET /:pod/types/search on a private pod -> 401 carries the challenge', async () => {
+    const res = await fetch(`${baseUrl}/aschalpriv/types/search`);
+    assert.equal(res.status, 401);
+    expectChallenge(res.headers.get('www-authenticate'), priv.uri);
+  });
+
+  it('(k) R18: anon POST /:pod/types/search on a private pod -> 401 carries the challenge', async () => {
+    const res = await fetch(`${baseUrl}/aschalpriv/types/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 401);
+    expectChallenge(res.headers.get('www-authenticate'), priv.uri);
+  });
+
+  it('(l) R18 no-oracle preserved: an UNKNOWN pod name still 404s, with no challenge', async () => {
+    // The challenge must not become an existence oracle: /nosuchpod/types/index
+    // is a plain 404 (round 2's no-oracle posture) and stays one.
+    const res = await fetch(`${baseUrl}/nosuchpod-r18/types/index`);
     assert.equal(res.status, 404);
     assert.equal(res.headers.get('www-authenticate'), null);
   });
