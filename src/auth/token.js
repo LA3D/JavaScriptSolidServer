@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import { verifySolidOidc, hasSolidOidcAuth } from './solid-oidc.js';
 import { verifyLwsCidAuth, hasLwsCidAuth } from './lws-cid.js';
 import { verifyNostrAuth, hasNostrAuth } from './nostr.js';
+import { hasAsToken, verifyAsToken } from './as-token.js';
 import { webIdTlsAuth, hasClientCertificate } from './webid-tls.js';
 import { resolveTokenSecret } from './token-secret.js';
 
@@ -240,6 +241,18 @@ async function resolveWebIdFromRequest(request) {
     // Try Nostr NIP-98 (Schnorr signatures)
     if (hasNostrAuth(request)) {
       return verifyNostrAuth(request);
+    }
+
+    // Try LWS Authorization at+jwt (RFC 8693 token-exchange output, AS
+    // round task 2/4). Detected by header shape (typ === 'at+jwt'), which
+    // never collides with LWS-CID (URL-shaped kid) or the opaque-kid IdP
+    // JWTs the Bearer fallback below handles — see test/as-token.test.js
+    // for the dispatch-ordering proof in both directions. A shape match
+    // here commits to this path: on failure (including --lws-as being
+    // off entirely) we return the rejection directly rather than falling
+    // through to the legacy Bearer path.
+    if (hasAsToken(request)) {
+      return verifyAsToken(request);
     }
 
     // Fall back to Bearer tokens
