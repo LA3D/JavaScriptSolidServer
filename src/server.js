@@ -171,6 +171,37 @@ export function createServer(options = {}) {
   if (lwsEnabled && subdomainsEnabled) {
     throw new Error('--lws cannot be combined with --subdomains yet: LWS resolves shape/alternate URLs in path mode only. Disable one of the two flags.');
   }
+  // Authorization-server role (2026-07-24 AS round): --lws-as only makes
+  // sense on a deployment that also speaks the LWS storage surface it
+  // authorizes into. loadConfig() already enforces this for the CLI/env
+  // path; re-check here so a direct createServer({ lwsAs: true }) caller
+  // (tests, embedders) gets the same fail-loud guarantee instead of a
+  // confusing 404 once the AS routes (later tasks) exist.
+  const lwsAsEnabled = options.lwsAs ?? false;
+  if (lwsAsEnabled && !lwsEnabled) {
+    throw new Error('--lws-as requires --lws (enable the LWS storage surface first, or drop --lws-as / JSS_LWS_AS)');
+  }
+  const lwsAsTtl = options.lwsAsTtl ?? defaults.lwsAsTtl;
+  // Effective trusted issuer: an explicit --lws-as-uri (validated the same
+  // way as --lws-provider — must be an absolute URI or it's dropped) else
+  // this deployment's own origin, since the fork IS the AS by default
+  // (Approach A, spec 2026-07-24). Stays null when the AS role is off so
+  // downstream code has one flag (lwsAsEnabled) to branch on.
+  let lwsAsUri = null;
+  if (lwsAsEnabled) {
+    const explicitAsUri = options.lwsAsUri ?? null;
+    if (explicitAsUri && isAbsoluteUri(explicitAsUri)) {
+      lwsAsUri = explicitAsUri;
+    } else {
+      if (explicitAsUri) {
+        console.warn(`[lws-pod] --lws-as-uri / JSS_LWS_AS_URI is not an absolute URI: ${JSON.stringify(explicitAsUri)} — falling back to the deployment origin`);
+      }
+      const protocol = options.ssl ? 'https' : 'http';
+      const host = options.host === '0.0.0.0' ? 'localhost' : (options.host || 'localhost');
+      const port = options.port || defaults.port;
+      lwsAsUri = idpIssuer?.replace(/\/$/, '') || `${protocol}://${host}:${port}`;
+    }
+  }
   // Mashlib data browser is OFF by default
   // mashlibCdn: load from CDN; mashlibModule: URL to ES module entry point
   const mashlibModule = options.mashlibModule ?? false;
@@ -502,6 +533,11 @@ export function createServer(options = {}) {
   // route (below) reads the same flags off its own local closures.
   fastify.decorateRequest('mcpEnabled', null);
   fastify.decorateRequest('anonRateLimitMax', null);
+  // AS round (task 1): the AS role flag + its resolved effective trusted
+  // issuer, for the later challenge/token-validation tasks to read off the
+  // request the same way every other lws-* flag above does.
+  fastify.decorateRequest('lwsAs', null);
+  fastify.decorateRequest('lwsAsUri', null);
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
@@ -525,6 +561,8 @@ export function createServer(options = {}) {
     request.singleUserName = singleUserName;
     request.mcpEnabled = mcpEnabled;
     request.anonRateLimitMax = anonRateLimitMax;
+    request.lwsAs = lwsAsEnabled;
+    request.lwsAsUri = lwsAsUri;
     // A6: urlPath the SAME way getRequestPaths (resource.js/container.js)
     // derives it, so the resolved root always matches the resourceUrl those
     // handlers build from the same request.url — storageRootFor itself
@@ -1902,7 +1940,8 @@ export function createServer(options = {}) {
   // "no --lws-config given" (the `else` branch in the module) from "given",
   // not "given but unresolvable".
   fastify.log.info('\n' + formatCapabilityReport(
-    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled, lwsProvider: lwsProviderUri },
+    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled, lwsProvider: lwsProviderUri,
+      lwsAs: lwsAsEnabled, lwsAsUri, lwsAsTtl },
     { configResolved: true }
   ));
 

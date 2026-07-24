@@ -46,6 +46,15 @@ export const defaults = {
   // Deployment operator URI (schema:provider) — config-only (--lws-provider /
   // JSS_LWS_PROVIDER), never persisted into tenant data (governance round).
   lwsProvider: null,
+  // Authorization-server role (2026-07-24 AS round): --lws-as / JSS_LWS_AS,
+  // off by default, requires --lws (validated below). lwsAsUri (the
+  // effective trusted issuer) stays null here — explicit-vs-defaulted-to-
+  // self resolution happens in createServer(), same rail as lwsProvider's
+  // URI validation. lwsAsTtl is the RFC 8693 exchanged access-token TTL
+  // (spec RECOMMENDED default).
+  lwsAs: false,
+  lwsAsUri: null,
+  lwsAsTtl: 300,
   notifications: false,
 
   // Identity Provider
@@ -193,6 +202,9 @@ const envMap = {
   JSS_LWS_PROFILE_CONNEG: 'lwsProfileConneg',
   JSS_LWS_CONFIG: 'lwsConfig',
   JSS_LWS_PROVIDER: 'lwsProvider',
+  JSS_LWS_AS: 'lwsAs',
+  JSS_LWS_AS_URI: 'lwsAsUri',
+  JSS_LWS_AS_TTL: 'lwsAsTtl',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
@@ -274,6 +286,7 @@ const BOOLEAN_KEYS = new Set([
   'ssl',
   'conneg',
   'lws',
+  'lwsAs',
   'lwsTypeIndex',
   'lwsProfileConneg',
   'subdomains',
@@ -325,7 +338,8 @@ function parseEnvValue(value, key) {
        key === 'payRate' ||
        key === 'corsProxyMaxBytes' ||
        key === 'corsProxyTimeoutMs' ||
-       key === 'corsProxyMaxRedirects') && !isNaN(value)) {
+       key === 'corsProxyMaxRedirects' ||
+       key === 'lwsAsTtl') && !isNaN(value)) {
     return parseInt(value, 10);
   }
 
@@ -468,6 +482,22 @@ export async function loadConfig(cliOptions = {}, configFile = null) {
   // Validate SSL config
   if ((config.sslKey && !config.sslCert) || (!config.sslKey && config.sslCert)) {
     throw new Error('Both --ssl-key and --ssl-cert must be provided together');
+  }
+
+  // --lws-as requires --lws (2026-07-24 AS round): the authorization-server
+  // role only makes sense on a deployment that also speaks the LWS storage
+  // surface it authorizes into. Fail fast and loud, same rail as the
+  // --ssl-key/--ssl-cert reciprocal check above.
+  if (config.lwsAs && !config.lws) {
+    throw new Error('--lws-as requires --lws (enable the LWS storage surface first, or drop --lws-as / JSS_LWS_AS)');
+  }
+
+  // Token-exchange TTL: malformed input (non-numeric, zero, negative) falls
+  // back to the spec-RECOMMENDED default rather than propagating a bad
+  // value into every minted access token's `exp` claim.
+  if (typeof config.lwsAsTtl !== 'number' || !Number.isFinite(config.lwsAsTtl) || config.lwsAsTtl <= 0) {
+    console.warn(`Invalid --lws-as-ttl / JSS_LWS_AS_TTL value ${JSON.stringify(config.lwsAsTtl)}, falling back to ${defaults.lwsAsTtl}s.`);
+    config.lwsAsTtl = defaults.lwsAsTtl;
   }
 
   config.ssl = !!(config.sslKey && config.sslCert);

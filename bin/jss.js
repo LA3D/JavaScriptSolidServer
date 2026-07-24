@@ -99,6 +99,9 @@ program
   .option('--no-lws-profile-conneg', 'Disable content negotiation by profile')
   .option('--lws-config <path>', 'Pod resource declaring LWS service endpoints as data ({ profileIndex, void }, requires --lws)')
   .option('--lws-provider <uri>', 'Deployment operator URI (schema:provider) advertised on the ServerIndex/root storage description (requires --lws)')
+  .option('--lws-as', 'Enable the authorization-server role — RFC 8693 token exchange (requires --lws)')
+  .option('--lws-as-uri <uri>', 'Effective trusted issuer for exchanged access tokens (default: this deployment\'s own origin)')
+  .option('--lws-as-ttl <seconds>', 'Token-exchange access-token TTL in seconds (default 300)', parseInt)
   .option('--notifications', 'Enable WebSocket notifications')
   .option('--no-notifications', 'Disable WebSocket notifications')
   .option('--idp', 'Enable built-in Identity Provider')
@@ -246,6 +249,9 @@ program
         lwsProfileConneg: config.lwsProfileConneg,
         lwsConfig: config.lwsConfig,
         lwsProvider: config.lwsProvider,
+        lwsAs: config.lwsAs,
+        lwsAsUri: config.lwsAsUri,
+        lwsAsTtl: config.lwsAsTtl,
         notifications: config.notifications,
         idp: config.idp,
         idpIssuer: idpIssuer,

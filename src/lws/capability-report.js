@@ -18,6 +18,16 @@ export function formatCapabilityReport(config, { configResolved } = {}) {
       L.push('  lws-config           (none) → profileIndex/void/uriSpaces services OFF');
     }
     if (config.lwsProvider) L.push(`  provider             ${config.lwsProvider}`);
+    // AS round (2026-07-24, task 1): the authorization-server role — on/off
+    // plus its effective trusted issuer + exchanged-token TTL when on — and
+    // the existing /idp/credentials direct-bearer path, named loud (it is
+    // always on today; there is no flag to turn it off yet).
+    if (config.lwsAs) {
+      L.push(`  lws-as               ON  (as_uri=${config.lwsAsUri}, ttl=${config.lwsAsTtl}s)`);
+    } else {
+      L.push('  lws-as               OFF');
+    }
+    L.push('  trusted-local direct bearer: ON');
   }
   L.push(`  mcp                  ${on(config.mcp)}`);
   return L.join('\n');
