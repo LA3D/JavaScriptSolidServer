@@ -279,23 +279,47 @@ async function resolveWebIdFromRequest(request) {
     // Fall back to Bearer tokens
     const token = extractToken(authHeader);
     if (token) {
-      // Try simple 2-part token first
-      const payload = verifyToken(token);
-      if (payload?.webId) {
-        return { webId: payload.webId, error: null };
-      }
-
-      // If 3-part JWT, verify against IdP's JWKS
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const jwtPayload = await verifyJwtFromIdp(token);
-        if (jwtPayload?.webId) {
-          return { webId: jwtPayload.webId, error: null };
+      // Trusted-local direct bearer (2026-07-24 AS round, task 7 /
+      // final-review fix): the two legacy paths below (simple 2-part HMAC
+      // token, 3-part IdP-issued JWT) authenticate directly at the
+      // resource boundary — the design spec's explicit, default-ON,
+      // operator-toggleable "trusted-local" credential class. When a
+      // deployment turns it OFF (--no-trusted-local-bearer /
+      // JSS_TRUSTED_LOCAL_BEARER=false), neither legacy path may
+      // authenticate; the caller falls through to the rejected result
+      // below, and the normal 401 challenge fires (forcing the RFC 8693
+      // token-exchange / at+jwt path — task 4 — instead). This never
+      // touches at+jwt (hasAsToken above already committed to a
+      // different branch), LWS-CID, Solid-OIDC, Nostr, or WebID-TLS —
+      // all dispatch earlier or in the WebID-TLS block below.
+      //
+      // Default-permissive when the decoration is absent or not exactly
+      // `false` (non-HTTP callers / bare-object test doubles that never
+      // went through the server.js onRequest hook) — the switch's OFF
+      // state is an explicit operator choice signaled by the decoration,
+      // not something to infer from a missing field.
+      const trustedLocalBearerEnabled = request.trustedLocalBearer !== false;
+      if (trustedLocalBearerEnabled) {
+        // Try simple 2-part token first
+        const payload = verifyToken(token);
+        if (payload?.webId) {
+          return { webId: payload.webId, error: null };
         }
-        return { webId: null, error: 'Invalid or unverifiable JWT token' };
+
+        // If 3-part JWT, verify against IdP's JWKS
+        const parts = token.split('.');
+        if (parts.length === 3) {
+          const jwtPayload = await verifyJwtFromIdp(token);
+          if (jwtPayload?.webId) {
+            return { webId: jwtPayload.webId, error: null };
+          }
+          return { webId: null, error: 'Invalid or unverifiable JWT token' };
+        }
+
+        return { webId: null, error: 'Invalid token' };
       }
 
-      return { webId: null, error: 'Invalid token' };
+      return { webId: null, error: 'Trusted-local direct bearer is disabled on this deployment; use RFC 8693 token exchange' };
     }
   }
 

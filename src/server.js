@@ -211,6 +211,13 @@ export function createServer(options = {}) {
       lwsAsUri = idpIssuer?.replace(/\/$/, '') || `${protocol}://${host}:${port}`;
     }
   }
+  // Trusted-local direct bearer (2026-07-24 AS round, task 7 / final-review
+  // fix): default ON (today's behavior — every legacy IdP-issued bearer
+  // authenticates directly at the resource boundary), OFF-able for a
+  // public-rung deployment via --no-trusted-local-bearer / env. Threaded
+  // onto the request the same way as lwsAs/lwsAsUri above so
+  // src/auth/token.js can gate on it without importing config machinery.
+  const trustedLocalBearerEnabled = options.trustedLocalBearer ?? true;
   // Mashlib data browser is OFF by default
   // mashlibCdn: load from CDN; mashlibModule: URL to ES module entry point
   const mashlibModule = options.mashlibModule ?? false;
@@ -547,6 +554,11 @@ export function createServer(options = {}) {
   // request the same way every other lws-* flag above does.
   fastify.decorateRequest('lwsAs', null);
   fastify.decorateRequest('lwsAsUri', null);
+  // Task 7 / final-review fix: the trusted-local-bearer switch, read by
+  // src/auth/token.js resolveWebIdFromRequest. Default-permissive (`null`)
+  // until the onRequest hook below sets the real value — see token.js for
+  // why a missing/`null` decoration means "treat as ON".
+  fastify.decorateRequest('trustedLocalBearer', null);
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
@@ -572,6 +584,7 @@ export function createServer(options = {}) {
     request.anonRateLimitMax = anonRateLimitMax;
     request.lwsAs = lwsAsEnabled;
     request.lwsAsUri = lwsAsUri;
+    request.trustedLocalBearer = trustedLocalBearerEnabled;
     // A6: urlPath the SAME way getRequestPaths (resource.js/container.js)
     // derives it, so the resolved root always matches the resourceUrl those
     // handlers build from the same request.url — storageRootFor itself
@@ -1969,7 +1982,7 @@ export function createServer(options = {}) {
   // not "given but unresolvable".
   fastify.log.info('\n' + formatCapabilityReport(
     { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled, lwsProvider: lwsProviderUri,
-      lwsAs: lwsAsEnabled, lwsAsUri, lwsAsTtl },
+      lwsAs: lwsAsEnabled, lwsAsUri, lwsAsTtl, trustedLocalBearer: trustedLocalBearerEnabled },
     { configResolved: true }
   ));
 

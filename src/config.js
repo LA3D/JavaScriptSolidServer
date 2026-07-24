@@ -55,6 +55,14 @@ export const defaults = {
   lwsAs: false,
   lwsAsUri: null,
   lwsAsTtl: 300,
+  // Trusted-local direct bearer (2026-07-24 AS round, task 7 / final-review
+  // fix): the legacy `/idp/credentials`-issued bearer accepted directly at
+  // the resource boundary (src/auth/token.js resolveWebIdFromRequest) —
+  // the design spec's "Config modes" section requires this be an explicit,
+  // default-ON named switch a public deployment can turn OFF (forcing the
+  // RFC 8693 token-exchange / at+jwt path instead). Independent of --lws /
+  // --lws-as: it gates a credential path that predates the AS round.
+  trustedLocalBearer: true,
   notifications: false,
 
   // Identity Provider
@@ -205,6 +213,7 @@ const envMap = {
   JSS_LWS_AS: 'lwsAs',
   JSS_LWS_AS_URI: 'lwsAsUri',
   JSS_LWS_AS_TTL: 'lwsAsTtl',
+  JSS_TRUSTED_LOCAL_BEARER: 'trustedLocalBearer',
   JSS_NOTIFICATIONS: 'notifications',
   JSS_QUIET: 'quiet',
   JSS_LOG_LEVEL: 'logLevel',
@@ -287,6 +296,7 @@ const BOOLEAN_KEYS = new Set([
   'conneg',
   'lws',
   'lwsAs',
+  'trustedLocalBearer',
   'lwsTypeIndex',
   'lwsProfileConneg',
   'subdomains',
