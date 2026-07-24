@@ -222,6 +222,53 @@ describe('token-exchange grant (RFC 8693)', () => {
     assert.equal(body.error, 'invalid_target');
   });
 
+  // ---- (c2) SECURITY: resource on a foreign origin, same pathname ----
+  // storageRootFor only ever inspects resUrl.pathname (it resolves a
+  // local filesystem path, origin-agnostic by construction). Without an
+  // explicit origin check, `resource: https://evil.example.net/exchpod/`
+  // would pass the pathname-only storage-root check (the real pod
+  // `/exchpod/` exists on this deployment) and mint a token whose `aud`
+  // names the FOREIGN origin, signed with this deployment's real IdP key.
+  it('(c2) resource on a foreign origin (same pathname as a real pod) -> 400 invalid_target', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const subjectToken = await makeCidSubjectToken({
+      aud: baseUrl, iat: now, exp: now + 60, privateKey: cidPrivateKey,
+    });
+    const foreignResource = `https://evil.example.net/exchpod/`;
+
+    const res = await tokenRequest({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: subjectToken,
+      subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+      resource: foreignResource,
+      client_id: clientId,
+    });
+    const body = await res.json();
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.equal(body.error, 'invalid_target');
+  });
+
+  // ---- (c3) aud canonicalization: query/fragment stripped ------------
+  it('(c3) resource with query/fragment -> minted aud is the canonical root URI (no query/fragment)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const subjectToken = await makeCidSubjectToken({
+      aud: baseUrl, iat: now, exp: now + 60, privateKey: cidPrivateKey,
+    });
+    const decoratedResource = `${podUri}?x=1#y`;
+
+    const res = await tokenRequest({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: subjectToken,
+      subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+      resource: decoratedResource,
+      client_id: clientId,
+    });
+    const body = await res.json();
+    assert.equal(res.status, 200, `expected 200, got ${res.status}: ${JSON.stringify(body)}`);
+    const payload = jose.decodeJwt(body.access_token);
+    assert.equal(payload.aud, podUri, 'aud must be the canonical root URI, not the raw resource string');
+  });
+
   // ---- (d) missing/malformed subject_token --------------------------
   it('(d) missing subject_token -> 400 invalid_request', async () => {
     const res = await tokenRequest({

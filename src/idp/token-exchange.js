@@ -13,7 +13,7 @@
  */
 import * as jose from 'jose';
 import crypto from 'node:crypto';
-import { InvalidGrant, InvalidRequest, CustomOIDCProviderError } from 'oidc-provider/lib/helpers/errors.js';
+import { InvalidGrant, InvalidRequest, InvalidTarget } from 'oidc-provider/lib/helpers/errors.js';
 import { getJwks } from './keys.js';
 import { verifyLwsCidAuth } from '../auth/lws-cid.js';
 import { verifyIdpJwt } from '../auth/token.js';
@@ -28,21 +28,42 @@ export function makeTokenExchangeHandler({ storage, issuer, ttl = 300 }) {
     const p = ctx.oidc.params;
     if (p.subject_token_type !== JWT_TYPE) throw new InvalidRequest('unsupported subject_token_type');
     if (!p.subject_token || typeof p.subject_token !== 'string') throw new InvalidRequest('subject_token required');
-    if (!p.resource) throw new CustomOIDCProviderError('invalid_target', 'resource required');
+    if (!p.resource) throw new InvalidTarget('resource required');
 
     // resource must be a storage root on THIS deployment. A malformed
     // resource URI is equally "doesn't resolve" — invalid_target, not a
     // generic 500 from the URL constructor.
-    let resUrl, rootPath;
+    let resUrl;
     try {
       resUrl = new URL(p.resource);
-      rootPath = await storageRootFor(storage, resUrl.pathname);
     } catch {
-      throw new CustomOIDCProviderError('invalid_target', 'resource is not a valid URI');
+      throw new InvalidTarget('resource is not a valid URI');
     }
+
+    // SECURITY: storageRootFor only ever inspects resUrl.pathname — it
+    // resolves a local filesystem path and is origin-agnostic by
+    // construction. Without this check, `resource:
+    // https://evil.example.net/<real-pod>/` would pass the pathname-only
+    // storage-root check below (the real pod DOES exist on this
+    // deployment) and mint a token whose `aud` names a FOREIGN origin,
+    // signed with this deployment's real IdP key. `issuer` is this
+    // handler's own effective deployment origin (lwsAsUri — see
+    // src/idp/index.js), so compare against that, not the request Host
+    // header (which an attacker fully controls).
+    const deploymentOrigin = new URL(issuer).origin;
+    if (resUrl.origin !== deploymentOrigin) {
+      throw new InvalidTarget('resource origin does not match this deployment');
+    }
+
+    const rootPath = await storageRootFor(storage, resUrl.pathname);
     if (!rootPath || resUrl.pathname !== rootPath) {
-      throw new CustomOIDCProviderError('invalid_target', 'unknown or untrusted storage');
+      throw new InvalidTarget('unknown or untrusted storage');
     }
+    // Canonicalize away any query/fragment the client tacked onto
+    // `resource` — e.g. `https://host/pod/?x=1#y` passes the root check
+    // above (its pathname is still `/pod/`) but the raw string must not
+    // leak into the minted `aud`.
+    const canonicalResource = `${resUrl.origin}${rootPath}`;
 
     // dispatch on kid shape: URL kid -> LWS-CID, else IdP JWT
     let kid;
@@ -67,7 +88,7 @@ export function makeTokenExchangeHandler({ storage, issuer, ttl = 300 }) {
     const key = await currentSigningKey();
     const now = Math.floor(Date.now() / 1000);
     const accessToken = await new jose.SignJWT({
-      sub: webId, client_id: ctx.oidc.client.clientId, aud: p.resource,
+      sub: webId, client_id: ctx.oidc.client.clientId, aud: canonicalResource,
     }).setProtectedHeader({ alg: key.alg, kid: key.kid, typ: 'at+jwt' })
       .setIssuer(issuer).setIssuedAt(now).setExpirationTime(now + ttl)
       .setJti(crypto.randomUUID())
