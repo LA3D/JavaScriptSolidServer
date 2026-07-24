@@ -74,6 +74,7 @@ export async function wac(ctx, path, mode, { noDebit = false } = {}) {
     agentWebId: ctx.webId,
     requiredMode: mode,
     noDebit,
+    lwsEnabled: ctx.lwsEnabled,
   });
   return allowed;
 }

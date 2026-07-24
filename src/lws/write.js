@@ -63,6 +63,7 @@ export async function applyLwsWrite({
       // debit) — the authoritative debit stays on the primary path. Inert until
       // a PaymentCondition + ledger exist, but correct by construction.
       noDebit: true,
+      lwsEnabled,
     });
     if (!allowed) return refuse(resourceUrl, `${mode} required on ${sc.subject}`);
   }

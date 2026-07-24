@@ -645,7 +645,8 @@ async function authorizeAclAccess(request, urlPath, method, webId, authError) {
     resourcePath: storagePath,
     isContainer: isProtectedContainer,
     agentWebId: webId,
-    requiredMode: AccessMode.CONTROL
+    requiredMode: AccessMode.CONTROL,
+    lwsEnabled: request.lwsEnabled
   });
 
   // WAC-Allow must describe the REQUESTED resource (the .acl), not the

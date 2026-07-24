@@ -16,17 +16,18 @@
  * duplication with them is intentional — this file is the single place a
  * reviewer reads to see the whole three-mode boundary at once.
  *
- * KNOWN GAP (flagged here, not fixed — fixing is out of this file's scope,
- * see docs/superpowers/sdd/task-7-report.md "concerns"): checker.js's
- * `isImplicitOwnerControl` (task 6, commit 5db042a/5db5c6e) is documented
- * as "`.lwsowner` only exists under `--lws`" but `.lwsowner` is actually
- * written UNCONDITIONALLY by createPodStructure (src/handlers/container.js,
- * pre-existing governance-round behavior, unchanged by this branch) — so
- * the implicit-owner-Control recovery mechanism this branch added is live
- * in OFF-OFF mode too, not gated on --lws as its own doc comment claims.
- * The assertions below in the (a) OFF-OFF block document the ACTUAL
- * (verified) behavior rather than assert a false invariant, so this file
- * stays green; see the report for the flagged discrepancy.
+ * FIXED (task 6 follow-up, commit pending): checker.js's
+ * `isImplicitOwnerControl` (task 6, commit 5db042a/5db5c6e) used to be
+ * documented as "`.lwsowner` only exists under `--lws`", but `.lwsowner` is
+ * actually written UNCONDITIONALLY by createPodStructure
+ * (src/handlers/container.js, pre-existing governance-round behavior) — so
+ * the implicit-owner-Control recovery mechanism was reachable in OFF-OFF
+ * mode too, violating this round's global "--lws off is byte-identical"
+ * constraint. `checkAccess` now takes an explicit `lwsEnabled` option
+ * (default `false`, fail-closed) and every real call site threads
+ * `request.lwsEnabled`/`ctx.lwsEnabled` — see the (a) OFF-OFF block below
+ * for the direct-call proof that the grant no longer fires without it, and
+ * the (b) LWS-only block for the proof it still fires under `--lws` alone.
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -170,18 +171,35 @@ describe('AS negative controls — (a) OFF-OFF (no --lws at all)', () => {
     assert.doesNotMatch(report, /trusted-local direct bearer/);
   });
 
-  // ---- KNOWN GAP (documented, not asserted-as-absent — see file header
-  // + task-7-report.md "concerns"): `.lwsowner` is written unconditionally
-  // at pod creation (pre-existing governance-round behavior in
-  // createPodStructure, untouched by this branch) — it is NOT actually
-  // gated on --lws, contrary to checker.js's own doc comment. This test
-  // records the VERIFIED reality rather than assert a false invariant.
-  it('[KNOWN GAP] .lwsowner sidecar exists even though --lws is entirely off', async () => {
+  // ---- `.lwsowner` is written unconditionally at pod creation (pre-existing
+  // governance-round behavior in createPodStructure, unrelated to --lws) —
+  // so the negative control that actually matters is behavioral: the
+  // implicit-owner-Control recovery mechanism must not fire off this
+  // unconditional sidecar when the deployment never turned --lws on. ------
+  it('.lwsowner sidecar exists even though --lws is entirely off (pre-existing, unconditional)', async () => {
     const onDisk = await fs.pathExists(path.join(DATA_DIR, pod.name, '.lwsowner'));
-    assert.equal(onDisk, true,
-      'documents a discrepancy: createPodStructure writes .lwsowner unconditionally, ' +
-      'not only under --lws — see checker.js\'s isImplicitOwnerControl doc comment, which ' +
-      'claims the opposite. Flagged for the Step 3 adversarial review, not fixed here.');
+    assert.equal(onDisk, true, 'createPodStructure writes .lwsowner unconditionally, not only under --lws');
+  });
+
+  it('mode (a): implicit owner Control does NOT fire when --lws is off, even with .lwsowner present', async () => {
+    const root = `/${pod.name}/`;
+    const OTHER_OWNER = 'https://other-owner.example/#owner2';
+    // Self-excluding ACL, same fixture shape as test/wac-owner-control.test.js
+    // (a): grants a DIFFERENT agent full RWC, excludes the pod owner entirely.
+    const resourceUrl = `${pod.uri}secret`;
+    const resourcePath = `${root}secret`;
+    const acl = generateOwnerAcl(resourceUrl, OTHER_OWNER, false, { publicRead: false });
+    await storage.write(`${resourcePath}.acl`, serializeAcl(acl));
+
+    // No `lwsEnabled` passed — this is the default every real call site in
+    // an --lws-off deployment reaches (request.lwsEnabled/ctx.lwsEnabled is
+    // false, and every threading site forwards that, never hardcoding true).
+    const control = await checkAccess({
+      resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode: AccessMode.CONTROL,
+    });
+    assert.equal(control.allowed, false,
+      'the owner-lockout recovery must stay off when --lws is off, even though .lwsowner exists on disk — ' +
+      'off-mode must be byte-identical to a pre-governance-round tree');
   });
 });
 
@@ -279,7 +297,7 @@ describe('AS negative controls — (b) LWS-only (--lws on, --lws-as off)', () =>
     assert.ok(body.id.endsWith(`/${pod.name}/`), `id: ${body.id}`);
   });
 
-  it('governance: .lwsowner exists and implicit owner Control passes (--lws-gated, not --lws-as-gated)', async () => {
+  it('mode (b): governance: .lwsowner exists and implicit owner Control still fires with --lws on (--lws-gated, not --lws-as-gated)', async () => {
     const root = `/${pod.name}/`;
     assert.equal(await fs.pathExists(path.join(DATA_DIR, pod.name, '.lwsowner')), true);
 
@@ -292,8 +310,12 @@ describe('AS negative controls — (b) LWS-only (--lws on, --lws-as off)', () =>
     const acl = generateOwnerAcl(resourceUrl, OTHER_OWNER, false, { publicRead: false });
     await storage.write(`${resourcePath}.acl`, serializeAcl(acl));
 
+    // lwsEnabled: true — this pod is served with --lws on, so the real
+    // request path threads request.lwsEnabled === true here; a direct
+    // checkAccess() call (no fastify request) must say so explicitly.
     const control = await checkAccess({
       resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode: AccessMode.CONTROL,
+      lwsEnabled: true,
     });
     assert.equal(control.allowed, true, 'owner Control recovery must still work with --lws alone');
   });

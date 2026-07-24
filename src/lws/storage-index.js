@@ -28,10 +28,13 @@ import { AccessMode } from '../wac/parser.js';
  * resources.js (which already has ctx.webId) can call identically. One
  * roster implementation, two surfaces agreeing.
  * @param {{listContainer:Function}} storage
- * @param {{origin:string, webId:string|null}} requester
+ * @param {{origin:string, webId:string|null, lwsEnabled?:boolean}} requester
+ *   `lwsEnabled` gates filterReadableEntries's implicit-owner-Control path
+ *   (governance round follow-up) — defaults false (fail-closed), matching
+ *   checkAccess's own default.
  * @returns {Promise<string[]>}
  */
-export async function listVisibleStorageRoots(storage, { origin, webId }) {
+export async function listVisibleStorageRoots(storage, { origin, webId, lwsEnabled = false }) {
   const entries = await storage.listContainer('/');
   const dirs = (entries || []).filter((e) => e.isDirectory);
   const marked = [];
@@ -55,6 +58,7 @@ export async function listVisibleStorageRoots(storage, { origin, webId }) {
   if (marked.length) {
     const readable = await filterReadableEntries({
       entries: marked, containerUrl: `${origin}/`, containerStoragePath: '/', agentWebId: webId ?? null,
+      lwsEnabled,
     });
     roots.push(...readable.map((e) => `/${e.name}/`));
   }

@@ -1293,7 +1293,7 @@ export function createServer(options = {}) {
       // the MCP surface (src/mcp/resources.js) can call the SAME roster
       // helper without a fastify request to resolve identity from.
       const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
-      const roots = await listVisibleStorageRoots(storage, { origin, webId });
+      const roots = await listVisibleStorageRoots(storage, { origin, webId, lwsEnabled });
       const body = buildServerIndex(origin, roots.map((root) => ({ root })),
         { typeIndexEnabled, mcpEnabled, anonRateLimitMax, provider: lwsProviderUri });
       return sendJsonWithEtag(request, reply, body);

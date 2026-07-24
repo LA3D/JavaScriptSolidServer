@@ -137,7 +137,8 @@ export async function handlePost(request, reply) {
       isContainer: protectedUrlPath.endsWith('/'),
       agentWebId: request.webId,
       requiredMode: AccessMode.CONTROL,
-      noDebit: true
+      noDebit: true,
+      lwsEnabled: request.lwsEnabled
     });
     if (!allowed) {
       return reply.code(403).send({

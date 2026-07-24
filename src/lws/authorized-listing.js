@@ -8,7 +8,7 @@ import { checkAccess } from '../wac/checker.js';
 import { AccessMode } from '../wac/parser.js';
 import { AUX_SUFFIX } from '../storage/filesystem.js';
 
-export async function filterReadableEntries({ entries, containerUrl, containerStoragePath, agentWebId }) {
+export async function filterReadableEntries({ entries, containerUrl, containerStoragePath, agentWebId, lwsEnabled = false }) {
   const baseUrl = containerUrl.endsWith('/') ? containerUrl : containerUrl + '/';
   const basePath = containerStoragePath.endsWith('/') ? containerStoragePath : containerStoragePath + '/';
   const aclCache = new Map();
@@ -24,14 +24,14 @@ export async function filterReadableEntries({ entries, containerUrl, containerSt
       // Bare `.acl` protects the container it lives in.
       ({ allowed } = await checkAccess({
         resourceUrl: baseUrl, resourcePath: basePath, isContainer: true,
-        agentWebId, requiredMode: AccessMode.CONTROL, aclCache,
+        agentWebId, requiredMode: AccessMode.CONTROL, aclCache, lwsEnabled,
       }));
     } else if (e.name.endsWith('.acl')) {
       // `name.acl` protects the sibling file `name`.
       const protectedName = e.name.slice(0, -'.acl'.length);
       ({ allowed } = await checkAccess({
         resourceUrl: baseUrl + protectedName, resourcePath: basePath + protectedName,
-        isContainer: false, agentWebId, requiredMode: AccessMode.CONTROL, aclCache,
+        isContainer: false, agentWebId, requiredMode: AccessMode.CONTROL, aclCache, lwsEnabled,
       }));
     } else if (e.name !== '.meta' && AUX_SUFFIX.test(e.name)) {
       // A suffixed sidecar (`name.meta`, and defensively `name.lwstypes`/

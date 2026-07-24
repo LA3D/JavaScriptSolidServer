@@ -15,11 +15,14 @@
 //     ACL still excludes the owner from ordinary access; they must repair
 //     the ACL and explicitly restore their own access (recovery, not bypass)
 //   - reads the storage's `.lwsowner` roster (readOwners); absent sidecar
-//     (no --lws, or a pod that predates the governance round) resolves to
-//     `[]`, so behavior is byte-identical to the pre-feature tree
+//     resolves to `[]`, so behavior is byte-identical to the pre-feature tree
 //   - must NOT create any new write path to `.lwsowner` itself — that stays
 //     refused at the existing System-Managed choke points regardless of
 //     Control.
+//   - gated on an explicit `lwsEnabled` option (default false, fail-closed):
+//     `.lwsowner` is written UNCONDITIONALLY at pod creation (not only under
+//     --lws), so every direct call below passes `lwsEnabled: true` — the
+//     --lws-off negative control lives in test/as-negative-controls.test.js.
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { startLwsPod, request } from './helpers.js';
@@ -53,16 +56,19 @@ describe('implicit owner Control from .lwsowner (unit, checkAccess)', () => {
 
     const control = await checkAccess({
       resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode: AccessMode.CONTROL,
+      lwsEnabled: true,
     });
     assert.equal(control.allowed, true, 'owner recovers Control via .lwsowner despite the self-excluding ACL');
 
     const read = await checkAccess({
       resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode: AccessMode.READ,
+      lwsEnabled: true,
     });
     assert.equal(read.allowed, false, 'Read stays denied — this is Control-only recovery, not a bypass');
 
     const write = await checkAccess({
       resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode: AccessMode.WRITE,
+      lwsEnabled: true,
     });
     assert.equal(write.allowed, false, 'Write stays denied too');
   });
@@ -77,6 +83,7 @@ describe('implicit owner Control from .lwsowner (unit, checkAccess)', () => {
 
     const control = await checkAccess({
       resourceUrl, resourcePath, isContainer: false, agentWebId: NON_OWNER, requiredMode: AccessMode.CONTROL,
+      lwsEnabled: true,
     });
     assert.equal(control.allowed, false, 'an agent absent from .lwsowner gets no implicit Control');
     assert.doesNotMatch(control.wacAllow, /control/, 'WAC-Allow must not advertise control to a non-owner');
@@ -92,6 +99,7 @@ describe('implicit owner Control from .lwsowner (unit, checkAccess)', () => {
 
     const { wacAllow } = await checkAccess({
       resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode: AccessMode.CONTROL,
+      lwsEnabled: true,
     });
     const userClause = (/user="([^"]*)"/.exec(wacAllow) || [, ''])[1].split(' ').filter(Boolean);
     assert.ok(userClause.includes('control'), `expected "control" in the user clause, got: ${wacAllow}`);
@@ -111,12 +119,15 @@ describe('implicit owner Control from .lwsowner (unit, checkAccess)', () => {
     await writeSelfExcludingAcl(resourceUrl, resourcePath, OTHER_OWNER);
 
     for (const requiredMode of [AccessMode.CONTROL, AccessMode.READ, AccessMode.WRITE]) {
-      const asPodOwner = await checkAccess({ resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode });
+      // lwsEnabled: true on both sides — this negative control is about the
+      // ABSENT .lwsowner file being a no-op, not about the --lws flag (that
+      // gate is proven separately in test/as-negative-controls.test.js).
+      const asPodOwner = await checkAccess({ resourceUrl, resourcePath, isContainer: false, agentWebId: pod.webId, requiredMode, lwsEnabled: true });
       // The control run: an agent who could never be an owner of anything.
       // Absent .lwsowner, the pod owner's result must be indistinguishable
       // from this agent's — proof the feature is a true no-op when the
       // sidecar doesn't exist.
-      const asNeverOwner = await checkAccess({ resourceUrl, resourcePath, isContainer: false, agentWebId: NON_OWNER, requiredMode });
+      const asNeverOwner = await checkAccess({ resourceUrl, resourcePath, isContainer: false, agentWebId: NON_OWNER, requiredMode, lwsEnabled: true });
       assert.deepEqual(asPodOwner, asNeverOwner, `mode=${requiredMode}: absent .lwsowner must not distinguish the pod owner`);
     }
   });
@@ -131,6 +142,7 @@ describe('implicit owner Control from .lwsowner (unit, checkAccess)', () => {
 
     const control = await checkAccess({
       resourceUrl, resourcePath, isContainer: false, agentWebId: OTHER_OWNER, requiredMode: AccessMode.CONTROL,
+      lwsEnabled: true,
     });
     assert.equal(control.allowed, true, 'the second .lwsowner entry must recover Control too, not just index 0');
   });
