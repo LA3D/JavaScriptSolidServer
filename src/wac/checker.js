@@ -7,6 +7,8 @@ import * as storage from '../storage/filesystem.js';
 import { parseAcl, AccessMode, AgentClass } from './parser.js';
 import { getAclUrl } from '../ldp/headers.js';
 import { readLedger, getBalance, debit } from '../webledger.js';
+import { storageRootFor } from '../lws/storage-resolver.js';
+import { readOwners } from '../lws/type-metadata.js';
 
 /**
  * Check if agent has required access mode for resource
@@ -52,6 +54,9 @@ export async function checkAccess({
   if (!aclResult) {
     // No ACL found - deny by default (restrictive mode)
     // Security: Require explicit ACL for any access
+    if (await isImplicitOwnerControl(resourceUrl, requiredMode, agentWebId)) {
+      return { allowed: true, wacAllow: 'user="control", public=""' };
+    }
     return { allowed: false, wacAllow: 'user="", public=""' };
   }
 
@@ -71,7 +76,37 @@ export async function checkAccess({
   // Calculate WAC-Allow header
   const wacAllow = calculateWacAllow(authorizations, resourceUrl, agentWebId, isDefault);
 
+  // Owner-lockout / SEC-1 F3 recovery (governance round, .lwsowner): deny-path
+  // only, Control-only. An owner locked out by a self-excluding ACL keeps
+  // Control so they can repair it; Read/Write/Append stay denied.
+  if (!result.allowed && await isImplicitOwnerControl(resourceUrl, requiredMode, agentWebId)) {
+    return { allowed: true, wacAllow: addControlToWacAllow(wacAllow) };
+  }
+
   return { allowed: result.allowed, wacAllow, paymentRequired: result.paymentRequired || null, paid: result.paid, balance: result.balance, currency: result.currency };
+}
+
+/**
+ * Implicit Control from a storage's `.lwsowner` roster — deny-path-only
+ * recovery for owner-lockout + SEC-1 F3. Never fires for Read/Write/Append,
+ * and never fires without an authenticated agent. Absent `.lwsowner` (no
+ * --lws, or a pod predating the governance round) means readOwners()
+ * resolves to `[]`, so this is a no-op — byte-identical to before.
+ */
+async function isImplicitOwnerControl(resourceUrl, requiredMode, agentWebId) {
+  if (requiredMode !== AccessMode.CONTROL || !agentWebId) return false;
+  const root = await storageRootFor(storage, new URL(resourceUrl).pathname);
+  if (!root) return false;
+  return (await readOwners(storage, root)).includes(agentWebId);
+}
+
+/** Add `control` to the `user="..."` clause of a WAC-Allow value. */
+function addControlToWacAllow(wacAllow) {
+  return wacAllow.replace(/user="([^"]*)"/, (_, modes) => {
+    const set = new Set(modes.split(' ').filter(Boolean));
+    set.add('control');
+    return `user="${Array.from(set).join(' ')}"`;
+  });
 }
 
 /**
