@@ -18,10 +18,30 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as jose from 'jose';
 import fs from 'fs-extra';
+import net from 'node:net';
 import { createServer as createNetServer } from 'net';
 import { createServer } from '../src/server.js';
+import { stashAsChallenge } from '../src/auth/middleware.js';
 
 const TEST_HOST = 'localhost';
+
+// Raw-socket request with a caller-controlled Host header — fetch() (and
+// even node:http's own client) normalize/validate the Host header before
+// send, so the only way to reproduce a genuinely malformed one on the wire
+// (the shape a misbehaving proxy or a hostile client could still send) is
+// to write the request line ourselves.
+function rawRequest(port, path, hostHeaderValue) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: TEST_HOST, port }, () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: ${hostHeaderValue}\r\nConnection: close\r\n\r\n`);
+    });
+    let data = '';
+    socket.on('data', (chunk) => { data += chunk.toString(); });
+    socket.on('error', reject);
+    socket.on('end', () => resolve(data));
+    socket.setTimeout(5000, () => { socket.destroy(); reject(new Error('rawRequest timed out')); });
+  });
+}
 
 async function getAvailablePort() {
   return new Promise((resolve, reject) => {
@@ -173,6 +193,109 @@ describe('WWW-Authenticate Bearer as_uri/realm challenge (--lws --lws-as on)', (
     const headRes = await fetch(`${alice.uri}private/`, { method: 'HEAD' });
     assert.equal(headRes.status, 401);
     assert.equal(headRes.headers.get('www-authenticate'), getRes.headers.get('www-authenticate'));
+  });
+
+  // ---- review fix (CRITICAL): a malformed Host header must never turn
+  // challenge construction into a 500. buildResourceUrl() concatenates
+  // request.headers.host into a URL string; a Host containing a space (or
+  // any other character illegal in a URL authority) makes `new URL(...)`
+  // throw for BOTH the primary (storage-root) attempt AND a naive
+  // same-host fallback — the fallback must not just retry the identical
+  // failing input. ------------------------------------------------------
+  it('malformed Host header never 500s on a private resource (AS on) -- degrades to a safe 401', async () => {
+    const raw = await rawRequest(port, '/aschalalice/private/', 'bad host');
+    const statusLine = raw.split('\r\n')[0];
+    assert.match(statusLine, /^HTTP\/1\.1 401\b/, `expected a clean 401, got: ${statusLine}`);
+    assert.doesNotMatch(raw, /HTTP\/1\.1 500/);
+  });
+});
+
+// ---- review fix (IMPORTANT): "presented and rejected" must not be
+// Authorization-header-only. WebID-TLS (client-cert auth) never sets an
+// Authorization header at all (src/auth/token.js:303-311 dispatches on
+// hasClientCertificate(), not headers.authorization) — a rejected cert was
+// falling through to the anonymous (no error param) branch. Exercised as a
+// direct unit test of stashAsChallenge() against synthetic request objects,
+// per the brief's fallback ("if exercising a real client cert is
+// impractical, unit-test the stash function directly with the states it
+// receives") — building a real mTLS handshake in this suite would be a
+// disproportionate amount of harness for what is fundamentally a pure
+// function of (webId, authError, headers, socket).
+describe('stashAsChallenge — presented-and-rejected mapping (unit)', () => {
+  let server, baseUrl, port;
+  const DATA_DIR = './test-data-as-challenge-unit';
+
+  before(async () => {
+    await fs.remove(DATA_DIR);
+    await fs.ensureDir(DATA_DIR);
+    port = await getAvailablePort();
+    baseUrl = `http://${TEST_HOST}:${port}`;
+    server = createServer({
+      logger: false,
+      root: DATA_DIR,
+      lws: true,
+      idp: true,
+      lwsAs: true,
+      idpIssuer: baseUrl,
+      podCreateRateLimitMax: 1000,
+      forceCloseConnections: true,
+    });
+    await server.listen({ port, host: TEST_HOST });
+  });
+
+  after(async () => {
+    await server.close();
+    await fs.remove(DATA_DIR);
+  });
+
+  // Minimal synthetic request shape matching what buildResourceUrl /
+  // storageRootFor / stashAsChallenge itself read.
+  function makeRequest({ authorization, cert = null } = {}) {
+    return {
+      headers: { host: `${TEST_HOST}:${port}`, authorization },
+      protocol: 'http',
+      hostname: TEST_HOST,
+      url: '/no-such-pod/private/',
+      subdomainsEnabled: false,
+      baseDomain: null,
+      podName: null,
+      lwsAsUri: baseUrl,
+      raw: { socket: { getPeerCertificate: cert ? () => cert : undefined } },
+    };
+  }
+
+  it('fully anonymous (no header, no cert, no authError) -> no error param', async () => {
+    const req = makeRequest();
+    await stashAsChallenge(req, req.url, null, null);
+    assert.equal(req._lwsChallenge.error, null);
+  });
+
+  it('Authorization header presented and rejected -> error=invalid_token (unchanged baseline case)', async () => {
+    const req = makeRequest({ authorization: 'Bearer garbage' });
+    await stashAsChallenge(req, req.url, null, 'Invalid token');
+    assert.equal(req._lwsChallenge.error, 'invalid_token');
+  });
+
+  it('WebID-TLS: a rejected client cert with NO Authorization header still -> error=invalid_token', async () => {
+    const req = makeRequest({ cert: { subject: { CN: 'someone' } } });
+    // No Authorization header at all -- this is exactly the WebID-TLS shape
+    // (src/auth/token.js resolveWebIdFromRequest reaches the cert branch
+    // only when authHeader is absent/falsy) -- authError is what
+    // resolveWebIdFromRequest actually returns on a failed cert.
+    await stashAsChallenge(req, req.url, null, 'WebID-TLS certificate verification failed');
+    assert.equal(req._lwsChallenge.error, 'invalid_token');
+  });
+
+  it('a cert was offered but webId/authError are both null (defensive) -> still treated as presented', async () => {
+    const req = makeRequest({ cert: { subject: { CN: 'someone' } } });
+    await stashAsChallenge(req, req.url, null, null);
+    assert.equal(req._lwsChallenge.error, 'invalid_token');
+  });
+
+  it('successful auth (webId resolved) -> no error param regardless of how it was presented', async () => {
+    const req = makeRequest({ authorization: 'Bearer whatever' });
+    await stashAsChallenge(req, req.url, 'https://alice.example/#me', null);
+    assert.equal(req._lwsChallenge.error, null);
   });
 });
 

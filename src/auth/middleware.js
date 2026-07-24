@@ -12,6 +12,7 @@ import { getEffectiveUrlPath, sidecarSubject, SIDECAR_SUFFIX } from '../utils/ur
 import { generateDatabrowserHtml, generateModuleDatabrowserHtml } from '../mashlib/index.js';
 import { resolveReferent } from '../lws/referent-resolver.js';
 import { storageRootFor } from '../lws/storage-resolver.js';
+import { hasClientCertificate } from './webid-tls.js';
 
 /**
  * Build a resource URL for WAC checking, normalizing path-based pod access
@@ -98,7 +99,7 @@ export async function authorize(request, reply, options = {}) {
   // function of the storage the URL lives under, not which branch handled
   // it. handleUnauthorized (sync, no storage access) reads this stash;
   // when absent (AS not configured) it falls back to today's exact header.
-  await stashAsChallenge(request, urlPath, webId);
+  await stashAsChallenge(request, urlPath, webId, authError);
 
   // ACL files require special handling - check Control permission on protected resource
   if (urlPath.endsWith('.acl')) {
@@ -257,41 +258,78 @@ export async function authorize(request, reply, options = {}) {
  * back to the deployment root (origin + '/') — no storage means no
  * mintable realm, but the header must still be well-formed.
  *
- * `error` is 'invalid_token' when an Authorization header was present and
- * resolution failed (webId stayed null) — anonymous requests (no header)
- * get no error param at all. This deliberately doesn't distinguish
- * malformed-presentation ('invalid_request') from a well-formed-but-
- * rejected credential; the LWS challenge grammar allows either, and every
- * presented-and-rejected case this middleware sees today (bad at+jwt
- * signature/aud/exp, unparseable Bearer, …) is honestly reportable as
- * invalid_token.
+ * `error` is 'invalid_token' when a credential was actually presented and
+ * resolution failed (webId stayed null) — anonymous requests get no error
+ * param at all. "Presented" is deliberately broader than "had an
+ * Authorization header": `authError` non-null already covers every
+ * dispatch branch in resolveWebIdFromRequest (src/auth/token.js) that ran
+ * and failed, INCLUDING WebID-TLS (client-cert auth), which never sets an
+ * Authorization header at all — it dispatches purely on
+ * hasClientCertificate(). We OR in the header check and a direct
+ * hasClientCertificate() probe too, defensively, so a future credential
+ * path that fails without populating `authError` still counts as
+ * "presented" rather than silently degrading to the anonymous (no error
+ * param) branch (review fix, 2026-07-24). This deliberately doesn't
+ * distinguish malformed-presentation ('invalid_request') from a
+ * well-formed-but-rejected credential; the LWS challenge grammar allows
+ * either, and every presented-and-rejected case this middleware sees today
+ * (bad at+jwt signature/aud/exp, unparseable Bearer, a rejected client
+ * cert, …) is honestly reportable as invalid_token.
+ *
+ * Challenge construction must NEVER throw out of authorize() — a malformed
+ * Host header (e.g. containing a raw space, the kind a hostile client can
+ * put on the wire even though fetch()/node:http's own client would refuse
+ * to send one) makes `new URL(...)` throw inside buildResourceUrl for BOTH
+ * the primary (storage-root) realm attempt and a naive same-host fallback,
+ * since both read the identical `request.headers.host`. The whole
+ * computation is wrapped in a try/catch that degrades to skipping the
+ * stash entirely on ANY failure — handleUnauthorized then falls back to
+ * its pre-task legacy header for that one request instead of a 500 (review
+ * fix, 2026-07-24: reviewer live-verified the 500 on a bad Host with AS
+ * on, clean 401 with AS off).
  *
  * @param {object} request - Fastify request
  * @param {string} urlPath - URL path (no query string)
  * @param {string|null} webId - Resolved WebID, or null if auth failed/absent
+ * @param {string|null} [authError] - Error from getWebIdFromRequestAsync,
+ *   if any (authorize() passes this straight through)
  */
-async function stashAsChallenge(request, urlPath, webId) {
+export async function stashAsChallenge(request, urlPath, webId, authError = null) {
   if (!request.lwsAsUri) return;
 
-  const asUri = request.lwsAsUri;
-  let realm;
   try {
-    const rootPath = await storageRootFor(storage, urlPath);
-    const target = new URL(buildResourceUrl(request, rootPath || '/'));
-    realm = `${target.origin}${target.pathname}`;
+    const asUri = request.lwsAsUri;
+
+    let realm;
+    try {
+      const rootPath = await storageRootFor(storage, urlPath);
+      const target = new URL(buildResourceUrl(request, rootPath || '/'));
+      realm = `${target.origin}${target.pathname}`;
+    } catch {
+      // Primary attempt failed -- try the deployment-root fallback
+      // independently rather than assuming it will succeed just because
+      // the primary did. If the Host itself is malformed, THIS throws too;
+      // let it propagate to the outer catch below, which skips the stash
+      // entirely instead of risking a second unhandled throw.
+      const target = new URL(buildResourceUrl(request, '/'));
+      realm = `${target.origin}${target.pathname}`;
+    }
+
+    const presented = webId === null && (
+      authError !== null || !!request.headers.authorization || hasClientCertificate(request)
+    );
+    const error = presented ? 'invalid_token' : null;
+
+    // Non-enumerable so it never leaks into logging/serialization of
+    // request (mirrors the `_lwsWebIdAuth` stash pattern in
+    // src/auth/token.js:237).
+    Object.defineProperty(request, '_lwsChallenge', {
+      value: { asUri, realm, error }, writable: true, enumerable: false, configurable: true,
+    });
   } catch {
-    const target = new URL(buildResourceUrl(request, '/'));
-    realm = `${target.origin}${target.pathname}`;
+    // Never let challenge construction fail the request. No stash ->
+    // handleUnauthorized falls back to the legacy header for this request.
   }
-
-  const presented = !!request.headers.authorization;
-  const error = webId === null && presented ? 'invalid_token' : null;
-
-  // Non-enumerable so it never leaks into logging/serialization of request
-  // (mirrors the `_lwsWebIdAuth` stash pattern in src/auth/token.js:237).
-  Object.defineProperty(request, '_lwsChallenge', {
-    value: { asUri, realm, error }, writable: true, enumerable: false, configurable: true,
-  });
 }
 
 /**
