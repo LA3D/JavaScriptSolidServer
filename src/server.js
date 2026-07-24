@@ -38,6 +38,7 @@ import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
+import { buildAsMetadata } from './lws/as-metadata.js';
 import { readOwners } from './lws/type-metadata.js';
 import { isAbsoluteUri } from './lws/type-index.js';
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
@@ -1407,6 +1408,24 @@ export function createServer(options = {}) {
       return reply.code(303).header('Location', `${origin}${voidPath}`).send();
     });
     for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/.well-known/void', methodNotAllowed);
+
+    // RFC 8414 AS metadata (2026-07-24 AS round, task 3) — --lws-as only.
+    // Anonymous: /.well-known/* is already globally WAC-bypassed above, and
+    // RFC 8414 metadata is meant to be fetched by anonymous clients
+    // validating a bearer token in the first place. Static: built once from
+    // lwsAsUri (the SAME issuer token-exchange.js signs into every minted
+    // at+jwt), not per-request state, so it's computed outside the handler.
+    if (lwsAsEnabled) {
+      const asMetadataPath = '/.well-known/lws-configuration';
+      const asMetadata = buildAsMetadata({ issuer: lwsAsUri });
+      fastify.get(asMetadataPath, async (request, reply) => {
+        reply.header('Cache-Control', 'public, max-age=3600');
+        return sendJsonWithEtag(request, reply, asMetadata);
+      });
+      // Read-only well-known resource — same write-reservation discipline
+      // as /.well-known/void and /.well-known/lws-storage just above.
+      for (const m of ['put', 'post', 'patch', 'delete']) fastify[m](asMetadataPath, methodNotAllowed);
+    }
 
     if (typeIndexEnabled) {
       // fastify.after() defers these two registrations until every plugin
