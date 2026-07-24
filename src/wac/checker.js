@@ -54,7 +54,7 @@ export async function checkAccess({
   if (!aclResult) {
     // No ACL found - deny by default (restrictive mode)
     // Security: Require explicit ACL for any access
-    if (await isImplicitOwnerControl(resourceUrl, requiredMode, agentWebId)) {
+    if (await isImplicitOwnerControl(resourcePath, requiredMode, agentWebId)) {
       return { allowed: true, wacAllow: 'user="control", public=""' };
     }
     return { allowed: false, wacAllow: 'user="", public=""' };
@@ -79,7 +79,7 @@ export async function checkAccess({
   // Owner-lockout / SEC-1 F3 recovery (governance round, .lwsowner): deny-path
   // only, Control-only. An owner locked out by a self-excluding ACL keeps
   // Control so they can repair it; Read/Write/Append stay denied.
-  if (!result.allowed && await isImplicitOwnerControl(resourceUrl, requiredMode, agentWebId)) {
+  if (!result.allowed && await isImplicitOwnerControl(resourcePath, requiredMode, agentWebId)) {
     return { allowed: true, wacAllow: addControlToWacAllow(wacAllow) };
   }
 
@@ -92,10 +92,22 @@ export async function checkAccess({
  * and never fires without an authenticated agent. Absent `.lwsowner` (no
  * --lws, or a pod predating the governance round) means readOwners()
  * resolves to `[]`, so this is a no-op — byte-identical to before.
+ *
+ * Takes `resourcePath` (the same storage-path value findApplicableAcl and
+ * every filesystem op in this module use), never `resourceUrl` — re-parsing
+ * the URL here would give storageRootFor a path derived independently of
+ * the one the actual ACL/storage lookups use, exactly the guard-vs-operation
+ * divergence class this codebase treats as a standing hazard (see
+ * canonicalPodPath's discipline in src/mcp/wac.js). `resourcePath` doubling
+ * as `storageRootFor`'s `urlPath` is safe: storageRootFor's own contract is
+ * "storage path == url path in --lws path mode", and subdomain mode (the
+ * one case where those two diverge) can never reach here — `--lws` and
+ * `--subdomains` are mutually exclusive at startup (src/server.js, ~line
+ * 172) and `.lwsowner` only exists under `--lws`.
  */
-async function isImplicitOwnerControl(resourceUrl, requiredMode, agentWebId) {
+async function isImplicitOwnerControl(resourcePath, requiredMode, agentWebId) {
   if (requiredMode !== AccessMode.CONTROL || !agentWebId) return false;
-  const root = await storageRootFor(storage, new URL(resourceUrl).pathname);
+  const root = await storageRootFor(storage, resourcePath);
   if (!root) return false;
   return (await readOwners(storage, root)).includes(agentWebId);
 }
