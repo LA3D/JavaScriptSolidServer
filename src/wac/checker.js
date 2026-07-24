@@ -7,6 +7,8 @@ import * as storage from '../storage/filesystem.js';
 import { parseAcl, AccessMode, AgentClass } from './parser.js';
 import { getAclUrl } from '../ldp/headers.js';
 import { readLedger, getBalance, debit } from '../webledger.js';
+import { storageRootFor } from '../lws/storage-resolver.js';
+import { readOwners } from '../lws/type-metadata.js';
 
 /**
  * Check if agent has required access mode for resource
@@ -24,6 +26,14 @@ import { readLedger, getBalance, debit } from '../webledger.js';
  *   Used by secondary/guard checks (e.g. the POST sidecar Control gate in
  *   handlePost) so a single request cannot debit twice or charge silently;
  *   the authoritative debit stays in the primary authorize() hook.
+ * @param {boolean} [options.lwsEnabled=false] - Whether this deployment has
+ *   `--lws` on. Gates the `.lwsowner`-driven implicit-Control recovery
+ *   (owner-lockout + SEC-1 F3, governance round): `.lwsowner` is written
+ *   unconditionally at pod creation, so without this flag the recovery
+ *   mechanism would be reachable even on an --lws-off deployment. Callers
+ *   with a fastify `request`/MCP `ctx` should pass
+ *   `request.lwsEnabled`/`ctx.lwsEnabled` through; the default is
+ *   fail-closed (no implicit grant).
  * @returns {Promise<{
  *   allowed: boolean,
  *   wacAllow: string,
@@ -44,7 +54,8 @@ export async function checkAccess({
   agentWebId,
   requiredMode,
   aclCache = null,
-  noDebit = false
+  noDebit = false,
+  lwsEnabled = false
 }) {
   // Find applicable ACL
   const aclResult = await findApplicableAcl(resourceUrl, resourcePath, isContainer, aclCache);
@@ -52,6 +63,9 @@ export async function checkAccess({
   if (!aclResult) {
     // No ACL found - deny by default (restrictive mode)
     // Security: Require explicit ACL for any access
+    if (await isImplicitOwnerControl(resourcePath, requiredMode, agentWebId, lwsEnabled)) {
+      return { allowed: true, wacAllow: 'user="control", public=""' };
+    }
     return { allowed: false, wacAllow: 'user="", public=""' };
   }
 
@@ -71,7 +85,58 @@ export async function checkAccess({
   // Calculate WAC-Allow header
   const wacAllow = calculateWacAllow(authorizations, resourceUrl, agentWebId, isDefault);
 
+  // Owner-lockout / SEC-1 F3 recovery (governance round, .lwsowner): deny-path
+  // only, Control-only. An owner locked out by a self-excluding ACL keeps
+  // Control so they can repair it; Read/Write/Append stay denied.
+  if (!result.allowed && await isImplicitOwnerControl(resourcePath, requiredMode, agentWebId, lwsEnabled)) {
+    return { allowed: true, wacAllow: addControlToWacAllow(wacAllow) };
+  }
+
   return { allowed: result.allowed, wacAllow, paymentRequired: result.paymentRequired || null, paid: result.paid, balance: result.balance, currency: result.currency };
+}
+
+/**
+ * Implicit Control from a storage's `.lwsowner` roster — deny-path-only
+ * recovery for owner-lockout + SEC-1 F3. Never fires for Read/Write/Append,
+ * and never fires without an authenticated agent.
+ *
+ * Explicitly gated on the caller-supplied `lwsEnabled` (default `false` in
+ * checkAccess — fail-closed). `.lwsowner` is written UNCONDITIONALLY by
+ * createPodStructure (src/handlers/container.js, pre-existing
+ * governance-round behavior) — NOT only under `--lws` as an earlier version
+ * of this comment claimed — so without this gate the recovery mechanism was
+ * live even on an --lws-off deployment, violating the AS round's global
+ * "--lws off is byte-identical" constraint (caught by
+ * test/as-negative-controls.test.js). Every real call site threads its own
+ * `request.lwsEnabled`/`ctx.lwsEnabled` through to checkAccess; a caller
+ * that doesn't pass it gets the safe default.
+ *
+ * Takes `resourcePath` (the same storage-path value findApplicableAcl and
+ * every filesystem op in this module use), never `resourceUrl` — re-parsing
+ * the URL here would give storageRootFor a path derived independently of
+ * the one the actual ACL/storage lookups use, exactly the guard-vs-operation
+ * divergence class this codebase treats as a standing hazard (see
+ * canonicalPodPath's discipline in src/mcp/wac.js). `resourcePath` doubling
+ * as `storageRootFor`'s `urlPath` is safe: storageRootFor's own contract is
+ * "storage path == url path in --lws path mode", and subdomain mode (the
+ * one case where those two diverge) can never reach here — `--lws` and
+ * `--subdomains` are mutually exclusive at startup (src/server.js, ~line
+ * 172), and this whole mechanism is now itself gated on `lwsEnabled`.
+ */
+async function isImplicitOwnerControl(resourcePath, requiredMode, agentWebId, lwsEnabled) {
+  if (!lwsEnabled || requiredMode !== AccessMode.CONTROL || !agentWebId) return false;
+  const root = await storageRootFor(storage, resourcePath);
+  if (!root) return false;
+  return (await readOwners(storage, root)).includes(agentWebId);
+}
+
+/** Add `control` to the `user="..."` clause of a WAC-Allow value. */
+function addControlToWacAllow(wacAllow) {
+  return wacAllow.replace(/user="([^"]*)"/, (_, modes) => {
+    const set = new Set(modes.split(' ').filter(Boolean));
+    set.add('control');
+    return `user="${Array.from(set).join(' ')}"`;
+  });
 }
 
 /**

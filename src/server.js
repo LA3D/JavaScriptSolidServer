@@ -38,6 +38,7 @@ import { registerErrorHandler } from './utils/error-handler.js';
 import { seedServerRoot } from './ui/server-root.js';
 import { assertProvisionKeysCompatible } from './keys/provision.js';
 import { buildStorageDescriptionFor, buildServerIndex, storageDescriptionContentType, resolveStorageDescriptionInputs } from './lws/storage-description.js';
+import { buildAsMetadata } from './lws/as-metadata.js';
 import { readOwners } from './lws/type-metadata.js';
 import { isAbsoluteUri } from './lws/type-index.js';
 import { makePodConfig, makePodConfigResolver } from './lws/pod-config.js';
@@ -171,6 +172,52 @@ export function createServer(options = {}) {
   if (lwsEnabled && subdomainsEnabled) {
     throw new Error('--lws cannot be combined with --subdomains yet: LWS resolves shape/alternate URLs in path mode only. Disable one of the two flags.');
   }
+  // Authorization-server role (2026-07-24 AS round): --lws-as only makes
+  // sense on a deployment that also speaks the LWS storage surface it
+  // authorizes into. loadConfig() already enforces this for the CLI/env
+  // path; re-check here so a direct createServer({ lwsAs: true }) caller
+  // (tests, embedders) gets the same fail-loud guarantee instead of a
+  // confusing 404 once the AS routes (later tasks) exist.
+  const lwsAsEnabled = options.lwsAs ?? false;
+  if (lwsAsEnabled && !lwsEnabled) {
+    throw new Error('--lws-as requires --lws (enable the LWS storage surface first, or drop --lws-as / JSS_LWS_AS)');
+  }
+  // --lws-as requires --idp (review fix, 2026-07-24): mirrors the loadConfig()
+  // check (src/config.js) for a direct createServer({ lwsAs: true }) caller —
+  // the token-exchange grant and the RFC 8414 metadata's advertised
+  // token_endpoint/jwks_uri both live inside idpPlugin; without idpEnabled
+  // this would serve a 200 metadata doc pointing at routes that don't exist.
+  if (lwsAsEnabled && !idpEnabled) {
+    throw new Error('--lws-as requires --idp (enable the built-in Identity Provider first, or drop --lws-as / JSS_LWS_AS)');
+  }
+  const lwsAsTtl = options.lwsAsTtl ?? defaults.lwsAsTtl;
+  // Effective trusted issuer: an explicit --lws-as-uri (validated the same
+  // way as --lws-provider — must be an absolute URI or it's dropped) else
+  // this deployment's own origin, since the fork IS the AS by default
+  // (Approach A, spec 2026-07-24). Stays null when the AS role is off so
+  // downstream code has one flag (lwsAsEnabled) to branch on.
+  let lwsAsUri = null;
+  if (lwsAsEnabled) {
+    const explicitAsUri = options.lwsAsUri ?? null;
+    if (explicitAsUri && isAbsoluteUri(explicitAsUri)) {
+      lwsAsUri = explicitAsUri;
+    } else {
+      if (explicitAsUri) {
+        console.warn(`[lws-pod] --lws-as-uri / JSS_LWS_AS_URI is not an absolute URI: ${JSON.stringify(explicitAsUri)} — falling back to the deployment origin`);
+      }
+      const protocol = options.ssl ? 'https' : 'http';
+      const host = options.host === '0.0.0.0' ? 'localhost' : (options.host || 'localhost');
+      const port = options.port || defaults.port;
+      lwsAsUri = idpIssuer?.replace(/\/$/, '') || `${protocol}://${host}:${port}`;
+    }
+  }
+  // Trusted-local direct bearer (2026-07-24 AS round, task 7 / final-review
+  // fix): default ON (today's behavior — every legacy IdP-issued bearer
+  // authenticates directly at the resource boundary), OFF-able for a
+  // public-rung deployment via --no-trusted-local-bearer / env. Threaded
+  // onto the request the same way as lwsAs/lwsAsUri above so
+  // src/auth/token.js can gate on it without importing config machinery.
+  const trustedLocalBearerEnabled = options.trustedLocalBearer ?? true;
   // Mashlib data browser is OFF by default
   // mashlibCdn: load from CDN; mashlibModule: URL to ES module entry point
   const mashlibModule = options.mashlibModule ?? false;
@@ -502,6 +549,16 @@ export function createServer(options = {}) {
   // route (below) reads the same flags off its own local closures.
   fastify.decorateRequest('mcpEnabled', null);
   fastify.decorateRequest('anonRateLimitMax', null);
+  // AS round (task 1): the AS role flag + its resolved effective trusted
+  // issuer, for the later challenge/token-validation tasks to read off the
+  // request the same way every other lws-* flag above does.
+  fastify.decorateRequest('lwsAs', null);
+  fastify.decorateRequest('lwsAsUri', null);
+  // Task 7 / final-review fix: the trusted-local-bearer switch, read by
+  // src/auth/token.js resolveWebIdFromRequest. Default-permissive (`null`)
+  // until the onRequest hook below sets the real value — see token.js for
+  // why a missing/`null` decoration means "treat as ON".
+  fastify.decorateRequest('trustedLocalBearer', null);
   fastify.addHook('onRequest', async (request) => {
     request.connegEnabled = connegEnabled;
     request.lwsEnabled = lwsEnabled;
@@ -525,6 +582,9 @@ export function createServer(options = {}) {
     request.singleUserName = singleUserName;
     request.mcpEnabled = mcpEnabled;
     request.anonRateLimitMax = anonRateLimitMax;
+    request.lwsAs = lwsAsEnabled;
+    request.lwsAsUri = lwsAsUri;
+    request.trustedLocalBearer = trustedLocalBearerEnabled;
     // A6: urlPath the SAME way getRequestPaths (resource.js/container.js)
     // derives it, so the resolved root always matches the resourceUrl those
     // handlers build from the same request.url — storageRootFor itself
@@ -638,6 +698,7 @@ export function createServer(options = {}) {
     fastify.register(idpPlugin, {
       issuer: idpIssuer, inviteOnly, singleUser, singleUserName, jssVersion,
       idpRateLimitMax,
+      lwsAs: lwsAsEnabled, lwsAsUri, lwsAsTtl,
     });
   }
 
@@ -1245,7 +1306,7 @@ export function createServer(options = {}) {
       // the MCP surface (src/mcp/resources.js) can call the SAME roster
       // helper without a fastify request to resolve identity from.
       const { webId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
-      const roots = await listVisibleStorageRoots(storage, { origin, webId });
+      const roots = await listVisibleStorageRoots(storage, { origin, webId, lwsEnabled });
       const body = buildServerIndex(origin, roots.map((root) => ({ root })),
         { typeIndexEnabled, mcpEnabled, anonRateLimitMax, provider: lwsProviderUri });
       return sendJsonWithEtag(request, reply, body);
@@ -1368,6 +1429,24 @@ export function createServer(options = {}) {
       return reply.code(303).header('Location', `${origin}${voidPath}`).send();
     });
     for (const m of ['put', 'post', 'patch', 'delete']) fastify[m]('/.well-known/void', methodNotAllowed);
+
+    // RFC 8414 AS metadata (2026-07-24 AS round, task 3) — --lws-as only.
+    // Anonymous: /.well-known/* is already globally WAC-bypassed above, and
+    // RFC 8414 metadata is meant to be fetched by anonymous clients
+    // validating a bearer token in the first place. Static: built once from
+    // lwsAsUri (the SAME issuer token-exchange.js signs into every minted
+    // at+jwt), not per-request state, so it's computed outside the handler.
+    if (lwsAsEnabled) {
+      const asMetadataPath = '/.well-known/lws-configuration';
+      const asMetadata = buildAsMetadata({ issuer: lwsAsUri });
+      fastify.get(asMetadataPath, async (request, reply) => {
+        reply.header('Cache-Control', 'public, max-age=3600');
+        return sendJsonWithEtag(request, reply, asMetadata);
+      });
+      // Read-only well-known resource — same write-reservation discipline
+      // as /.well-known/void and /.well-known/lws-storage just above.
+      for (const m of ['put', 'post', 'patch', 'delete']) fastify[m](asMetadataPath, methodNotAllowed);
+    }
 
     if (typeIndexEnabled) {
       // fastify.after() defers these two registrations until every plugin
@@ -1902,7 +1981,8 @@ export function createServer(options = {}) {
   // "no --lws-config given" (the `else` branch in the module) from "given",
   // not "given but unresolvable".
   fastify.log.info('\n' + formatCapabilityReport(
-    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled, lwsProvider: lwsProviderUri },
+    { lws: lwsEnabled, lwsTypeIndex: typeIndexEnabled, lwsProfileConneg: profileConnegEnabled, lwsConfig: options.lwsConfig ?? null, mcp: mcpEnabled, lwsProvider: lwsProviderUri,
+      lwsAs: lwsAsEnabled, lwsAsUri, lwsAsTtl, trustedLocalBearer: trustedLocalBearerEnabled },
     { configResolved: true }
   ));
 

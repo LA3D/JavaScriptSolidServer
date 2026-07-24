@@ -79,7 +79,7 @@ async function readSkills(ctx, uri) {
 // Reuses the roster helper verbatim so the two surfaces can't drift on which
 // storages a given requester is told about.
 async function readServerIndex(ctx, uri) {
-  const roots = await listVisibleStorageRoots(storage, { origin: ctx.origin, webId: ctx.webId });
+  const roots = await listVisibleStorageRoots(storage, { origin: ctx.origin, webId: ctx.webId, lwsEnabled: ctx.lwsEnabled });
   const idx = buildServerIndex(ctx.origin, roots.map((root) => ({ root })),
     { typeIndexEnabled: ctx.typeIndexEnabled, mcpEnabled: true, anonRateLimitMax: ctx.anonRateLimitMax, provider: ctx.lwsProvider ?? null });
   return jsonContents(uri, withInlineContext(idx), 'application/lws+json');
@@ -162,7 +162,7 @@ async function readContainerView(path, ctx, uri) {
   // keeps the upstream unfiltered listing") has an analogue here.
   const entries = await filterReadableEntries({
     entries: raw || [], containerUrl: buildUrl(ctx, path), containerStoragePath: path,
-    agentWebId: ctx.webId ?? null,
+    agentWebId: ctx.webId ?? null, lwsEnabled: ctx.lwsEnabled,
   });
   // Entry names are client-controlled — neutralize hidden chars before they
   // enter the model's context, then build via the shared HTTP builder.

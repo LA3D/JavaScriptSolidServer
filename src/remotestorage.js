@@ -144,7 +144,8 @@ export async function remoteStoragePlugin (fastify, options = {}) {
       resourcePath: sc.subject,
       isContainer: sc.isContainer,
       agentWebId: webId,
-      requiredMode: mode
+      requiredMode: mode,
+      lwsEnabled: request.lwsEnabled
     })
     if (allowed) return { authorized: true }
     // Reads 404 (never leak sidecar existence to a caller without access — matches the dotfile

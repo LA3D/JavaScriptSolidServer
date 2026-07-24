@@ -703,6 +703,7 @@ export async function handleGet(request, reply) {
       const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
       entries = await filterReadableEntries({
         entries: entries || [], containerUrl: resourceUrl, containerStoragePath: storagePath, agentWebId,
+        lwsEnabled: request.lwsEnabled,
       });
       // Task 10 (probe-#6 F2): visibility hash — an anon and an owner
       // listing of the same container must not share one strong ETag.
@@ -831,7 +832,7 @@ export async function handleGet(request, reply) {
       // '-navindex' suffix baked into listingEtag and this render choice
       // can never drift apart.
       if (willServeIndexView) {
-        const roots = await listVisibleStorageRoots(storage, { origin: originStr, webId: agentWebId });
+        const roots = await listVisibleStorageRoots(storage, { origin: originStr, webId: agentWebId, lwsEnabled: request.lwsEnabled });
         const indexHtml = renderServerIndexView({ origin: originStr, storages: roots.map((root) => ({ root })) });
         const indexHeaders = getAllHeaders({
           isContainer: true,
@@ -2170,6 +2171,7 @@ export async function handleHead(request, reply) {
         const { webId: agentWebId } = await getWebIdFromRequestAsync(request).catch(() => ({ webId: null }));
         entries = await filterReadableEntries({
           entries: entries || [], containerUrl: resourceUrl, containerStoragePath: storagePath, agentWebId,
+          lwsEnabled: request.lwsEnabled,
         });
         visKey = crypto.createHash('md5').update(entries.map(e => e.name).sort().join('\n')).digest('hex').slice(0, 8);
       }

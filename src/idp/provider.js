@@ -88,9 +88,16 @@ async function fetchClientDocument(clientId) {
 /**
  * Create and configure the OIDC provider
  * @param {string} issuer - The issuer URL (e.g., 'https://example.com')
+ * @param {object} [opts]
+ * @param {object[]} [opts.clients] - Statically-configured client metadata
+ *   (oidc-provider's `configuration.clients`), consumed once at
+ *   construction time (`initializeClients`, node_modules/oidc-provider/
+ *   lib/helpers/initialize_clients.js). Used by the lws-as round to
+ *   register the token-exchange grant's public client — see
+ *   src/idp/index.js.
  * @returns {Promise<Provider>} - Configured oidc-provider instance
  */
-export async function createProvider(issuer) {
+export async function createProvider(issuer, { clients = [] } = {}) {
   // Normalize to the trailing-slash form — the SAME normalization the
   // discovery handler applies to the `issuer` field of
   // /.well-known/openid-configuration (src/idp/index.js, "Ensure
@@ -111,6 +118,11 @@ export async function createProvider(issuer) {
 
     // Signing keys
     jwks,
+
+    // Statically-configured clients (lws-as round: the token-exchange
+    // grant's public client, when --lws-as is on). Empty array is a
+    // harmless no-op — initializeClients treats it the same as omitted.
+    clients,
 
     // Cookie configuration
     cookies: {

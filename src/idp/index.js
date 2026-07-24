@@ -31,6 +31,8 @@ import { handleExportAccount } from './export.js';
 import * as passkey from './passkey.js';
 import { addTrustedIssuer } from '../auth/solid-oidc.js';
 import { landingPage, accountDeletePage } from './views.js';
+import { GRANT_TYPE as TOKEN_EXCHANGE_GRANT_TYPE, PARAMS as TOKEN_EXCHANGE_PARAMS, makeTokenExchangeHandler } from './token-exchange.js';
+import * as storage from '../storage/filesystem.js';
 
 /**
  * IdP Fastify Plugin
@@ -49,9 +51,23 @@ import { landingPage, accountDeletePage } from './views.js';
  * @param {string} [options.jssVersion] - Server version, written
  *   into the export manifest for forensic / "what server made this"
  *   purposes. Defaults to 'unknown' inside the export handler.
+ * @param {boolean} [options.lwsAs=false] - Authorization-server role
+ *   (2026-07-24 AS round). When true, registers the RFC 8693
+ *   token-exchange grant (src/idp/token-exchange.js) plus its static
+ *   public client. When false, the token endpoint rejects the grant
+ *   exactly as before this round (unsupported_grant_type).
+ * @param {string|null} [options.lwsAsUri=null] - Effective issuer URI for
+ *   minted at+jwt access tokens and the static client's `client_id`
+ *   prefix. Required (non-null) for the AS role to actually activate —
+ *   see src/server.js, which always resolves one when lwsAs is on.
+ * @param {number} [options.lwsAsTtl=300] - Access-token lifetime in
+ *   seconds for the token-exchange grant.
  */
 export async function idpPlugin(fastify, options) {
-  const { issuer, inviteOnly = false, singleUser = false, singleUserName = null, jssVersion, idpRateLimitMax } = options;
+  const {
+    issuer, inviteOnly = false, singleUser = false, singleUserName = null, jssVersion, idpRateLimitMax,
+    lwsAs = false, lwsAsUri = null, lwsAsTtl = 300,
+  } = options;
   // idpRateLimitMax (optional) overrides every per-route brute-force cap below
   // with a single value. Left undefined in production, so each route keeps its
   // shipped max. Used by tests that legitimately exercise an endpoint many
@@ -68,8 +84,39 @@ export async function idpPlugin(fastify, options) {
   // Initialize signing keys
   await initializeKeys();
 
+  // lws-as round: when the AS role is on, register a static public client
+  // for the token-exchange grant BEFORE the provider is constructed —
+  // oidc-provider consumes configuration.clients once, at construction
+  // (initializeClients, node_modules/oidc-provider/lib/helpers/
+  // initialize_clients.js). token_endpoint_auth_method 'none' + no
+  // response_types is fine: this client never touches the authorization
+  // endpoint, only POSTs to /idp/token with the custom grant.
+  const lwsAsActive = lwsAs && !!lwsAsUri;
+  const staticClients = lwsAsActive
+    ? [{
+        client_id: `${lwsAsUri}/lws-as/public-client`,
+        token_endpoint_auth_method: 'none',
+        grant_types: [TOKEN_EXCHANGE_GRANT_TYPE],
+        response_types: [],
+      }]
+    : [];
+
   // Create the OIDC provider
-  const provider = await createProvider(issuer);
+  const provider = await createProvider(issuer, { clients: staticClients });
+
+  // Register the token-exchange grant itself. registerGrantType only adds
+  // to the provider's grantTypes Set / handler map — safe to call any time
+  // before the first request, well after the (synchronous) client-schema
+  // validation that happens lazily on first Client.find(). When lwsAs is
+  // off, the grant type is simply never registered, so oidc-provider's own
+  // supportedGrantTypeCheck rejects it exactly as before this round.
+  if (lwsAsActive) {
+    provider.registerGrantType(
+      TOKEN_EXCHANGE_GRANT_TYPE,
+      makeTokenExchangeHandler({ storage, issuer: lwsAsUri, ttl: lwsAsTtl }),
+      TOKEN_EXCHANGE_PARAMS,
+    );
+  }
 
   // Add error listener to catch internal oidc-provider errors
   provider.on('server_error', (ctx, err) => {

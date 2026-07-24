@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import { verifySolidOidc, hasSolidOidcAuth } from './solid-oidc.js';
 import { verifyLwsCidAuth, hasLwsCidAuth } from './lws-cid.js';
 import { verifyNostrAuth, hasNostrAuth } from './nostr.js';
+import { hasAsToken, verifyAsToken } from './as-token.js';
 import { webIdTlsAuth, hasClientCertificate } from './webid-tls.js';
 import { resolveTokenSecret } from './token-secret.js';
 
@@ -114,6 +115,27 @@ async function verifyJwtFromIdp(token) {
     // Dynamically import to avoid circular dependencies
     const { getPublicJwks } = await import('../idp/keys.js');
     const jose = await import('jose');
+
+    // Defense-in-depth (2026-07-24 AS round, review fix): at+jwt access
+    // tokens (src/auth/as-token.js) are a DIFFERENT credential class,
+    // scoped to a single storage root's `aud` — they must never be
+    // accepted as a generic IdP subject/bearer JWT. Dispatch order in
+    // resolveWebIdFromRequest already routes typ==='at+jwt' to
+    // verifyAsToken before this function is reached from there, but this
+    // function is ALSO called directly as a subject_token verifier by the
+    // token-exchange grant's IdP-JWT branch (src/idp/token-exchange.js).
+    // Without this check here, a holder of an at+jwt scoped to storage A
+    // could present it as subject_token and launder it into a freshly
+    // minted at+jwt for storage B, C, ... — this makes the scoping
+    // guarantee hold regardless of which caller reaches this function,
+    // not just the ones that happen to check dispatch order first.
+    try {
+      if (jose.decodeProtectedHeader(token)?.typ === 'at+jwt') {
+        return null;
+      }
+    } catch {
+      return null;
+    }
 
     const jwks = await getPublicJwks();
     if (!jwks || !jwks.keys || jwks.keys.length === 0) {
@@ -242,26 +264,62 @@ async function resolveWebIdFromRequest(request) {
       return verifyNostrAuth(request);
     }
 
+    // Try LWS Authorization at+jwt (RFC 8693 token-exchange output, AS
+    // round task 2/4). Detected by header shape (typ === 'at+jwt'), which
+    // never collides with LWS-CID (URL-shaped kid) or the opaque-kid IdP
+    // JWTs the Bearer fallback below handles — see test/as-token.test.js
+    // for the dispatch-ordering proof in both directions. A shape match
+    // here commits to this path: on failure (including --lws-as being
+    // off entirely) we return the rejection directly rather than falling
+    // through to the legacy Bearer path.
+    if (hasAsToken(request)) {
+      return verifyAsToken(request);
+    }
+
     // Fall back to Bearer tokens
     const token = extractToken(authHeader);
     if (token) {
-      // Try simple 2-part token first
-      const payload = verifyToken(token);
-      if (payload?.webId) {
-        return { webId: payload.webId, error: null };
-      }
-
-      // If 3-part JWT, verify against IdP's JWKS
-      const parts = token.split('.');
-      if (parts.length === 3) {
-        const jwtPayload = await verifyJwtFromIdp(token);
-        if (jwtPayload?.webId) {
-          return { webId: jwtPayload.webId, error: null };
+      // Trusted-local direct bearer (2026-07-24 AS round, task 7 /
+      // final-review fix): the two legacy paths below (simple 2-part HMAC
+      // token, 3-part IdP-issued JWT) authenticate directly at the
+      // resource boundary — the design spec's explicit, default-ON,
+      // operator-toggleable "trusted-local" credential class. When a
+      // deployment turns it OFF (--no-trusted-local-bearer /
+      // JSS_TRUSTED_LOCAL_BEARER=false), neither legacy path may
+      // authenticate; the caller falls through to the rejected result
+      // below, and the normal 401 challenge fires (forcing the RFC 8693
+      // token-exchange / at+jwt path — task 4 — instead). This never
+      // touches at+jwt (hasAsToken above already committed to a
+      // different branch), LWS-CID, Solid-OIDC, Nostr, or WebID-TLS —
+      // all dispatch earlier or in the WebID-TLS block below.
+      //
+      // Default-permissive when the decoration is absent or not exactly
+      // `false` (non-HTTP callers / bare-object test doubles that never
+      // went through the server.js onRequest hook) — the switch's OFF
+      // state is an explicit operator choice signaled by the decoration,
+      // not something to infer from a missing field.
+      const trustedLocalBearerEnabled = request.trustedLocalBearer !== false;
+      if (trustedLocalBearerEnabled) {
+        // Try simple 2-part token first
+        const payload = verifyToken(token);
+        if (payload?.webId) {
+          return { webId: payload.webId, error: null };
         }
-        return { webId: null, error: 'Invalid or unverifiable JWT token' };
+
+        // If 3-part JWT, verify against IdP's JWKS
+        const parts = token.split('.');
+        if (parts.length === 3) {
+          const jwtPayload = await verifyJwtFromIdp(token);
+          if (jwtPayload?.webId) {
+            return { webId: jwtPayload.webId, error: null };
+          }
+          return { webId: null, error: 'Invalid or unverifiable JWT token' };
+        }
+
+        return { webId: null, error: 'Invalid token' };
       }
 
-      return { webId: null, error: 'Invalid token' };
+      return { webId: null, error: 'Trusted-local direct bearer is disabled on this deployment; use RFC 8693 token exchange' };
     }
   }
 
@@ -282,3 +340,9 @@ async function resolveWebIdFromRequest(request) {
 
   return { webId: null, error: null };
 }
+
+// Re-export for the token-exchange grant (src/idp/token-exchange.js), which
+// needs to verify an IdP-issued JWT subject_token directly (as opposed to
+// the request-shaped getWebIdFromRequestAsync above). Resolves to
+// `{webId, iat, exp} | null` — see verifyJwtFromIdp above.
+export { verifyJwtFromIdp as verifyIdpJwt };
