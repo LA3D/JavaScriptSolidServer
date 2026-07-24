@@ -282,3 +282,9 @@ async function resolveWebIdFromRequest(request) {
 
   return { webId: null, error: null };
 }
+
+// Re-export for the token-exchange grant (src/idp/token-exchange.js), which
+// needs to verify an IdP-issued JWT subject_token directly (as opposed to
+// the request-shaped getWebIdFromRequestAsync above). Resolves to
+// `{webId, iat, exp} | null` — see verifyJwtFromIdp above.
+export { verifyJwtFromIdp as verifyIdpJwt };

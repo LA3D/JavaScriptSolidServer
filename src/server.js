@@ -676,6 +676,7 @@ export function createServer(options = {}) {
     fastify.register(idpPlugin, {
       issuer: idpIssuer, inviteOnly, singleUser, singleUserName, jssVersion,
       idpRateLimitMax,
+      lwsAs: lwsAsEnabled, lwsAsUri, lwsAsTtl,
     });
   }
 
