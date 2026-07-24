@@ -91,6 +91,15 @@ export async function authorize(request, reply, options = {}) {
   // Get WebID from token (supports both simple and Solid-OIDC tokens)
   const { webId, error: authError } = await getWebIdFromRequestAsync(request);
 
+  // Stash the conforming Bearer challenge fields (LWS Authorization, task 5)
+  // BEFORE any of the early-return branches below (.acl / sidecar / the
+  // main WAC path all funnel through their own `return` here) — every one
+  // of them can end in a 401 via handleUnauthorized, and the realm is a
+  // function of the storage the URL lives under, not which branch handled
+  // it. handleUnauthorized (sync, no storage access) reads this stash;
+  // when absent (AS not configured) it falls back to today's exact header.
+  await stashAsChallenge(request, urlPath, webId);
+
   // ACL files require special handling - check Control permission on protected resource
   if (urlPath.endsWith('.acl')) {
     return authorizeAclAccess(request, urlPath, method, webId, authError);
@@ -232,6 +241,60 @@ export async function authorize(request, reply, options = {}) {
 }
 
 /**
+ * Compute + stash the conforming Bearer challenge fields (LWS Authorization
+ * §token validation, 2026-07-24 AS round task 5) for handleUnauthorized to
+ * render on a 401. No-op — and no stash — when this deployment has no AS
+ * configured (`request.lwsAsUri` unset), so handleUnauthorized's fallback
+ * path (today's exact `DPoP realm="…", Bearer realm="…"` header) stays
+ * byte-identical for every deployment that hasn't opted into `--lws-as`.
+ *
+ * `realm` is the CANONICAL storage-root URL of the target resource —
+ * `storageRootFor` + `buildResourceUrl`, normalized through `new URL(...)`
+ * (origin + pathname) exactly like Task 4's `verifyAsToken` aud comparison,
+ * so a challenge realm and a minted token's `aud` are string-identical for
+ * the same storage (src/idp/token-exchange.js builds `aud` the same way:
+ * `${resUrl.origin}${rootPath}`). A target not under any storage root falls
+ * back to the deployment root (origin + '/') — no storage means no
+ * mintable realm, but the header must still be well-formed.
+ *
+ * `error` is 'invalid_token' when an Authorization header was present and
+ * resolution failed (webId stayed null) — anonymous requests (no header)
+ * get no error param at all. This deliberately doesn't distinguish
+ * malformed-presentation ('invalid_request') from a well-formed-but-
+ * rejected credential; the LWS challenge grammar allows either, and every
+ * presented-and-rejected case this middleware sees today (bad at+jwt
+ * signature/aud/exp, unparseable Bearer, …) is honestly reportable as
+ * invalid_token.
+ *
+ * @param {object} request - Fastify request
+ * @param {string} urlPath - URL path (no query string)
+ * @param {string|null} webId - Resolved WebID, or null if auth failed/absent
+ */
+async function stashAsChallenge(request, urlPath, webId) {
+  if (!request.lwsAsUri) return;
+
+  const asUri = request.lwsAsUri;
+  let realm;
+  try {
+    const rootPath = await storageRootFor(storage, urlPath);
+    const target = new URL(buildResourceUrl(request, rootPath || '/'));
+    realm = `${target.origin}${target.pathname}`;
+  } catch {
+    const target = new URL(buildResourceUrl(request, '/'));
+    realm = `${target.origin}${target.pathname}`;
+  }
+
+  const presented = !!request.headers.authorization;
+  const error = webId === null && presented ? 'invalid_token' : null;
+
+  // Non-enumerable so it never leaks into logging/serialization of request
+  // (mirrors the `_lwsWebIdAuth` stash pattern in src/auth/token.js:237).
+  Object.defineProperty(request, '_lwsChallenge', {
+    value: { asUri, realm, error }, writable: true, enumerable: false, configurable: true,
+  });
+}
+
+/**
  * Get parent container path
  */
 function getParentPath(path) {
@@ -257,7 +320,17 @@ export function handleUnauthorized(request, reply, isAuthenticated, wacAllow, au
   const realm = issuer || 'Solid';
 
   if (!isAuthenticated) {
-    reply.header('WWW-Authenticate', `DPoP realm="${realm}", Bearer realm="${realm}"`);
+    // LWS Authorization conforming challenge (task 5): when authorize()
+    // stashed challenge fields (AS configured for this deployment), the
+    // Bearer member becomes `Bearer as_uri="…", realm="…"[, error="…"]`
+    // instead of the legacy `Bearer realm="…"`. The DPoP member is
+    // untouched either way — this is additive (RFC 9110 allows multiple
+    // challenges in one WWW-Authenticate header).
+    const challenge = request._lwsChallenge;
+    const bearerMember = challenge
+      ? `Bearer as_uri="${challenge.asUri}", realm="${challenge.realm}"${challenge.error ? `, error="${challenge.error}"` : ''}`
+      : `Bearer realm="${realm}"`;
+    reply.header('WWW-Authenticate', `DPoP realm="${realm}", ${bearerMember}`);
   }
 
   // Check if browser wants HTML
