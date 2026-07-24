@@ -492,6 +492,16 @@ export async function loadConfig(cliOptions = {}, configFile = null) {
     throw new Error('--lws-as requires --lws (enable the LWS storage surface first, or drop --lws-as / JSS_LWS_AS)');
   }
 
+  // --lws-as requires --idp (review fix, 2026-07-24): the token-exchange
+  // grant is registered INSIDE idpPlugin (src/idp/index.js), and the
+  // RFC 8414 metadata document (task 3) advertises idpPlugin's own routes
+  // (token_endpoint, jwks_uri) as the AS's endpoints. Without --idp neither
+  // exists — --lws-as would serve a 200 metadata doc pointing at routes
+  // that 404/405. Same fail-fast rail as the --lws check above.
+  if (config.lwsAs && !config.idp) {
+    throw new Error('--lws-as requires --idp (enable the built-in Identity Provider first, or drop --lws-as / JSS_LWS_AS)');
+  }
+
   // Token-exchange TTL: malformed input (non-numeric, zero, negative) falls
   // back to the spec-RECOMMENDED default rather than propagating a bad
   // value into every minted access token's `exp` claim.

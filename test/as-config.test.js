@@ -49,7 +49,9 @@ describe('config — --lws-as requires --lws', () => {
   });
 
   it('loadConfig() accepts --lws-as together with --lws', async () => {
-    const cfg = await loadConfig({ lwsAs: true, lws: true }, null);
+    // idp: true — the --lws-as-requires--idp check (below) also gates this
+    // combo now; --lws alone is no longer sufficient to satisfy loadConfig.
+    const cfg = await loadConfig({ lwsAs: true, lws: true, idp: true }, null);
     assert.equal(cfg.lwsAs, true);
   });
 
@@ -66,8 +68,49 @@ describe('config — --lws-as requires --lws', () => {
     assert.match(r.stderr, /--lws-as requires --lws/);
   });
 
-  it('bin/jss.js start --lws --lws-as --print-config exits cleanly (0)', () => {
-    const r = runCli(['start', '--lws', '--lws-as', '--root', DATA_DIR, '--print-config']);
+  it('bin/jss.js start --lws --idp --lws-as --print-config exits cleanly (0)', () => {
+    // --idp: true — the --lws-as-requires--idp check (below) also gates
+    // this combo now; --lws alone is no longer sufficient.
+    const r = runCli(['start', '--lws', '--idp', '--lws-as', '--root', DATA_DIR, '--print-config']);
+    assert.equal(r.status, 0, `expected clean exit, got ${r.status}; stderr: ${r.stderr}`);
+  });
+});
+
+// ---- (a2) --lws-as requires --idp (review fix, 2026-07-24) --------------
+// A metadata document is useless (worse: misleading) if the endpoints it
+// advertises don't exist — --lws-as with --idp off would serve a 200
+// /.well-known/lws-configuration whose token_endpoint/jwks_uri 404/405
+// because idpPlugin (which owns those routes) never registers. Same
+// fail-fast rail as the --lws-as-requires--lws check above, at both layers
+// Task 1 enforced that one at (loadConfig + createServer).
+describe('config — --lws-as requires --idp', () => {
+  it('loadConfig() throws a clear error when --lws-as is set without --idp', async () => {
+    await assert.rejects(
+      () => loadConfig({ lwsAs: true, lws: true }, null),
+      /--lws-as requires --idp/
+    );
+  });
+
+  it('loadConfig() accepts --lws-as together with --lws and --idp', async () => {
+    const cfg = await loadConfig({ lwsAs: true, lws: true, idp: true }, null);
+    assert.equal(cfg.lwsAs, true);
+  });
+
+  it('createServer({ lwsAs: true, lws: true }) without idp throws the same fail-fast error', () => {
+    assert.throws(
+      () => createServer({ lwsAs: true, lws: true, root: DATA_DIR }),
+      /--lws-as requires --idp/
+    );
+  });
+
+  it('bin/jss.js start --lws --lws-as (no --idp) exits non-zero with a clear stderr error', () => {
+    const r = runCli(['start', '--lws', '--lws-as', '--root', DATA_DIR]);
+    assert.notEqual(r.status, 0, 'exit code should be non-zero');
+    assert.match(r.stderr, /--lws-as requires --idp/);
+  });
+
+  it('bin/jss.js start --lws --idp --lws-as --print-config exits cleanly (0)', () => {
+    const r = runCli(['start', '--lws', '--idp', '--lws-as', '--root', DATA_DIR, '--print-config']);
     assert.equal(r.status, 0, `expected clean exit, got ${r.status}; stderr: ${r.stderr}`);
   });
 });
@@ -83,9 +126,10 @@ describe('config — JSS_LWS_AS env matches the flag', () => {
 
   it('JSS_LWS_AS=true enables lwsAs the same as --lws-as', async () => {
     process.env[KEY] = 'true';
-    const cfgEnv = await loadConfig({ lws: true }, null);
+    // idp: true — lwsAs=true (env or flag) now also requires --idp.
+    const cfgEnv = await loadConfig({ lws: true, idp: true }, null);
     delete process.env[KEY];
-    const cfgFlag = await loadConfig({ lws: true, lwsAs: true }, null);
+    const cfgFlag = await loadConfig({ lws: true, idp: true, lwsAs: true }, null);
     assert.equal(cfgEnv.lwsAs, true);
     assert.equal(cfgEnv.lwsAs, cfgFlag.lwsAs);
   });
@@ -119,19 +163,33 @@ describe('server — lwsAsUri resolution + request decorations', () => {
   }
 
   it('defaults lwsAsUri to the deployment self-origin when --lws-as is on', async () => {
-    const captured = await captureDecorations({ lws: true, lwsAs: true, host: '127.0.0.1', port: 5799 });
+    // idp: true — createServer's --lws-as-requires--idp check (mirrors
+    // config.js) now also gates lwsAsEnabled, and idpPlugin itself
+    // hard-requires an issuer regardless of lwsAs — so idpIssuer must be
+    // set here too (it wasn't, pre-fix: this test exercised the OTHER
+    // self-origin fallback, `protocol://host:port` for an unset idpIssuer;
+    // that branch is unreachable now that --lws-as requires a real IdP,
+    // which always needs its own issuer — see bin/jss.js, which always
+    // resolves one). Set to the SAME self-origin the old fallback
+    // computed, so the observed lwsAsUri value is unchanged.
+    const captured = await captureDecorations({
+      lws: true, idp: true, idpIssuer: 'http://127.0.0.1:5799', lwsAs: true, host: '127.0.0.1', port: 5799,
+    });
     assert.equal(captured.lwsAs, true);
     assert.equal(captured.lwsAsUri, 'http://127.0.0.1:5799');
   });
 
   it('honors an explicit --lws-as-uri', async () => {
-    const captured = await captureDecorations({ lws: true, lwsAs: true, lwsAsUri: 'https://as.example' });
+    const captured = await captureDecorations({
+      lws: true, idp: true, idpIssuer: 'http://127.0.0.1:5797', lwsAs: true, lwsAsUri: 'https://as.example',
+    });
     assert.equal(captured.lwsAsUri, 'https://as.example');
   });
 
-  it('falls back to self-origin when --lws-as-uri is not an absolute URI', async () => {
+  it('falls back to idpIssuer when --lws-as-uri is not an absolute URI', async () => {
     const captured = await captureDecorations({
-      lws: true, lwsAs: true, lwsAsUri: 'not-a-uri', host: '127.0.0.1', port: 5798,
+      lws: true, idp: true, idpIssuer: 'http://127.0.0.1:5798', lwsAs: true, lwsAsUri: 'not-a-uri',
+      host: '127.0.0.1', port: 5798,
     });
     assert.equal(captured.lwsAsUri, 'http://127.0.0.1:5798');
   });
@@ -154,18 +212,18 @@ describe('config — lwsAsTtl', () => {
 
   it('defaults to 300', async () => {
     delete process.env[KEY];
-    const cfg = await loadConfig({ lws: true, lwsAs: true }, null);
+    const cfg = await loadConfig({ lws: true, idp: true, lwsAs: true }, null);
     assert.equal(cfg.lwsAsTtl, 300);
   });
 
   it('an explicit override (CLI-shaped number) is honored', async () => {
-    const cfg = await loadConfig({ lws: true, lwsAs: true, lwsAsTtl: 60 }, null);
+    const cfg = await loadConfig({ lws: true, idp: true, lwsAs: true, lwsAsTtl: 60 }, null);
     assert.equal(cfg.lwsAsTtl, 60);
   });
 
   it('JSS_LWS_AS_TTL coerces a numeric env string', async () => {
     process.env[KEY] = '120';
-    const cfg = await loadConfig({ lws: true, lwsAs: true }, null);
+    const cfg = await loadConfig({ lws: true, idp: true, lwsAs: true }, null);
     assert.equal(cfg.lwsAsTtl, 120);
     assert.equal(typeof cfg.lwsAsTtl, 'number');
   });
@@ -176,7 +234,7 @@ describe('config — lwsAsTtl', () => {
     const warnings = [];
     console.warn = (msg) => warnings.push(String(msg));
     try {
-      const cfg = await loadConfig({ lws: true, lwsAs: true }, null);
+      const cfg = await loadConfig({ lws: true, idp: true, lwsAs: true }, null);
       assert.equal(cfg.lwsAsTtl, 300);
       assert.ok(warnings.some((w) => /lws-as-ttl|LWS_AS_TTL/i.test(w)),
         `expected a warning about the bad TTL; got: ${JSON.stringify(warnings)}`);

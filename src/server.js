@@ -182,6 +182,14 @@ export function createServer(options = {}) {
   if (lwsAsEnabled && !lwsEnabled) {
     throw new Error('--lws-as requires --lws (enable the LWS storage surface first, or drop --lws-as / JSS_LWS_AS)');
   }
+  // --lws-as requires --idp (review fix, 2026-07-24): mirrors the loadConfig()
+  // check (src/config.js) for a direct createServer({ lwsAs: true }) caller —
+  // the token-exchange grant and the RFC 8414 metadata's advertised
+  // token_endpoint/jwks_uri both live inside idpPlugin; without idpEnabled
+  // this would serve a 200 metadata doc pointing at routes that don't exist.
+  if (lwsAsEnabled && !idpEnabled) {
+    throw new Error('--lws-as requires --idp (enable the built-in Identity Provider first, or drop --lws-as / JSS_LWS_AS)');
+  }
   const lwsAsTtl = options.lwsAsTtl ?? defaults.lwsAsTtl;
   // Effective trusted issuer: an explicit --lws-as-uri (validated the same
   // way as --lws-provider — must be an absolute URI or it's dropped) else
