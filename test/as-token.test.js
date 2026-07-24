@@ -20,6 +20,7 @@ import { createServer } from '../src/server.js';
 import { getJwks } from '../src/idp/keys.js';
 import { hasAsToken, verifyAsToken, _clearAsTokenCachesForTests } from '../src/auth/as-token.js';
 import { hasLwsCidAuth } from '../src/auth/lws-cid.js';
+import { verifyIdpJwt } from '../src/auth/token.js';
 
 const TEST_HOST = 'localhost';
 const DATA_DIR = './test-data-as-token';
@@ -270,6 +271,60 @@ describe('at+jwt RS validation (src/auth/as-token.js)', () => {
     assert.equal(webId, ownerWebId);
   });
 
+  // ---- review fix: aud comparison must normalize both sides through URL
+  // parsing, not byte-compare raw strings -----------------------------
+  describe('aud comparison normalizes host (review fix)', () => {
+    it('an explicit default port on the verify-side Host still matches a mint-side aud with no port', async () => {
+      // Mint side (token-exchange.js) builds aud from `new URL(resource).origin`,
+      // which strips a default port. Simulate that here: aud carries no
+      // port even though the deployment's own origin normally would
+      // (http default is 80) -- e.g. `http://localhost/aspod/` rather
+      // than `http://localhost:80/aspod/`.
+      const token = await mint(
+        validPayload({ aud: 'http://localhost/aspod/', iss: baseUrl }),
+        validHeader(),
+        signingKey.privateKey,
+      );
+      // Verify side: a proxy/client that explicitly names the default
+      // port in the Host header. buildResourceUrl would previously
+      // byte-compare `http://localhost:80/aspod/` against the aud above
+      // and false-reject even though they name the same resource.
+      const req = makeRequest({ token, url: '/aspod/private/' });
+      req.headers.host = 'localhost:80';
+      const { webId, error } = await verifyAsToken(req);
+      assert.equal(error, null, `expected default-port Host to still match, got: ${error}`);
+      assert.equal(webId, ownerWebId);
+    });
+
+    it('a case-variant Host header still matches a mint-side aud (host is case-insensitive)', async () => {
+      const token = await mint(
+        validPayload({ aud: aspodUri }),
+        validHeader(),
+        signingKey.privateKey,
+      );
+      const req = makeRequest({ token, url: '/aspod/private/' });
+      // Host headers are case-insensitive; a proxy or client may present
+      // a different case than the pod's own canonical lowercase host.
+      req.headers.host = req.headers.host.toUpperCase();
+      const { webId, error } = await verifyAsToken(req);
+      assert.equal(error, null, `expected case-variant Host to still match, got: ${error}`);
+      assert.equal(webId, ownerWebId);
+    });
+  });
+
+  // ---- review fix: jose's built-in `typ` option is the real defense,
+  // not just hasAsToken's pre-dispatch filter --------------------------
+  it('verifyAsToken independently rejects a non-at+jwt typ header, even called directly', async () => {
+    const token = await mint(
+      validPayload(),
+      { alg: signingKey.alg, kid: signingKey.kid, typ: 'JWT' },
+      signingKey.privateKey,
+    );
+    const { webId, error } = await verifyAsToken(makeRequest({ token }));
+    assert.equal(webId, null);
+    assert.ok(error, 'expected a typ-mismatch rejection');
+  });
+
   // ---- real end-to-end: mint via /idp/token, validate via a real GET --
   it('a real token-exchange-minted at+jwt authenticates a real GET on the RS path', async () => {
     const clientId = `${baseUrl}/lws-as/public-client`;
@@ -398,6 +453,119 @@ describe('at+jwt RS validation (src/auth/as-token.js)', () => {
       const oldAgain = await verifyAsToken(reqA);
       assert.equal(oldAgain.webId, null);
       assert.ok(oldAgain.error, 'old key must be rejected post-rotation');
+    });
+  });
+
+  // ---- review fix: don't transparently follow a redirect off the
+  // issuer's metadata URL (matches jose's own RemoteJWKSet hardening).
+  //
+  // The redirect target is a SECOND, reachable mock server that serves
+  // genuinely valid (attacker-controlled) metadata + JWKS — not an
+  // unreachable hostname. That's deliberate: a redirect to a dead host
+  // would fail either way (followed-and-DNS-error, or blocked), which
+  // wouldn't distinguish "the redirect was blocked" from "the redirect
+  // was followed but happened to fail for an unrelated reason". Making
+  // the target actually work if followed is what turns this into a real
+  // security assertion: if `redirect: 'manual'` regresses back to
+  // default (follow) behavior, this test would flip to the attacker's
+  // token verifying SUCCESSFULLY (the exact vulnerability), not just
+  // erroring out.
+  describe('remote metadata fetch does not follow redirects (review fix)', () => {
+    let trustedServer, trustedBaseUrl;
+    let attackerServer, attackerBaseUrl, attackerJwks;
+
+    before(async () => {
+      attackerServer = http.createServer((req, res) => {
+        if (req.url === '/.well-known/lws-configuration') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ issuer: attackerBaseUrl, jwks_uri: `${attackerBaseUrl}/jwks-endpoint` }));
+        } else if (req.url === '/jwks-endpoint') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(attackerJwks));
+        } else {
+          res.writeHead(404);
+          res.end();
+        }
+      });
+      const attackerPort = await new Promise((resolve) => {
+        attackerServer.listen(0, '127.0.0.1', () => resolve(attackerServer.address().port));
+      });
+      attackerBaseUrl = `http://127.0.0.1:${attackerPort}`;
+
+      // The TRUSTED issuer (what request.lwsAsUri actually points at):
+      // its metadata endpoint redirects to the attacker's.
+      trustedServer = http.createServer((req, res) => {
+        if (req.url === '/.well-known/lws-configuration') {
+          res.writeHead(302, { Location: `${attackerBaseUrl}/.well-known/lws-configuration` });
+          res.end();
+        } else {
+          res.writeHead(404);
+          res.end();
+        }
+      });
+      const trustedPort = await new Promise((resolve) => {
+        trustedServer.listen(0, '127.0.0.1', () => resolve(trustedServer.address().port));
+      });
+      trustedBaseUrl = `http://127.0.0.1:${trustedPort}`;
+    });
+
+    after(async () => {
+      await new Promise((resolve) => trustedServer.close(resolve));
+      await new Promise((resolve) => attackerServer.close(resolve));
+    });
+
+    it('a redirecting metadata endpoint is rejected, not silently followed to attacker-controlled keys', async () => {
+      _clearAsTokenCachesForTests();
+
+      const { publicKey, privateKey } = await jose.generateKeyPair('ES256', { extractable: true });
+      const jwk = await jose.exportJWK(publicKey);
+      jwk.kid = 'attacker-key';
+      jwk.alg = 'ES256';
+      attackerJwks = { keys: [jwk] };
+
+      // Signed by the ATTACKER's key, but `iss` names the real trusted
+      // issuer (trustedBaseUrl) — exactly what a holder of the attacker's
+      // key would present if the redirect were silently followed.
+      const token = await mint(
+        validPayload({ aud: aspodUri, iss: trustedBaseUrl }),
+        { alg: 'ES256', kid: 'attacker-key', typ: 'at+jwt' },
+        privateKey,
+      );
+      const { webId, error } = await verifyAsToken(makeRequest({ token, lwsAsUri: trustedBaseUrl }));
+      assert.equal(webId, null, 'the attacker-controlled key must never be reached via a followed redirect');
+      assert.ok(error, 'expected the redirect to be rejected rather than followed');
+    });
+  });
+
+  // ---- review fix (cross-task security): token laundering through the
+  // token-exchange grant — an at+jwt scoped to storage A must not be
+  // usable as a token-exchange subject_token to mint a fresh at+jwt for
+  // storage B, C, ... ---------------------------------------------------
+  describe('token laundering defense (at+jwt as a subject_token)', () => {
+    it('verifyIdpJwt (the Bearer-fallback / subject-token verifier) rejects an at+jwt directly', async () => {
+      const token = await mint(validPayload(), validHeader(), signingKey.privateKey);
+      const result = await verifyIdpJwt(token);
+      assert.equal(result, null, 'an at+jwt must never be accepted as a generic IdP JWT');
+    });
+
+    it('the token-exchange grant rejects an at+jwt presented as subject_token -> 400 invalid_grant', async () => {
+      // A real at+jwt, already scoped to aspod (as if minted for storage A).
+      const launderToken = await mint(validPayload({ aud: aspodUri }), validHeader(), signingKey.privateKey);
+
+      const res = await fetch(`${baseUrl}/idp/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+          subject_token: launderToken,
+          subject_token_type: 'urn:ietf:params:oauth:token-type:jwt',
+          resource: otherpodUri,
+          client_id: `${baseUrl}/lws-as/public-client`,
+        }).toString(),
+      });
+      const body = await res.json();
+      assert.equal(res.status, 400, `expected the exchange to reject the at+jwt subject_token: ${JSON.stringify(body)}`);
+      assert.equal(body.error, 'invalid_grant');
     });
   });
 });

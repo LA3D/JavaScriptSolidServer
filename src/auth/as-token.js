@@ -69,7 +69,12 @@ async function resolveRemoteKeyset(issuer) {
   if (_remoteKeysets.has(issuer)) return _remoteKeysets.get(issuer);
   const promise = (async () => {
     const base = issuer.endsWith('/') ? issuer.slice(0, -1) : issuer;
-    const metaRes = await fetch(`${base}/.well-known/lws-configuration`);
+    // redirect: 'manual' mirrors jose's own RemoteJWKSet fetchJwks() —
+    // don't transparently follow a redirect off the trusted issuer's
+    // metadata URL to some other host. A manual-mode redirect response
+    // has ok:false (opaqueredirect / 3xx), so it falls into the same
+    // rejection branch below as any other non-200.
+    const metaRes = await fetch(`${base}/.well-known/lws-configuration`, { redirect: 'manual' });
     if (!metaRes.ok) {
       throw new Error(`AS metadata fetch failed (${metaRes.status}) for issuer ${issuer}`);
     }
@@ -134,22 +139,24 @@ export async function verifyAsToken(request) {
     return { webId: null, error: `unable to resolve issuer signing keys: ${err.message}` };
   }
 
-  let payload, protectedHeader;
+  let payload;
   try {
-    ({ payload, protectedHeader } = await jose.jwtVerify(token, keyset, {
+    // `typ: 'at+jwt'` is jose's own JWT-profile header check (jose's
+    // JWTClaimVerificationOptions.typ — verified against
+    // node_modules/jose/dist/webapi/lib/jwt_claims_set.js: it requires
+    // protectedHeader.typ to be present and match, case-insensitively,
+    // with an implicit "application/" prefix). hasAsToken already
+    // filtered on this before dispatch, but verifyAsToken is
+    // independently exported/testable, so it re-checks rather than
+    // trusting the caller — this is that re-check, done by jose itself
+    // instead of a manual post-verify comparison.
+    ({ payload } = await jose.jwtVerify(token, keyset, {
       issuer,
+      typ: 'at+jwt',
       clockTolerance: CLOCK_TOLERANCE,
     }));
   } catch (err) {
     return { webId: null, error: `at+jwt verification failed: ${err.message}` };
-  }
-
-  // jose has no `typ`-verification option (see jose's JWTVerifyOptions) —
-  // check the JWT-profile header ourselves. hasAsToken already filtered on
-  // this before dispatch, but verifyAsToken is independently exported /
-  // testable, so it re-checks rather than trusting the caller.
-  if (protectedHeader.typ !== 'at+jwt') {
-    return { webId: null, error: 'not an at+jwt (typ header mismatch)' };
   }
 
   // jose's exp/nbf checks apply clockTolerance, but it doesn't reject a
@@ -180,8 +187,27 @@ export async function verifyAsToken(request) {
     return { webId: null, error: 'target resource is not under any storage root' };
   }
   const expectedAud = buildResourceUrl(request, rootPath);
-  if (aud !== expectedAud) {
-    return { webId: null, error: `at+jwt aud does not match the target storage root (expected ${expectedAud})` };
+  // Compare through URL, not as raw strings (review fix): the mint side
+  // (src/idp/token-exchange.js) builds `aud` from `resUrl.origin` — a
+  // parsed URL's origin, which URL() already lowercases the host on and
+  // strips a default port (:80 for http, :443 for https) from. The verify
+  // side's `expectedAud` comes from buildResourceUrl(), which concatenates
+  // `request.protocol`/`request.headers.host` as raw strings — a Host
+  // header with an explicit default port (`localhost:80`) or a different
+  // case (`LocalHost`) would byte-compare unequal to the mint side's
+  // normalized form even though they name the same resource, false-
+  // rejecting a legitimate token behind a proxy that rewrites Host that
+  // way. Parsing both through URL() before comparing origin+pathname
+  // normalizes both sides the same way the mint side already does.
+  let expectedAudUrl, presentedAudUrl;
+  try {
+    expectedAudUrl = new URL(expectedAud);
+    presentedAudUrl = new URL(aud);
+  } catch (err) {
+    return { webId: null, error: `at+jwt aud is not a valid URI: ${err.message}` };
+  }
+  if (expectedAudUrl.origin !== presentedAudUrl.origin || expectedAudUrl.pathname !== presentedAudUrl.pathname) {
+    return { webId: null, error: `at+jwt aud does not match the target storage root (expected ${expectedAudUrl.href})` };
   }
 
   if (typeof payload.sub !== 'string' || !payload.sub) {

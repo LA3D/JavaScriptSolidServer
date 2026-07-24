@@ -116,6 +116,27 @@ async function verifyJwtFromIdp(token) {
     const { getPublicJwks } = await import('../idp/keys.js');
     const jose = await import('jose');
 
+    // Defense-in-depth (2026-07-24 AS round, review fix): at+jwt access
+    // tokens (src/auth/as-token.js) are a DIFFERENT credential class,
+    // scoped to a single storage root's `aud` — they must never be
+    // accepted as a generic IdP subject/bearer JWT. Dispatch order in
+    // resolveWebIdFromRequest already routes typ==='at+jwt' to
+    // verifyAsToken before this function is reached from there, but this
+    // function is ALSO called directly as a subject_token verifier by the
+    // token-exchange grant's IdP-JWT branch (src/idp/token-exchange.js).
+    // Without this check here, a holder of an at+jwt scoped to storage A
+    // could present it as subject_token and launder it into a freshly
+    // minted at+jwt for storage B, C, ... — this makes the scoping
+    // guarantee hold regardless of which caller reaches this function,
+    // not just the ones that happen to check dispatch order first.
+    try {
+      if (jose.decodeProtectedHeader(token)?.typ === 'at+jwt') {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+
     const jwks = await getPublicJwks();
     if (!jwks || !jwks.keys || jwks.keys.length === 0) {
       return null;
